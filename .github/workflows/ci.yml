@@ -1,0 +1,123 @@
+name: Rust checks
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  RUST_TEST_THREADS: "1"
+
+concurrency:
+  group: rust-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@d5e4d57b030548f435d0befec15ff413a2c60eff # 1.100.0
+        with:
+          toolchain: 1.100.0
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Prepare Linux fixture directory
+        if: runner.os == 'Linux'
+        run: test -d /private/tmp || sudo -n install -d -m 1777 /private/tmp
+      - run: cargo fetch --locked
+      - name: Formatting
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --all-features --locked --offline -- -D warnings
+      - name: All target tests
+        run: cargo test --workspace --all-targets --all-features --locked --offline
+      - name: Documentation tests
+        run: cargo test --workspace --doc --all-features --locked --offline
+
+  quality:
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@d5e4d57b030548f435d0befec15ff413a2c60eff # 1.100.0
+        with:
+          toolchain: 1.100.0
+          components: llvm-tools-preview
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        with:
+          tool: cargo-deny@0.20.2,cargo-llvm-cov@0.9.1,typos@1.52.1,taplo@0.10.0
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Prepare dependencies and security data
+        run: |
+          cargo fetch --locked
+          cargo deny fetch db
+      - name: Public source hygiene
+        run: python3 -B tools/check_public_source.py
+      - name: Spelling
+        run: typos
+      - name: TOML formatting and syntax
+        shell: bash
+        run: |
+          git ls-files -z -- '*.toml' | xargs -0 taplo fmt --check
+          git ls-files -z -- '*.toml' | xargs -0 taplo check
+      - name: Dependency advisories, sources, and licenses
+        run: cargo deny --all-features --offline --locked check
+      - name: Coverage validator negative controls
+        run: python3 -B -m unittest discover -s tools/tests -v
+      - name: Coverage policy
+        shell: bash
+        run: |
+          mkdir -p target/coverage
+          cargo llvm-cov --no-report --workspace --lib --bins --all-features --locked --offline
+          RUST_TEST_THREADS=4 cargo llvm-cov --no-report --workspace --test cli --all-features --locked --offline
+          cargo llvm-cov report --json --summary-only --output-path target/coverage/workspace.json
+          python3 -B tools/check_coverage.py target/coverage/workspace.json --output target/coverage/gate.json
+      - name: Coverage artifact
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: workspace-coverage
+          path: target/coverage/workspace.json
+          if-no-files-found: error
+
+  release:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [checks, quality]
+    runs-on: macos-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@d5e4d57b030548f435d0befec15ff413a2c60eff # 1.100.0
+        with:
+          toolchain: 1.100.0
+      - name: Build and package the tagged commit
+        shell: bash
+        run: |
+          test "$(uname -m)" = arm64
+          git merge-base --is-ancestor HEAD origin/main
+          cargo fetch --locked
+          cargo build --release --locked --offline
+          bash tools/package_release.sh "$GITHUB_REF_NAME" target/release/macops "$RUNNER_TEMP/macops-release"
+      - name: Publish GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --verify-tag --title "macops $GITHUB_REF_NAME" --notes-from-tag "$RUNNER_TEMP/macops-release/macops-$GITHUB_REF_NAME-darwin-arm64.tar.gz" "$RUNNER_TEMP/macops-release/SHA256SUMS"

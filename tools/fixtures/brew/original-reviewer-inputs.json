@@ -1,0 +1,10 @@
+{
+  "program": {
+    "BrewNative.tla": "01c44b86d17949a0f6c2788275ec3aeee2783c55328bb6953b3d2bc951382d1d",
+    "check.cfg": "48c46e5c60a76678b3d9304573eb2c01cc99e6f8becb1f35626a6ae02ca116f0"
+  },
+  "cellar": {
+    "BrewNative.tla": "1c1a021ad54d8a48109a361ff17e6520938f2a7426753057410bbe93dd2c917a",
+    "check.cfg": "2fd787a2ccc471c7ede7d17fdf6ecd46cbb0a24a2d3540887f18373213f7c1d0"
+  }
+}

@@ -1,0 +1,11 @@
+/target/
+/artifacts/
+/.worktrees/
+.DS_Store
+__pycache__/
+*.pyc
+*.profraw
+/.cursor/
+/.claude/
+.env
+.env.*
