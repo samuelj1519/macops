@@ -460,14 +460,14 @@ fn candidate(ctx: &Context, id: &str) -> Result<Option<crate::domain::Package>> 
     Ok(catalog.select(id).ok().cloned())
 }
 fn unbound_formula(
-    cli: &crate::cli::Cli,
+    dry_run: bool,
     package: &crate::domain::Package,
 ) -> Result<Option<serde_json::Value>> {
     if matches!(
         package.provider,
         crate::domain::Provider::Brew { cask: false, .. }
     ) {
-        if cli.dry_run {
+        if dry_run {
             return Ok(Some(
                 serde_json::json!({"mode":"dry-run","backend":"brew-native","id":package.id,"target":null,"unresolved":true,"reason":"brew_context_binding_required","nativeRuns":0,"persistentWrites":false}),
             ));
@@ -490,8 +490,8 @@ fn confirm_action(view: &policy::BrewPlan<'_>, yes: bool) -> Result<()> {
     confirm_scope(
         view.query,
         &format!(
-            "确认已核验的Native作用范围：action={:?} execution={:?} selected_versions={versions:?}",
-            view.plan.action, view.data.execution
+            "确认已核验的Native作用范围：action={:?} execution={:?} target={:?} selected_versions={versions:?}",
+            view.plan.action, view.data.execution, view.plan.target
         ),
         yes,
     )
@@ -519,9 +519,9 @@ fn record_writer_scope(ctx: &Context, store: &Store, view: &policy::BrewPlan<'_>
         .insert(view.query.binding.context_id.clone(), confirmed);
     persist(store, &registry)
 }
-fn check_version_request(cli: &crate::cli::Cli) -> Result<()> {
+fn check_version_request(command: &crate::cli::Command) -> Result<()> {
     if matches!(
-        &cli.command,
+        command,
         crate::cli::Command::Install {
             version: Some(_),
             ..
@@ -538,14 +538,93 @@ fn check_version_request(cli: &crate::cli::Cli) -> Result<()> {
     Ok(())
 }
 pub fn public_command(ctx: &Context, cli: &crate::cli::Cli) -> Result<Option<serde_json::Value>> {
-    use serde_json::json;
-    let Some((id, doctor)) = targeted(&cli.command) else {
+    route_command(ctx, &cli.command, cli.dry_run, cli.yes, None)
+}
+
+pub(crate) fn execute_confirmed(
+    ctx: &Context,
+    selected: &crate::domain::Package,
+    action: crate::domain::Action,
+) -> Result<serde_json::Value> {
+    use crate::{cli::Command, domain::Action};
+    let id = selected.id.clone();
+    let command = match action {
+        Action::Install => Command::Install { id, version: None },
+        Action::Upgrade => Command::Upgrade { id, version: None },
+        Action::Uninstall => Command::Uninstall { id },
+        Action::Adopt => Command::Adopt {
+            id,
+            bind_recipe: false,
+        },
+        _ => return Err(native_invalid()),
+    };
+    route_command(ctx, &command, false, false, Some(selected))?.ok_or_else(native_invalid)
+}
+
+fn selected_recipe(
+    ctx: &Context,
+    command: &crate::cli::Command,
+    selected: Option<&crate::domain::Package>,
+) -> Result<Option<(crate::domain::Package, bool)>> {
+    let Some((id, doctor)) = targeted(command) else {
         return Ok(None);
     };
+    if let Some(expected) = selected {
+        let catalog = crate::inventory::declared_catalog(ctx)?;
+        let requested = action(command);
+        let receipts = if requested == crate::domain::Action::Install {
+            crate::domain::Receipts::default()
+        } else {
+            crate::target::receipts(ctx)?
+        };
+        require_selected_recipe(&catalog, &receipts, expected, requested)?;
+        return Ok(Some((expected.clone(), doctor)));
+    }
     let Some(package) = candidate(ctx, id)? else {
         return Ok(None);
     };
-    if let Some(value) = unbound_formula(cli, &package)? {
+    Ok(Some((package, doctor)))
+}
+
+fn require_selected_recipe(
+    catalog: &crate::domain::Catalog,
+    receipts: &crate::domain::Receipts,
+    expected: &crate::domain::Package,
+    action: crate::domain::Action,
+) -> Result<()> {
+    let stale = || Error::attention("plan_stale", "已选择的 Homebrew 配方发生变化");
+    let receipt = if action != crate::domain::Action::Install
+        && expected.id.starts_with("application:")
+        && !catalog.packages.iter().any(|pkg| pkg.name == expected.id)
+    {
+        receipts.installations.get(&expected.id)
+    } else {
+        None
+    };
+    let current = catalog
+        .packages
+        .iter()
+        .find(|pkg| pkg.id == expected.id)
+        .or(receipt.map(|entry| &entry.package))
+        .ok_or_else(stale)?;
+    if crate::domain::fingerprint(current)? != crate::domain::fingerprint(expected)? {
+        return Err(stale());
+    }
+    Ok(())
+}
+
+fn route_command(
+    ctx: &Context,
+    command: &crate::cli::Command,
+    dry_run: bool,
+    yes: bool,
+    selected: Option<&crate::domain::Package>,
+) -> Result<Option<serde_json::Value>> {
+    use serde_json::json;
+    let Some((package, doctor)) = selected_recipe(ctx, command, selected)? else {
+        return Ok(None);
+    };
+    if let Some(value) = unbound_formula(dry_run, &package)? {
         return Ok(Some(value));
     }
     let crate::domain::Provider::BrewFormula {
@@ -554,8 +633,8 @@ pub fn public_command(ctx: &Context, cli: &crate::cli::Cli) -> Result<Option<ser
     else {
         return Ok(None);
     };
-    check_version_request(cli)?;
-    if cli.dry_run {
+    check_version_request(command)?;
+    if dry_run {
         return Ok(Some(
             json!({"mode":"dry-run","backend":"brew-native","id":package.id,"scope":{"program":original.binding.invocation,"prefix":original.key.canonical_prefix,"cellar":original.binding.cellar,"full_name":original.key.full_name},"target":null,"unresolved":true,"reason":"仅使用已登记/缓存证据；预演不运行 Native 查询","nativeRuns":0,"persistentWrites":false}),
         ));
@@ -573,17 +652,18 @@ pub fn public_command(ctx: &Context, cli: &crate::cli::Cli) -> Result<Option<ser
     let store = Store::lock(ctx)?;
     store.check_pending()?;
     let (registry, first_use) =
-        current_context(ctx, &store, original, doctor, action(&cli.command), cli.yes)?;
+        current_context(ctx, &store, original, doctor, action(command), yes)?;
     let record = registry
         .contexts
         .get(&original.binding.context_id)
         .ok_or_else(|| Error::attention("brew_context_unregistered", "没有对应Brew context"))?;
-    let owner = policy::owner_snapshot(
-        &original.key,
-        &crate::inventory::declared_catalog(ctx)?,
-        &store.receipts()?,
-        &registry,
-    )?;
+    let catalog = crate::inventory::declared_catalog(ctx)?;
+    let receipts = store.receipts()?;
+    let requested = action(command);
+    if let Some(expected) = selected {
+        require_selected_recipe(&catalog, &receipts, expected, requested)?;
+    }
+    let owner = policy::owner_snapshot(&original.key, &catalog, &receipts, &registry)?;
     let env = query::ConfirmedEnvironment::capture(ctx, record)?;
     let mut current = original.as_ref().clone();
     current.context_epoch = record.epoch;
@@ -601,17 +681,17 @@ pub fn public_command(ctx: &Context, cli: &crate::cli::Cli) -> Result<Option<ser
             json!([{"id":package.id,"observation":observed,"nativeQuery":true}]),
         ));
     }
-    if matches!(cli.command, crate::cli::Command::Update { .. }) {
+    if matches!(command, crate::cli::Command::Update { .. }) {
         let report = report_of(&observed)?;
         let info = policy::formula_identity(&current, report)?;
         return crate::updates::update_queried(ctx, &store, &package, &info.pkg_version).map(Some);
     }
-    let requested = action(&cli.command);
-    let mandatory_action_confirmation = matches!(
-        requested,
-        crate::domain::Action::Adopt | crate::domain::Action::Uninstall
-    );
-    let consent = if cli.yes {
+    let mandatory_action_confirmation = selected.is_some()
+        || matches!(
+            requested,
+            crate::domain::Action::Adopt | crate::domain::Action::Uninstall
+        );
+    let consent = if yes {
         crate::domain::BrewConsent::Yes
     } else if first_use || mandatory_action_confirmation {
         crate::domain::BrewConsent::Interactive
@@ -624,7 +704,7 @@ pub fn public_command(ctx: &Context, cli: &crate::cli::Cli) -> Result<Option<ser
     if mandatory_action_confirmation
         || (first_use && view.data.execution == crate::domain::BrewExecution::NativeMutator)
     {
-        confirm_action(&view, cli.yes)?;
+        confirm_action(&view, yes)?;
         if view.data.execution == crate::domain::BrewExecution::NativeMutator {
             record_writer_scope(ctx, &store, &view)?;
         }
@@ -1054,6 +1134,7 @@ pub fn recover(
     dry_run: bool,
     resolve_failed: bool,
     yes: bool,
+    expected: Option<&str>,
 ) -> Result<serde_json::Value> {
     if original.home != ctx.home || original.state != ctx.state || original.scope != ctx.scope {
         return Err(native_invalid());
@@ -1072,6 +1153,7 @@ pub fn recover(
     };
     store.check_migration_pending()?;
     let mut journal = crate::operations::locked_journal(&store, &original.id)?;
+    crate::operations::verify_recovery_preview(expected, &journal)?;
     if journal.id != original.id
         || journal.plan_sha256 != original.plan_sha256
         || journal.scope != original.scope

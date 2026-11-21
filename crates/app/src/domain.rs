@@ -51,6 +51,7 @@ pub struct CommandSpec {
 pub enum QuerySpec {
     BrewFormula(#[serde(deserialize_with = "crate::policy::json::object")] Box<BrewQuerySpec>),
     Command(#[serde(deserialize_with = "crate::policy::json::object")] CommandSpec),
+    Mise(#[serde(deserialize_with = "crate::policy::json::object")] MiseQuery),
     LocalUvTool(#[serde(deserialize_with = "crate::policy::json::object")] LocalUvToolQuery),
     LocalNpm(#[serde(deserialize_with = "crate::policy::json::object")] LocalNpmQuery),
     LocalConfig(#[serde(deserialize_with = "crate::policy::json::object")] LocalConfigQuery),
@@ -61,6 +62,47 @@ pub enum QuerySpec {
     LocalCapability(
         #[serde(deserialize_with = "crate::policy::json::object")] LocalCapabilityQuery,
     ),
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct MiseQuery {
+    #[serde(deserialize_with = "crate::policy::json::object")]
+    pub command: CommandSpec,
+    #[serde(deserialize_with = "crate::policy::json::object")]
+    pub namespace: MiseNamespace,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::policy::json::optional_object"
+    )]
+    pub retirement: Option<MiseRetirement>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct MiseRetirement {
+    pub version: String,
+    pub payload: PathBuf,
+    #[serde(deserialize_with = "crate::policy::json::object")]
+    pub identity: FileId,
+    pub program: PathBuf,
+    pub program_sha256: String,
+    pub receipt_sha256: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct MiseNamespace {
+    pub home: PathBuf,
+    pub data: PathBuf,
+    pub config: PathBuf,
+    pub installs: PathBuf,
+    pub global_file: Option<PathBuf>,
+    pub config_file: Option<PathBuf>,
+    pub data_identity: Option<FileId>,
+    pub config_identity: Option<FileId>,
+    pub installs_identity: Option<FileId>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -114,6 +156,7 @@ pub struct UvToolEvidence {
 pub enum CapabilityKind {
     SkillsCli,
     ClaudePlugin,
+    CodexPlugin,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub enum CapabilityQueryKind {

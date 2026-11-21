@@ -24,6 +24,20 @@ fn repository_proposals_require_bound_documents_and_a_closed_shape() -> TestResu
     )
     .map_err(Failure::label)?;
     assert_eq!(result.len(), 1);
+    for channel in [
+        "npx",
+        "bun",
+        "cargo",
+        "uv",
+        "claude-plugin",
+        "cursor-plugin",
+    ] {
+        let mut proposed = candidate.clone();
+        proposed["adapter"] = json!(channel);
+        let parsed = parse_proposals(response(proposed, "stop").as_bytes(), FIXTURE_TOKEN, 1)
+            .map_err(Failure::label)?;
+        assert_eq!(serde_json::to_value(&parsed[0])?["adapter"], channel);
+    }
     for (key, value) in [
         ("document", json!(9)),
         ("adapter", json!("arbitrary")),
@@ -316,38 +330,44 @@ fn model_runtime_reaps_the_leader_after_stopping_closed_output_group_members() -
 #[test]
 fn public_http_reader_requires_its_selected_service_and_an_explicit_success_status() -> TestResult {
     let f = tempfile::tempdir_in("/private/tmp")?;
-    let public = "https://api.github.com/repos/example/project";
-    for (status, body, valid) in [
-        (
-            "200",
-            r#"{"full_name":"example/project","private":false}"#,
-            true,
-        ),
-        ("301", r#"{"full_name":"example/project"}"#, false),
-        ("200", "bad json", false),
+    for public in [
+        "https://api.github.com/repos/example/project",
+        "https://api.github.com/search/repositories?q=example",
     ] {
-        let runner = script(
-            f.path(),
-            "public-http",
-            &format!(
-                r#"[ "$1" = --disable ]
+        for (status, body, valid) in [
+            (
+                "200",
+                r#"{"full_name":"example/project","private":false}"#,
+                true,
+            ),
+            ("301", r#"{"full_name":"example/project"}"#, false),
+            ("200", "bad json", false),
+        ] {
+            let runner = script(
+                f.path(),
+                "public-http",
+                &format!(
+                    r#"[ "$1" = --disable ]
 last=""
 for field; do
   [ "$field" != --location ] && [ "$field" != --data-binary ]
   case "$field" in Authorization*) exit 51;; esac
+  if [ "$field" = 'Accept: application/vnd.github+json' ]; then accept=1; fi
   last="$field"
 done
+[ "$accept" = 1 ]
 [ "$last" = '{public}' ]
 printf '%s\n%s' '{body}' '{status}'"#
-            ),
-        )?;
-        let deadline = Instant::now() + Duration::from_secs(3);
-        let response = fetch_public_with(&runner, public, deadline);
-        assert_eq!(response.is_ok(), valid);
-        if let Ok(value) = response {
-            assert_eq!(value["full_name"], "example/project");
+                ),
+            )?;
+            let deadline = Instant::now() + Duration::from_secs(3);
+            let response = fetch_public_with(&runner, public, deadline);
+            assert_eq!(response.is_ok(), valid);
+            if let Ok(value) = response {
+                assert_eq!(value["full_name"], "example/project");
+            }
+            assert!(fetch_public_with(&runner, "https://other.example.org", deadline).is_err());
         }
-        assert!(fetch_public_with(&runner, "https://other.example.org", deadline).is_err());
     }
     Ok(())
 }

@@ -2,8 +2,9 @@ use crate::{
     browser::{Item, Kind, Session, View, sanitize},
     chezmoi_native::ViewerFile,
     context::Context,
-    domain::{Action, Plan, Provider},
+    domain::{Action, Package, Plan, Provider},
     error::{Error, Result},
+    operations::RecoveryPreview,
     resource::Management,
 };
 use crossterm::{
@@ -40,11 +41,28 @@ enum Page {
     Detail(Box<Details>),
     File { path: String, text: String },
     Operation(Box<Plan>),
+    Recovery(Box<RecoveryPreview>),
 }
 
 struct Details {
     actual: Option<Result<ViewerFile>>,
     source: Option<Result<ViewerFile>>,
+    recovery: Option<Box<RecoveryPreview>>,
+    agent_session: Option<crate::codex_install::session::Details>,
+    skills_native: bool,
+}
+
+enum NativeAction {
+    Brew {
+        action: Action,
+        package: Box<Package>,
+    },
+    AgentPreference(String),
+    AgentLaunch(String),
+    Skills {
+        action: Action,
+        id: String,
+    },
 }
 
 struct Browser {
@@ -83,7 +101,7 @@ impl Browser {
             row: 0,
             search: String::new(),
             typing: false,
-            show_unregistered: kind != Kind::Skills,
+            show_unregistered: true,
             show_directories: false,
             kind,
             page: Page::List,
@@ -127,7 +145,7 @@ impl Browser {
         }
     }
 
-    fn enter(&mut self, session: &Session, kind: Kind) {
+    fn enter(&mut self, ctx: &Context, session: &Session, kind: Kind) {
         if !matches!(self.page, Page::List) {
             return;
         }
@@ -136,9 +154,28 @@ impl Browser {
         };
         self.notice.clear();
         self.offset = 0;
+        let agent_session = if kind == Kind::Agents {
+            self.visible()
+                .get(self.row)
+                .filter(|item| item.management == Management::Adopted)
+                .and_then(|item| crate::codex_install::session::details(ctx, &item.id))
+        } else {
+            None
+        };
+        let skills_native = matches!(kind, Kind::Skills | Kind::Capabilities)
+            && self
+                .visible()
+                .get(self.row)
+                .is_some_and(|item| item.management == Management::Adopted)
+            && crate::native_skills::accepts_inventory_maintenance(ctx, &id);
         self.page = Page::Detail(Box::new(Details {
             actual: (kind == Kind::Config).then(|| session.observed(&id, false)),
             source: (kind == Kind::Config).then(|| session.observed(&id, true)),
+            recovery: (kind == Kind::History)
+                .then(|| RecoveryPreview::read(ctx, &id).ok().map(Box::new))
+                .flatten(),
+            agent_session,
+            skills_native,
         }));
     }
 
@@ -171,27 +208,51 @@ impl Browser {
         }
     }
 
-    fn back(&mut self, kind: Kind, session: &Session) {
-        let was_child = matches!(self.page, Page::File { .. } | Page::Operation(_));
+    fn back(&mut self, ctx: &Context, kind: Kind, session: &Session) {
+        let was_child = matches!(
+            self.page,
+            Page::File { .. } | Page::Operation(_) | Page::Recovery(_)
+        );
         self.page = Page::List;
         self.notice.clear();
         self.offset = 0;
         if was_child {
-            self.enter(session, kind);
+            self.enter(ctx, session, kind);
         }
     }
 
-    fn preview_operation(&mut self, ctx: &Context, action: Action) {
+    fn preview_operation(&mut self, ctx: &Context, action: Action) -> Option<NativeAction> {
         if ctx.chezmoi.source.is_some()
             || ctx.chezmoi.destination.is_some()
             || ctx.chezmoi.config.is_some()
         {
             self.notice = "config_scope_unsupported · 已限定配置源，不能维护软件或能力".into();
-            return;
+            return None;
         }
-        let Some(id) = self.selected() else { return };
+        let id = self.selected()?;
+        let package = match crate::target::resolve(ctx, &id) {
+            Ok(package) => package,
+            Err(error) => {
+                self.notice = error.to_string();
+                return None;
+            }
+        };
+        if matches!(package.provider, Provider::BrewFormula { .. }) {
+            return Some(NativeAction::Brew {
+                action,
+                package: Box::new(package),
+            });
+        }
         let prepare = || {
-            let package = crate::target::resolve(ctx, &id)?;
+            if matches!(package.provider, Provider::Mise { .. }) {
+                return crate::operations::plan(
+                    ctx,
+                    &package,
+                    action,
+                    None,
+                    action == Action::Adopt,
+                );
+            }
             let supported = if action == Action::Adopt {
                 matches!(
                     package.provider,
@@ -220,14 +281,86 @@ impl Browser {
             }
             Err(error) => self.notice = error.to_string(),
         }
+        None
     }
 
     fn finish_operation(&mut self, ctx: &Context, session: &mut Session) {
         let Page::Operation(plan) = std::mem::replace(&mut self.page, Page::List) else {
             return;
         };
-        let label = operation_label(plan.action);
+        let action = plan.action;
         let result = crate::operations::execute(ctx, *plan, false, true);
+        self.operation_result(ctx, session, action, result);
+    }
+
+    fn agent_action(&self, key: char) -> Option<NativeAction> {
+        let Page::Detail(details) = &self.page else {
+            return None;
+        };
+        details.agent_session.as_ref()?;
+        let selector = self.visible().get(self.row)?.id.clone();
+        Some(if key == 'e' {
+            NativeAction::AgentPreference(selector)
+        } else {
+            NativeAction::AgentLaunch(selector)
+        })
+    }
+
+    fn maintenance_key(&mut self, ctx: &Context, key: char) -> Option<NativeAction> {
+        let Page::Detail(detail) = &self.page else {
+            return None;
+        };
+        let action = if key == 'u' {
+            Action::Upgrade
+        } else {
+            Action::Uninstall
+        };
+        if detail.skills_native {
+            return Some(NativeAction::Skills {
+                action,
+                id: self.selected()?,
+            });
+        }
+        if self.kind == Kind::Apps {
+            return self.preview_operation(ctx, action);
+        }
+        None
+    }
+
+    fn run_native(&mut self, ctx: &Context, session: &mut Session, action: NativeAction) {
+        let result = match action {
+            NativeAction::Brew { action, package } => {
+                let result = crate::brew::execute_confirmed(ctx, &package, action);
+                self.operation_result(ctx, session, action, result);
+                return;
+            }
+            NativeAction::Skills { action, id } => {
+                let result = crate::native_skills::maintain_from_inventory(ctx, &id, action);
+                self.operation_result(ctx, session, action, result);
+                return;
+            }
+            NativeAction::AgentPreference(label) => {
+                crate::codex_install::session::configure(ctx, &label)
+            }
+            NativeAction::AgentLaunch(label) => {
+                crate::codex_install::session::launch(ctx, &label, None, false, false).map(|_| ())
+            }
+        };
+        self.refresh(ctx, session);
+        self.notice = match result {
+            Ok(()) => "已保存下次由 mo 启动时的插件设置".into(),
+            Err(error) => error.to_string(),
+        };
+    }
+
+    fn operation_result(
+        &mut self,
+        ctx: &Context,
+        session: &mut Session,
+        action: Action,
+        result: Result<serde_json::Value>,
+    ) {
+        let label = operation_label(action);
         self.refresh(ctx, session);
         self.notice = match result {
             Ok(value) => {
@@ -239,6 +372,41 @@ impl Browser {
                 )
             }
             Err(error) => error.to_string(),
+        };
+    }
+
+    fn preview_recovery(&mut self) {
+        if let Page::Detail(details) = &mut self.page
+            && let Some(preview) = details.recovery.take()
+        {
+            self.notice.clear();
+            self.offset = 0;
+            self.page = Page::Recovery(preview);
+        }
+    }
+
+    fn finish_recovery(&mut self, ctx: &Context, session: &mut Session) {
+        let Page::Recovery(preview) = std::mem::replace(&mut self.page, Page::List) else {
+            return;
+        };
+        let id = preview.journal.id.clone();
+        let result = preview.confirm(ctx);
+        self.refresh(ctx, session);
+        self.notice = match result {
+            Ok(value) => {
+                let journal = value.get("journal").unwrap_or(&value);
+                let phase = journal
+                    .get("phase")
+                    .or_else(|| value.get("status"))
+                    .and_then(serde_json::Value::as_str);
+                let status = match phase {
+                    Some("succeeded") => "已完成",
+                    Some("failed") => "已记录失败",
+                    _ => "仍待核对",
+                };
+                format!("核对结果 {status} · {id}")
+            }
+            Err(error) => format!("{} · {id}", error.code),
         };
     }
 
@@ -275,7 +443,7 @@ impl Browser {
         self.preserve(id.as_deref());
     }
 
-    fn draw(&mut self, frame: &mut Frame, kind: Kind, unified: bool) {
+    fn draw(&mut self, ctx: &Context, frame: &mut Frame, kind: Kind, unified: bool) {
         let [header, main, footer] = Layout::vertical([
             Constraint::Length(if unified { 2 } else { 1 }),
             Constraint::Min(1),
@@ -312,6 +480,13 @@ impl Browser {
         frame.render_widget(Paragraph::new(text), header);
         let mut offset = self.offset;
         match &self.page {
+            Page::Recovery(preview) => detail(
+                frame,
+                main,
+                "核对原操作",
+                &recovery_summary(preview),
+                &mut offset,
+            ),
             Page::Operation(plan) => detail(
                 frame,
                 main,
@@ -321,7 +496,7 @@ impl Browser {
                     sanitize(&plan.package.name, false),
                     sanitize(plan.before.version().unwrap_or("未知"), false),
                     sanitize(plan.target.as_deref().unwrap_or("—"), false),
-                    crate::recommend::plan_scope(plan),
+                    crate::recommend::plan_scope(ctx, plan),
                     if plan.action == Action::Adopt {
                         "记录现有安装基线，保留文件和版本。".into()
                     } else {
@@ -339,13 +514,13 @@ impl Browser {
                     &mut offset,
                 );
             }
-            Page::Detail(_) => {
+            Page::Detail(selection) => {
                 if let Some(item) = visible.get(self.row) {
                     detail(
                         frame,
                         main,
                         &sanitize(&item.name, false),
-                        &details(item),
+                        &item_details(item, selection.agent_session.as_ref()),
                         &mut offset,
                     );
                 }
@@ -374,18 +549,18 @@ impl Browser {
         let items: Vec<_> = visible
             .iter()
             .map(|item| {
+                let name = sanitize(&item.name, false);
+                let summary = sanitize(&item.summary, false);
+                if self.kind == Kind::History {
+                    return ListItem::new(format!("{name}  {summary}"));
+                }
                 let status = match item.management {
                     Management::Declared => "有声明",
                     Management::Native => "原生登记",
                     Management::Adopted => "受管",
                     Management::Untracked => "已发现",
                 };
-                ListItem::new(format!(
-                    "{}  {}  {}",
-                    sanitize(&item.name, false),
-                    status,
-                    sanitize(&item.summary, false)
-                ))
+                ListItem::new(format!("{name}  {status}  {summary}"))
             })
             .collect();
         let mut state = ListState::default().with_selected((!items.is_empty()).then_some(self.row));
@@ -394,6 +569,16 @@ impl Browser {
             .highlight_symbol("> ");
         frame.render_stateful_widget(list, area, &mut state);
     }
+}
+
+fn recovery_summary(preview: &RecoveryPreview) -> String {
+    let journal = &preview.journal;
+    format!(
+        "{}\n目标 {}\n原状态目录 {}\n根据原证据补写记录，或回退该操作的改动。安装器不会重新启动。",
+        sanitize(&journal.id, false),
+        sanitize(&journal.plan.package.id, false),
+        sanitize(&journal.state.display().to_string(), false),
+    )
 }
 
 fn detail(frame: &mut Frame, area: Rect, title: &str, text: &str, offset: &mut usize) {
@@ -423,6 +608,22 @@ fn details(item: &Item) -> String {
         .join("\n")
 }
 
+fn item_details(item: &Item, session: Option<&crate::codex_install::session::Details>) -> String {
+    let mut text = details(item);
+    if let Some(session) = session {
+        use std::fmt::Write;
+        let _ = write!(
+            text,
+            "\n档案 ID {}\n基础模型 {}\n插件 {}\n下次由 mo 启动时 {}\n会话载入 未知",
+            item.id,
+            sanitize(session.observed_model.as_deref().unwrap_or("默认"), false),
+            sanitize(&session.plugin, false),
+            session.preference
+        );
+    }
+    text
+}
+
 fn operation_label(action: Action) -> &'static str {
     match action {
         Action::Adopt => "纳管",
@@ -445,10 +646,14 @@ fn keys(kind: Kind, page: &Page, unified: bool) -> &'static str {
             Action::Upgrade => "Enter 确认升级  Esc 返回  q 退出",
             _ => "Enter 确认卸载  Esc 返回  q 退出",
         },
-        Page::Detail(_) if kind == Kind::Config => "o 打开实际文件  s 打开管理源  Esc 返回  q 退出",
-        Page::Detail(_) if unified && kind == Kind::Apps => {
-            "a 检查纳管  u 升级  x 卸载  Esc 返回  q 退出"
+        Page::Recovery(_) => "Enter 确认核对  Esc 返回  q 退出",
+        Page::Detail(details) if details.recovery.is_some() => "c 核对原操作  Esc 返回  q 退出",
+        Page::Detail(details) if details.agent_session.is_some() => {
+            "e 插件设置  l 启动档案  Esc 返回  q 退出"
         }
+        Page::Detail(details) if details.skills_native => "u 升级  x 卸载  Esc 返回  q 退出",
+        Page::Detail(_) if kind == Kind::Config => "o 打开实际文件  s 打开管理源  Esc 返回  q 退出",
+        Page::Detail(_) if kind == Kind::Apps => "a 检查纳管  u 升级  x 卸载  Esc 返回  q 退出",
         Page::Detail(_) if unified && kind == Kind::Capabilities => "a 检查纳管  Esc 返回  q 退出",
         Page::Detail(_) | Page::File { .. } => "j/k 滚动  Esc 返回  q 退出",
     }
@@ -458,9 +663,19 @@ fn control(event: &KeyEvent, key: char) -> bool {
     event.code == KeyCode::Char(key) && event.modifiers.contains(KeyModifiers::CONTROL)
 }
 
+fn switch_tab(ctx: &Context, session: &mut Session, kind: Kind, forward: bool) -> Result<Browser> {
+    let tabs = Kind::TABS;
+    let index = tabs.iter().position(|tab| *tab == kind).unwrap_or_default();
+    let step = if forward { 1 } else { tabs.len() - 1 };
+    let next = tabs[(index + step) % tabs.len()];
+    let (loaded, view) = Session::load(ctx, next)?;
+    *session = loaded;
+    Ok(Browser::new(view, next))
+}
+
 pub(crate) fn browse(
     ctx: &Context,
-    mut kind: Kind,
+    kind: Kind,
     session: &mut Session,
     view: View,
     unified: bool,
@@ -468,8 +683,9 @@ pub(crate) fn browse(
     let mut browser = Browser::new(view, kind);
     loop {
         let (mut terminal, restore) = screen()?;
-        loop {
-            terminal.draw(|frame| browser.draw(frame, kind, unified))?;
+        let native = loop {
+            let kind = browser.kind;
+            terminal.draw(|frame| browser.draw(ctx, frame, kind, unified))?;
             let Event::Key(event) = event::read()? else {
                 continue;
             };
@@ -487,30 +703,27 @@ pub(crate) fn browse(
                 isize::try_from(terminal.size()?.height.saturating_sub(4).max(1)).unwrap_or(1);
             match event.code {
                 KeyCode::Tab | KeyCode::BackTab if unified => {
-                    let tabs = Kind::TABS;
-                    let index = tabs.iter().position(|tab| *tab == kind).unwrap_or_default();
-                    let step = if event.code == KeyCode::Tab {
-                        1
-                    } else {
-                        tabs.len() - 1
-                    };
-                    let next = tabs[(index + step) % tabs.len()];
-                    match Session::load(ctx, next) {
-                        Ok((loaded, view)) => {
-                            *session = loaded;
-                            kind = next;
-                            browser = Browser::new(view, kind);
-                        }
+                    match switch_tab(ctx, session, kind, event.code == KeyCode::Tab) {
+                        Ok(next) => browser = next,
                         Err(error) => browser.notice = error.to_string(),
                     }
                 }
                 KeyCode::Char('q') => return Ok(browser.view),
-                KeyCode::Esc => browser.back(kind, session),
+                KeyCode::Esc => browser.back(ctx, kind, session),
                 KeyCode::Char('/') if matches!(browser.page, Page::List) => browser.typing = true,
                 KeyCode::Enter if matches!(browser.page, Page::Operation(_)) => {
                     browser.finish_operation(ctx, session);
                 }
-                KeyCode::Enter => browser.enter(session, kind),
+                KeyCode::Enter if matches!(browser.page, Page::Recovery(_)) => {
+                    browser.finish_recovery(ctx, session);
+                }
+                KeyCode::Enter => browser.enter(ctx, session, kind),
+                KeyCode::Char('c') if kind == Kind::History => browser.preview_recovery(),
+                KeyCode::Char(key @ ('e' | 'l')) if kind == Kind::Agents => {
+                    if let Some(action) = browser.agent_action(key) {
+                        break Some(action);
+                    }
+                }
                 KeyCode::Char('o') => browser.open(false),
                 KeyCode::Char('s') => browser.open(true),
                 KeyCode::Char('j') | KeyCode::Down => browser.move_by(1),
@@ -528,21 +741,17 @@ pub(crate) fn browse(
                     browser.preserve(id.as_deref());
                 }
                 KeyCode::Char('a')
-                    if unified
-                        && matches!(kind, Kind::Apps | Kind::Capabilities)
+                    if (kind == Kind::Apps || (unified && kind == Kind::Capabilities))
                         && matches!(browser.page, Page::Detail(_)) =>
                 {
-                    browser.preview_operation(ctx, Action::Adopt);
+                    if let Some(action) = browser.preview_operation(ctx, Action::Adopt) {
+                        break Some(action);
+                    }
                 }
-                KeyCode::Char(key @ ('u' | 'x'))
-                    if unified && kind == Kind::Apps && matches!(browser.page, Page::Detail(_)) =>
-                {
-                    let action = if key == 'u' {
-                        Action::Upgrade
-                    } else {
-                        Action::Uninstall
-                    };
-                    browser.preview_operation(ctx, action);
+                KeyCode::Char(key @ ('u' | 'x')) => {
+                    if let Some(action) = browser.maintenance_key(ctx, key) {
+                        break Some(action);
+                    }
                 }
                 KeyCode::Char('d')
                     if kind == Kind::Config && matches!(browser.page, Page::List) =>
@@ -551,12 +760,20 @@ pub(crate) fn browse(
                     browser.show_directories = !browser.show_directories;
                     browser.preserve(id.as_deref());
                 }
-                KeyCode::Char('r') if matches!(browser.page, Page::List) => break,
+                KeyCode::Char('r') if matches!(browser.page, Page::List) => break None,
                 _ => {}
             }
-        }
+        };
         drop(terminal);
         drop(restore);
-        browser.refresh(ctx, session);
+        if let Some(action) = native {
+            browser.run_native(ctx, session, action);
+        } else {
+            browser.refresh(ctx, session);
+        }
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/unit/terminal_agent.rs"]
+mod agent_tests;

@@ -1,6 +1,6 @@
 use crate::{
     context::Context,
-    domain::{Observation, Receipts},
+    domain::{MiseQuery, Observation, QuerySpec, Receipts},
     error::{Error, Result},
     paths,
 };
@@ -401,18 +401,64 @@ impl Store {
         observation: Observation,
         check: impl FnOnce() -> Result<()>,
     ) -> std::result::Result<(), CommitFailure> {
+        self.commit_with_query(journal, observation, None, check)
+    }
+
+    pub(crate) fn commit_mise(
+        &self,
+        journal: &Journal,
+        observation: Observation,
+        query: MiseQuery,
+    ) -> Result<()> {
+        crate::mise_owner::retirement::freeze_absence(self, journal, &query)?;
+        self.commit_with_query(journal, observation, Some(&QuerySpec::Mise(query)), || {
+            Ok(())
+        })
+        .map_err(CommitFailure::into_error)
+    }
+
+    fn commit_with_query(
+        &self,
+        journal: &Journal,
+        observation: Observation,
+        verified_query: Option<&QuerySpec>,
+        check: impl FnOnce() -> Result<()>,
+    ) -> std::result::Result<(), CommitFailure> {
         self.verify_namespace().map_err(CommitFailure::Check)?;
+        let bound = verified_query.or(journal.plan.query.as_ref());
         let check = || {
             check()?;
+            if let Some(QuerySpec::Mise(query)) = bound {
+                crate::mise_owner::query_command(&journal.scope, query)?;
+                if let Some(retirement) = &query.retirement {
+                    crate::mise_owner::retirement::verify_absence(retirement)?;
+                    crate::mise_owner::retirement::verify_receipt(
+                        &self.receipts()?,
+                        &journal.plan.package.id,
+                        retirement,
+                        true,
+                    )?;
+                }
+            }
             self.verify_namespace()
         };
         if crate::policy::service::is_control(journal.plan.action) {
             return check().map_err(CommitFailure::Check);
         }
         let mut receipts = self.receipts().map_err(CommitFailure::Outcome)?;
-        let changed =
-            crate::policy::state::commit_receipt(&mut receipts, journal, observation, now())
-                .map_err(CommitFailure::Outcome)?;
+        let changed = match verified_query {
+            Some(query) => crate::policy::state::commit_verified_receipt(
+                &mut receipts,
+                journal,
+                observation,
+                now(),
+                Some(query.clone()),
+            ),
+            None => {
+                crate::policy::state::commit_receipt(&mut receipts, journal, observation, now())
+            }
+        }
+        .map_err(CommitFailure::Outcome)?;
         if !changed {
             return check().map_err(CommitFailure::Check);
         }

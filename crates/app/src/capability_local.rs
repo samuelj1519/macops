@@ -14,7 +14,7 @@ use crate::{
     resource::{Coverage, CoverageState, Data, Management, Resource, State},
 };
 use sha2::{Digest, Sha256};
-use std::{ffi::OsStr, path::Path};
+use std::{ffi::OsStr, os::unix::ffi::OsStrExt, path::Path};
 
 fn changed() -> Error {
     Error::attention(
@@ -33,6 +33,7 @@ pub fn canonical_identity(package: &Package) -> Result<String> {
         capability,
         native_id,
         payload,
+        record,
         profile_id,
         ..
     } = &package.provider
@@ -47,6 +48,10 @@ pub fn canonical_identity(package: &Package) -> Result<String> {
             let prof = profile_id.as_deref().ok_or_else(invalid_pkg)?;
             Ok(policy::plugin_capability_id(prof, native_id))
         }
+        CapabilityKind::CodexPlugin => {
+            let root = record.parent().ok_or_else(invalid_pkg)?;
+            codex_owner_id(&paths::read_path(root)?, native_id)
+        }
     }
 }
 
@@ -56,7 +61,39 @@ pub fn query_identity(package: &Package, local: &LocalCapabilityQuery) -> Result
             &local.payload.canonical_parent.join(&local.payload.name),
         ),
         CapabilityKind::ClaudePlugin => canonical_identity(package),
+        CapabilityKind::CodexPlugin => {
+            codex_owner_id(&local.record.canonical_parent, &local.native_id)
+        }
     }
+}
+
+fn codex_owner_id(root: &Path, native_id: &str) -> Result<String> {
+    let profile = crate::resource::id("agent", &("codex", root))?;
+    policy::codex_capability_id(&profile, native_id)
+}
+
+fn verify_codex_query(query: &LocalCapabilityQuery) -> Result<()> {
+    if query.capability != CapabilityKind::CodexPlugin {
+        return Ok(());
+    }
+    let (plugin, market) = query
+        .native_id
+        .rsplit_once('@')
+        .filter(|_| policy::valid_plugin_id(&query.native_id))
+        .ok_or_else(invalid_pkg)?;
+    let native_cache = query
+        .record
+        .canonical_parent
+        .join("plugins/cache")
+        .join(market)
+        .join(plugin);
+    if query.payload.canonical_parent != native_cache {
+        return Err(Error::attention(
+            "codex_plugin_cache_rebound",
+            "插件缓存物理目录与目标档案或插件不一致",
+        ));
+    }
+    Ok(())
 }
 
 pub fn capture(package: &Package) -> Result<LocalCapabilityQuery> {
@@ -74,7 +111,7 @@ pub fn capture(package: &Package) -> Result<LocalCapabilityQuery> {
     else {
         return Err(invalid_pkg());
     };
-    Ok(LocalCapabilityQuery {
+    let query = LocalCapabilityQuery {
         kind: CapabilityQueryKind::LocalV1,
         capability: *capability,
         native_id: native_id.clone(),
@@ -83,10 +120,13 @@ pub fn capture(package: &Package) -> Result<LocalCapabilityQuery> {
         record: capture_anchor(record)?,
         payload: capture_anchor(payload)?,
         settings: settings.as_deref().map(capture_anchor).transpose()?,
-    })
+    };
+    verify_codex_query(&query)?;
+    Ok(query)
 }
 
 pub fn observe(id: &str, query: &LocalCapabilityQuery, budget: &mut u64) -> Result<Observation> {
+    verify_codex_query(query)?;
     crate::policy::config_local::validate_anchor(&query.record)?;
     crate::policy::config_local::validate_anchor(&query.payload)?;
     if let Some(settings) = &query.settings {
@@ -131,6 +171,13 @@ pub fn observe(id: &str, query: &LocalCapabilityQuery, budget: &mut u64) -> Resu
                 settings_bytes.as_deref(),
             )?
         }
+        CapabilityKind::CodexPlugin => policy::parse_codex_record(
+            id,
+            &query.record.requested,
+            &query.payload.requested,
+            &query.native_id,
+            &record_bytes,
+        )?,
     };
     let Some(parsed) = parsed_record else {
         return Ok(Observation::CapabilityPack {
@@ -255,6 +302,24 @@ pub struct PayloadSnapshot {
     pub lineage: Vec<crate::domain::FileId>,
 }
 
+pub(crate) fn codex_payload_files(root: &Directory) -> Result<Vec<(String, bool, String)>> {
+    let mut entries = Vec::new();
+    let mut entry_limit = PAYLOAD_ENTRY_LIMIT;
+    let mut byte_limit = PAYLOAD_BYTE_BUDGET;
+    walk_payload(
+        root,
+        "",
+        0,
+        &mut entry_limit,
+        &mut byte_limit,
+        &mut entries,
+        true,
+    )?;
+    root.verify()?;
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(entries)
+}
+
 pub fn snapshot_payload(
     capability: CapabilityKind,
     anchor: &ConfigAnchor,
@@ -276,11 +341,26 @@ pub fn snapshot_payload(
         ));
     }
     let root = parent.child(leaf)?;
+    let codex = capability == CapabilityKind::CodexPlugin;
+    if codex {
+        verify_codex_cache(&parent, leaf)?;
+    }
     parent.verify_child(leaf, &root)?;
     let lineage = root.lineage()?;
     let mut entries = Vec::new();
     let mut remaining_entries = PAYLOAD_ENTRY_LIMIT;
-    walk_payload(&root, "", 0, &mut remaining_entries, budget, &mut entries)?;
+    walk_payload(
+        &root,
+        "",
+        0,
+        &mut remaining_entries,
+        budget,
+        &mut entries,
+        codex,
+    )?;
+    if codex {
+        verify_codex_manifest(&root, &entries, budget)?;
+    }
     parent.verify_child(leaf, &root)?;
     parent.verify()?;
     if root.lineage()? != lineage {
@@ -293,6 +373,9 @@ pub fn snapshot_payload(
             "skill_entrypoint_missing",
             "技能目录缺少普通 SKILL.md",
         ));
+    }
+    if codex {
+        verify_codex_cache(&parent, leaf)?;
     }
     if entries.is_empty() {
         return Err(Error::attention(
@@ -308,6 +391,94 @@ pub fn snapshot_payload(
     }))
 }
 
+fn verify_codex_manifest(
+    root: &Directory,
+    entries: &[(String, bool, String)],
+    budget: &mut u64,
+) -> Result<()> {
+    const AGENT_SCHEMA: &str = "https://agent-plugins.org/schemas/";
+    let invalid = || {
+        Error::attention(
+            "codex_plugin_manifest_mismatch",
+            "Codex 清单与插件名称或缓存版本不匹配",
+        )
+    };
+    let mut read = |rel: &str| -> Result<Option<serde_json::Value>> {
+        let Some((_, _, expected)) = entries.iter().find(|(path, _, _)| path == rel) else {
+            return Ok(None);
+        };
+        let leaf = OsStr::new("plugin.json");
+        let limit = (*budget).min(64 * 1024);
+        let (bytes, _) = if rel == "plugin.json" {
+            root.regular_config_snapshot(leaf, limit)?
+        } else {
+            let directory = root.child(OsStr::new(".codex-plugin"))?;
+            let observed = directory.regular_config_snapshot(leaf, limit)?;
+            root.verify_child(OsStr::new(".codex-plugin"), &directory)?;
+            observed
+        };
+        *budget -= bytes.len() as u64;
+        if &format!("{:x}", Sha256::digest(&bytes)) != expected {
+            return Err(changed());
+        }
+        crate::policy::json::parse(&bytes)
+            .map(Some)
+            .map_err(|_| invalid())
+    };
+    let portable = read("plugin.json")?;
+    let schema = portable
+        .as_ref()
+        .and_then(|value| value["$schema"].as_str());
+    let manifest = match schema {
+        Some("https://agent-plugins.org/schemas/1.0.0/plugin.schema.json") => portable,
+        Some(schema) if schema.starts_with(AGENT_SCHEMA) => return Err(invalid()),
+        _ => read(".codex-plugin/plugin.json")?,
+    };
+    let manifest = manifest.ok_or_else(|| {
+        Error::attention(
+            "codex_plugin_manifest_missing",
+            "插件缓存缺少普通 Codex 清单",
+        )
+    })?;
+    let name = root
+        .path
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(OsStr::to_str)
+        .ok_or_else(invalid)?;
+    let version = root
+        .path
+        .file_name()
+        .and_then(OsStr::to_str)
+        .ok_or_else(invalid)?;
+    if manifest["name"].as_str() != Some(name) || manifest["version"].as_str() != Some(version) {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
+fn verify_codex_cache(parent: &Directory, leaf: &OsStr) -> Result<()> {
+    for (index, item) in parent.names()?.enumerate() {
+        if index >= PAYLOAD_ENTRY_LIMIT {
+            return Err(budget_err("Codex 版本缓存条目超出读取上限"));
+        }
+        let item = item.map_err(|e| std::io::Error::from_raw_os_error(e.raw_os_error()))?;
+        let bytes = item.file_name().to_bytes();
+        if matches!(bytes, b"." | b"..") || bytes == leaf.as_bytes() {
+            continue;
+        }
+        let name = OsStr::from_bytes(bytes);
+        let meta = parent.metadata(name)?.ok_or_else(changed)?;
+        if matches!(meta.kind, EntryKind::Directory | EntryKind::Symlink) {
+            return Err(Error::attention(
+                "codex_plugin_cache_unproven",
+                "无法确定唯一 Codex 插件版本缓存",
+            ));
+        }
+    }
+    parent.verify()
+}
+
 fn walk_payload(
     dir: &Directory,
     prefix: &str,
@@ -315,6 +486,7 @@ fn walk_payload(
     remaining_entries: &mut usize,
     budget: &mut u64,
     out: &mut Vec<(String, bool, String)>,
+    exclude_git: bool,
 ) -> Result<()> {
     if depth >= PAYLOAD_DEPTH_LIMIT {
         return Err(budget_err("能力包目录层级超出读取上限"));
@@ -336,6 +508,15 @@ fn walk_payload(
             ));
         };
         let meta = dir.metadata(OsStr::new(name))?.ok_or_else(changed)?;
+        if exclude_git && depth == 0 && name == ".git" {
+            if meta.kind != EntryKind::Directory {
+                return Err(Error::attention(
+                    "unsupported_capability_payload",
+                    "Codex Git 元数据必须在实体目录中",
+                ));
+            }
+            continue;
+        }
         match policy::classify_payload_entry(name, depth, meta.kind == EntryKind::File) {
             policy::PayloadMetadataDisposition::IgnoreRegularMarker => continue,
             policy::PayloadMetadataDisposition::RejectReservedEntry => {
@@ -354,7 +535,15 @@ fn walk_payload(
         match meta.kind {
             EntryKind::Directory => {
                 let child = dir.child(OsStr::new(name))?;
-                walk_payload(&child, &rel, depth + 1, remaining_entries, budget, out)?;
+                walk_payload(
+                    &child,
+                    &rel,
+                    depth + 1,
+                    remaining_entries,
+                    budget,
+                    out,
+                    exclude_git,
+                )?;
                 dir.verify_child(OsStr::new(name), &child)?;
             }
             EntryKind::File => {
@@ -519,10 +708,55 @@ fn package_from_resource(
     if origin.manager == "claude-plugin" {
         return plugin_package(resource, origin, deployments, profiles, coverages);
     }
+    if origin.manager == "codex-config" {
+        return codex_package(resource, origin, deployments, contents, coverages);
+    }
     Err(Error::new(
         "unsupported_capability_source",
         "该能力包渠道尚未开放基线采纳，保持只读观察",
     ))
+}
+
+fn codex_package(
+    resource: &Resource,
+    origin: &crate::resource::Origin,
+    deployments: &[crate::resource::Deployment],
+    contents: &[crate::resource::Content],
+    coverages: &[Coverage],
+) -> Result<Package> {
+    let [deployment] = deployments else {
+        return Err(invalid_pkg());
+    };
+    require_clean_coverage(coverages, &format!("codex-config:{}", deployment.harness))?;
+    let [content] = contents else {
+        return Err(Error::attention(
+            "codex_plugin_cache_unproven",
+            "只有一个可核验的版本缓存时才能采纳",
+        ));
+    };
+    let pkg = Package {
+        id: resource.id.clone(),
+        name: resource.name.clone(),
+        kind: Kind::Plugin,
+        official_url: "https://developers.openai.com/codex/plugins".into(),
+        paths: vec![OwnedPath {
+            path: content.path.clone(),
+            kind: PathKind::Payload,
+        }],
+        provider: Provider::CapabilityObserved {
+            capability: CapabilityKind::CodexPlugin,
+            native_id: origin.native_key.clone(),
+            manager: origin.manager.clone(),
+            record: origin.record.clone(),
+            payload: content.path.clone(),
+            source: None,
+            profile_id: Some(deployment.harness.clone()),
+            settings: None,
+        },
+        exact_version_required: false,
+    };
+    policy::validate_package(&pkg)?;
+    Ok(pkg)
 }
 
 fn skill_package(

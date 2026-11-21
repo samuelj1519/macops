@@ -57,6 +57,76 @@ fn load_book(ctx: &Context) -> Result<(Option<Vec<u8>>, Book)> {
     let book = policy::book(raw.as_deref())?;
     Ok((raw, book))
 }
+
+pub(crate) fn recommended_recipes(ctx: &Context, subject: &str) -> Result<Vec<Recipe>> {
+    let (_, book) = load_book(ctx)?;
+    if book.recipes.is_empty() {
+        return Ok(vec![]);
+    }
+    let installed = policy::registry(disk::regular(&disk::lock_path(ctx))?.as_deref())?;
+    book.recipes
+        .into_iter()
+        .filter(|recipe| {
+            !installed.contains_key(&recipe.install_name)
+                && [
+                    &recipe.id,
+                    &recipe.install_name,
+                    &recipe.source.member_name,
+                    &recipe.source.repository,
+                ]
+                .into_iter()
+                .any(|name| name.eq_ignore_ascii_case(subject))
+        })
+        .filter_map(|recipe| {
+            match disk::payload(ctx, &recipe.install_name)
+                .and_then(|target| crate::paths::read_path(&target))
+            {
+                Ok(path) if path.exists() => None,
+                Ok(_) => Some(Ok(recipe)),
+                Err(error) => Some(Err(error)),
+            }
+        })
+        .collect()
+}
+
+pub(crate) fn install_recommended(ctx: &Context, recipe: Recipe) -> Result<Value> {
+    native_config_scope(ctx)?;
+    let scope = format!(
+        "安装并纳管 {} · Skills CLI\n来源 https://github.com/{} · {}\n目标 Codex 用户级 · 仅手动触发 {}\n安装到共享技能目录，其他支持的 Agent 也可能发现",
+        recipe.install_name,
+        recipe.source.repository,
+        recipe.source.commit,
+        if recipe.manual_only { "是" } else { "否" }
+    );
+    crate::operations::confirm(&scope, false)?;
+    let (_, book) = load_book(ctx)?;
+    verify_registered_recipe(&book, &recipe)?;
+    execute_with_origin(
+        ctx,
+        recipe,
+        Action::Install,
+        false,
+        false,
+        InputFence::default(),
+        RecipeOrigin::Registered,
+    )
+}
+
+fn verify_registered_recipe(book: &Book, recipe: &Recipe) -> Result<()> {
+    if !book.recipes.iter().any(|confirmed| confirmed == recipe) {
+        return Err(Error::attention(
+            "plan_stale",
+            "已选择的 Skills CLI 配方发生变化",
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RecipeOrigin {
+    Explicit,
+    Registered,
+}
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 struct InputFence {
@@ -683,9 +753,19 @@ fn validate_action(
 
 fn plan(
     ctx: &Context,
+    recipe: Recipe,
+    action: Action,
+    input_fence: InputFence,
+) -> Result<(Frozen, Plan)> {
+    plan_with_origin(ctx, recipe, action, input_fence, RecipeOrigin::Explicit)
+}
+
+fn plan_with_origin(
+    ctx: &Context,
     mut recipe: Recipe,
     action: Action,
     input_fence: InputFence,
+    origin: RecipeOrigin,
 ) -> Result<(Frozen, Plan)> {
     input_fence.verify()?;
     let snapshot = disk::snapshot(ctx, &recipe)?;
@@ -700,9 +780,12 @@ fn plan(
             pack: None,
         }
     };
-    let runner_stamp = seal_runner(&mut recipe, action)?;
     let (config_witness, config_before) = disk::witness(&book_path(ctx))?;
     let previous = policy::book(config_before.as_deref())?;
+    if origin == RecipeOrigin::Registered {
+        verify_registered_recipe(&previous, &recipe)?;
+    }
+    let runner_stamp = seal_runner(&mut recipe, action)?;
     if matches!(action, Action::Upgrade | Action::Uninstall) {
         let mut selected = previous
             .recipes
@@ -1069,6 +1152,46 @@ fn execute(
     yes: bool,
     input_fence: InputFence,
 ) -> Result<Value> {
+    execute_with_origin(
+        ctx,
+        recipe,
+        action,
+        dry,
+        yes,
+        input_fence,
+        RecipeOrigin::Explicit,
+    )
+}
+
+fn prepare_execution(
+    ctx: &Context,
+    store: &Store,
+    recipe: Recipe,
+    action: Action,
+    input_fence: InputFence,
+    origin: RecipeOrigin,
+) -> Result<(Frozen, Journal)> {
+    let (frozen, plan) = if origin == RecipeOrigin::Registered {
+        plan_with_origin(ctx, recipe, action, input_fence, origin)?
+    } else {
+        plan(ctx, recipe, action, input_fence)?
+    };
+    let journal = crate::operations::new_journal(ctx, plan)?;
+    disk::write_new(&frozen_path(&journal), &frozen)?;
+    persist_recipe(ctx, &frozen)?;
+    store.save(&journal)?;
+    Ok((frozen, journal))
+}
+
+fn execute_with_origin(
+    ctx: &Context,
+    recipe: Recipe,
+    action: Action,
+    dry: bool,
+    yes: bool,
+    input_fence: InputFence,
+    origin: RecipeOrigin,
+) -> Result<Value> {
     policy::validate(&recipe)?;
     let target = disk::payload(ctx, &recipe.install_name)?;
     let package_root = recipe
@@ -1112,11 +1235,8 @@ fn execute(
     disk::private(&ctx.config)?;
     disk::private(&ctx.data)?;
     disk::private(&ctx.state.join("native-skills/receipts"))?;
-    let (frozen, plan) = plan(ctx, recipe, action, input_fence)?;
-    let mut journal = crate::operations::new_journal(ctx, plan)?;
-    disk::write_new(&frozen_path(&journal), &frozen)?;
-    persist_recipe(ctx, &frozen)?;
-    store.save(&journal)?;
+    let (frozen, mut journal) =
+        prepare_execution(ctx, &store, recipe, action, input_fence, origin)?;
     if action == Action::Adopt {
         let mut progress = Progress {
             stage: "adopted-baseline".into(),
@@ -1272,6 +1392,15 @@ fn compatibility_keys(
 fn select(ctx: &Context, key: &str) -> Result<Recipe> {
     let (_, book) = load_book(ctx)?;
     let rows = policy::registry(disk::regular(&disk::lock_path(ctx))?.as_deref())?;
+    select_registered(ctx, key, book, &rows)
+}
+
+fn select_registered(
+    ctx: &Context,
+    key: &str,
+    book: Book,
+    rows: &BTreeMap<String, Value>,
+) -> Result<Recipe> {
     let mut found = vec![];
     for recipe in book.recipes {
         if compatibility_keys(ctx, &recipe, rows.get(&recipe.install_name))?.contains(key) {
@@ -1283,6 +1412,64 @@ fn select(ctx: &Context, key: &str) -> Result<Recipe> {
         [] => Err(required()),
         _ => Err(Error::attention("ambiguous", "请使用明确安装 ID")),
     }
+}
+
+pub(crate) fn accepts_inventory_maintenance(ctx: &Context, key: &str) -> bool {
+    native_config_scope(ctx).is_ok() && select(ctx, key).is_ok()
+}
+
+pub(crate) fn maintain_from_inventory(ctx: &Context, key: &str, action: Action) -> Result<Value> {
+    inventory_maintenance(ctx, key, action, crate::operations::confirm)
+}
+
+fn inventory_maintenance(
+    ctx: &Context,
+    key: &str,
+    action: Action,
+    confirm: impl FnOnce(&str, bool) -> Result<()>,
+) -> Result<Value> {
+    native_config_scope(ctx)?;
+    let label = match action {
+        Action::Upgrade => "升级",
+        Action::Uninstall => "卸载",
+        _ => return Err(invalid()),
+    };
+    let (book_witness, book_raw) = disk::witness(&book_path(ctx))?;
+    let (lock_witness, lock_raw) = disk::witness(&disk::lock_path(ctx))?;
+    let rows = policy::registry(lock_raw.as_deref())?;
+    let recipe = select_registered(ctx, key, policy::book(book_raw.as_deref())?, &rows)?;
+    let current = package(ctx, &recipe, rows.get(&recipe.install_name), None)?;
+    let (_, _, owner_witness) = owners(ctx, &current.id, action)?;
+    let old_commit = recipe.source.commit.clone();
+    let recipe = if action == Action::Upgrade {
+        resolve_upgrade(ctx, recipe, None)?
+    } else {
+        recipe
+    };
+    let effect = if action == Action::Uninstall {
+        "移除共享载荷后，依赖这处目录的 Agent 将无法再发现该技能"
+    } else {
+        "更新后的技能仍可由支持共享目录的 Agent 发现"
+    };
+    confirm(
+        &format!(
+            "{label} {} · Skills CLI\n来源 https://github.com/{}\n上游成员 {} · {}\n已登记提交 {}\n本次配方 {}\nCodex 用户级共享技能目录\n{effect}",
+            recipe.install_name,
+            recipe.source.repository,
+            recipe.source.member_name,
+            recipe.source.skill_directory,
+            old_commit,
+            recipe.source.commit,
+        ),
+        false,
+    )?;
+    let fence = InputFence {
+        files: vec![book_witness, lock_witness, owner_witness],
+    };
+    fence
+        .verify()
+        .map_err(|_| Error::attention("plan_stale", "已选择的技能配方或安装记录发生变化"))?;
+    execute(ctx, recipe, action, false, true, fence)
 }
 
 fn source_aliases(ctx: &Context) -> Result<BTreeMap<String, String>> {
@@ -1528,11 +1715,22 @@ fn upgrade(
 
 fn upgrade_recipe(
     ctx: &Context,
-    mut recipe: Recipe,
+    recipe: Recipe,
     revision: Option<&str>,
     dry: bool,
     yes: bool,
 ) -> Result<Value> {
+    execute(
+        ctx,
+        resolve_upgrade(ctx, recipe, revision)?,
+        Action::Upgrade,
+        dry,
+        yes,
+        InputFence::default(),
+    )
+}
+
+fn resolve_upgrade(ctx: &Context, mut recipe: Recipe, revision: Option<&str>) -> Result<Recipe> {
     if let Some(commit) = revision {
         recipe.source.commit = crate::policy::skills::revision(commit)?;
     } else if recipe.source.tracking_ref.is_some() {
@@ -1552,14 +1750,7 @@ fn upgrade_recipe(
             .commit;
         recipe.source.commit.clone_from(selected_commit);
     }
-    execute(
-        ctx,
-        recipe,
-        Action::Upgrade,
-        dry,
-        yes,
-        InputFence::default(),
-    )
+    Ok(recipe)
 }
 
 pub fn run(ctx: &Context, command: &Command, dry: bool, yes: bool) -> Result<Option<Value>> {

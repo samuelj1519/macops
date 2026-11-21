@@ -127,6 +127,20 @@ pub fn observe_query(
         }
         return crate::target::probe(&target.npm, &target.prefix, &target.name);
     }
+    if let QuerySpec::Mise(query) = query {
+        if !matches!(p.provider, Provider::Mise { .. }) {
+            return Err(crate::error::Error::new(
+                "invalid_mise_query",
+                "查询与 mise 配方不匹配",
+            ));
+        }
+        let mut command = crate::mise_owner::query_command(scope, query)?;
+        let output = process::capture_query(&mut command)?;
+        if let Some(retirement) = &query.retirement {
+            return crate::mise_owner::retirement::observe(&output, scope, query, retirement, post);
+        }
+        return observe_output(p, &output, scope);
+    }
     let command = query
         .command()
         .ok_or_else(|| crate::error::Error::new("invalid_query", "缺少原生命令"))?;
@@ -180,12 +194,10 @@ pub fn mutation_spec(
     if let Provider::Npm { prefix, .. } = &p.provider {
         paths::read_path(prefix)?;
     }
-    let mise_owned = if matches!(p.provider, Provider::Mise { .. }) {
-        paths::read_path(
-            &ctx.home
-                .join(".local/share/chezmoi/home/dot_config/mise/private_config.toml"),
-        )?
-        .exists()
+    let mise_owned = if matches!(p.provider, Provider::Mise { .. })
+        && matches!(action, Action::Install | Action::Upgrade)
+    {
+        crate::mise_owner::declared_owner(ctx)?
     } else {
         false
     };
@@ -241,6 +253,12 @@ pub fn capture_query(ctx: &Context, p: &Package, action: Option<Action>) -> Resu
             name,
             NpmContract::NativeV1,
             false,
+        )?),
+        Provider::Mise { .. } => QuerySpec::Mise(crate::mise_owner::plan_query(
+            ctx,
+            p,
+            resolve(crate::policy::commands::query(&ctx.home, p)?)?,
+            action,
         )?),
         Provider::ConfigObserved { .. } => QuerySpec::LocalConfig(crate::config_local::capture(p)?),
         Provider::CapabilityObserved { .. } => {

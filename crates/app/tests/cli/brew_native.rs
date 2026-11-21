@@ -1094,3 +1094,166 @@ fn independent_read_queries_do_not_authorize_a_first_writer() -> TestResult {
     );
     Ok(())
 }
+
+#[test]
+fn inventory_confirms_adoption_upgrade_and_removal_with_native_brew() -> TestResult {
+    for (key, result, mutation, approved, receipt_only) in [
+        ("a", "纳管结果 succeeded", None, true, false),
+        ("u", "cancelled", None, false, false),
+        ("u", "升级结果 succeeded", Some("upgrade"), true, false),
+        ("x", "卸载结果 succeeded", Some("uninstall"), true, false),
+        ("x", "卸载结果 succeeded", Some("uninstall"), true, true),
+    ] {
+        let f = Fixture::new()?;
+        let (id, actual) = lifecycle_fixture(&f)?;
+        let refreshed = lifecycle_run(&f, &actual, &["update", &id])?;
+        assert_eq!(refreshed["status"], "ok", "{refreshed}");
+        if receipt_only {
+            let adopted = lifecycle_run(&f, &actual, &["adopt", &id, "--yes"])?;
+            assert_eq!(adopted["status"], "ok", "{adopted}");
+            write_json(&f.catalog, &json!({"schema_version":1,"packages":[]}))?;
+        }
+        let listed = lifecycle_run(&f, &actual, &["list", "--kind", "applications"])?;
+        let formulae: Vec<_> = listed["data"]["resources"]
+            .as_array()
+            .ok_or("software inventory")?
+            .iter()
+            .filter(|row| row["name"] == "foo")
+            .collect();
+        assert_eq!(formulae.len(), 1, "{listed}");
+        assert_eq!(formulae[0]["id"], id);
+        assert_eq!(formulae[0]["manager"], "brew");
+        assert_eq!(formulae[0]["recipe_ref"], id);
+        let old = format!(
+            "application:{}",
+            digest(&json!(["declared-recipe", id, f.home]))?
+        );
+        assert!(
+            formulae[0]["aliases"]
+                .as_array()
+                .ok_or("aliases")?
+                .contains(&json!(old))
+        );
+        let registry = f.file("state/brew-contexts-v1.json");
+        let mut book = f.read_json("state/brew-contexts-v1.json")?;
+        book["contexts"]
+            .as_object_mut()
+            .ok_or("contexts")?
+            .values_mut()
+            .next()
+            .ok_or("context")?["writer_scope_confirmed"] = json!(true);
+        write_json(&registry, &book)?;
+        run_brew_pty(
+            &f,
+            &actual,
+            &["list"],
+            json!({"inventory":[key,result],"approved":approved}),
+        )?;
+        let commands: Vec<Value> = fs::read_to_string(f.home.join("events"))?
+            .lines()
+            .map(serde_json::from_str)
+            .collect::<Result<_, _>>()?;
+        let mutations: Vec<_> = commands
+            .iter()
+            .filter_map(|event| event[0].as_str())
+            .filter(|command| matches!(*command, "install" | "upgrade" | "uninstall"))
+            .collect();
+        assert_eq!(mutations, mutation.into_iter().collect::<Vec<_>>());
+        assert_eq!(f.home.join("mutated").exists(), mutation.is_some());
+        assert_eq!(f.home.join("native-cellar/foo").exists(), key != "x");
+        if approved && (key != "x" || receipt_only) {
+            let receipts = f.read_json("state/receipts.json")?;
+            assert_eq!(receipts["installations"].get(&id).is_some(), key != "x");
+        } else {
+            assert!(!f.file("state/receipts.json").exists());
+        }
+    }
+    Ok(())
+}
+
+fn run_brew_pty(f: &Fixture, actual: &Path, invocation: &[&str], mut request: Value) -> TestResult {
+    let command = protected_command(f);
+    let argv: Vec<_> = std::iter::once(command.get_program())
+        .chain(command.get_args().filter(|arg| *arg != "--json"))
+        .map(|arg| arg.to_str().ok_or("argument"))
+        .chain(invocation.iter().copied().map(Ok))
+        .collect::<Result<_, _>>()?;
+    let mut env = json!({"HOME":actual,"PATH":"/usr/bin:/bin","TERM":"xterm-256color",
+        "SYNTHETIC_AUTH":"private-fixture-token"});
+    if let Some(profile) = std::env::var_os("LLVM_PROFILE_FILE") {
+        env["LLVM_PROFILE_FILE"] = json!(profile.to_str().ok_or("profile")?);
+    }
+    request["argv"] = json!(argv);
+    request["env"] = env;
+    request["catalog"] = json!(f.catalog);
+    request["events"] = json!(f.home.join("events"));
+    request["mutated"] = json!(f.home.join("mutated"));
+    let path = f.home.join("brew-pty.json");
+    write_json(&path, &request)?;
+    let result = std::process::Command::new("/usr/bin/python3")
+        .args(["-I", "-S", "-c", include_str!("recommend_brew_pty.py")])
+        .arg(path)
+        .output()?;
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    Ok(())
+}
+
+#[test]
+fn recommend_brew_confirms_selected_native_install_even_in_a_trusted_context() -> TestResult {
+    for mode in ["cancel", "confirm", "stale", "trust-stale"] {
+        let approved = mode == "confirm";
+        let f = Fixture::new()?;
+        let (id, actual) = lifecycle_fixture(&f)?;
+        fs::remove_dir_all(f.home.join("native-cellar/foo"))?;
+        let mut catalog = f.read_json("catalog.json")?;
+        catalog["packages"][0]["provider"]["recipe_ref"] = json!("synthetic-declared-formula");
+        write_json(&f.catalog, &catalog)?;
+        let registry = f.file("state/brew-contexts-v1.json");
+        let mut book = f.read_json("state/brew-contexts-v1.json")?;
+        let context = book["contexts"]
+            .as_object_mut()
+            .ok_or("contexts")?
+            .values_mut()
+            .next()
+            .ok_or("context")?;
+        context["writer_scope_confirmed"] = json!(true);
+        if mode == "trust-stale" {
+            book["contexts"] = json!({});
+        }
+        write_json(&registry, &book)?;
+        run_brew_pty(
+            &f,
+            &actual,
+            &["recommend", "foo"],
+            json!({"approved":approved,"mode":mode}),
+        )?;
+        if matches!(mode, "stale" | "trust-stale") {
+            assert!(!f.home.join("events").exists());
+            assert!(!f.file("state/receipts.json").exists());
+            continue;
+        }
+        let commands: Vec<Value> = fs::read_to_string(f.home.join("events"))?
+            .lines()
+            .map(serde_json::from_str)
+            .collect::<Result<_, _>>()?;
+        assert_eq!(
+            commands
+                .iter()
+                .filter(|event| event[0] == "install")
+                .count(),
+            usize::from(approved)
+        );
+        assert_eq!(f.home.join("mutated").exists(), approved);
+        if approved {
+            let receipts = f.read_json("state/receipts.json")?;
+            assert!(receipts["installations"].get(&id).is_some());
+        } else {
+            assert!(!f.file("state/receipts.json").exists());
+        }
+    }
+    Ok(())
+}

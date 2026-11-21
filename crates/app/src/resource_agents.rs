@@ -23,8 +23,8 @@ pub fn collect(
         roots: vec![ctx.home.clone()],
         issues: vec![],
     };
-    for (client, name, path) in roots {
-        match profile(ctx, &client, &name, &path, project, applications) {
+    for root in roots {
+        match profile(ctx, &root, project, applications) {
             Ok(resource) => {
                 if resource.status == State::Unknown {
                     coverage.state = CoverageState::Invalid;
@@ -53,7 +53,13 @@ pub(crate) fn profile_roots_matching(
     include: impl Fn(&str, &str) -> bool,
 ) -> Result<Vec<Resource>> {
     let mut profiles = vec![];
-    for (client, name, path) in discover_roots(ctx)? {
+    for ProfileRoot {
+        client,
+        name,
+        path,
+        management,
+    } in discover_roots(ctx)?
+    {
         let prefix = format!(".{client}-");
         let prof = if name == format!(".{client}") {
             "default"
@@ -69,7 +75,7 @@ pub(crate) fn profile_roots_matching(
             id: resource::id("agent", &(&client, &path))?,
             name: format!("{client}:{prof}"),
             aliases: vec![format!("{client}-{prof}"), format!("agent:{client}:{prof}")],
-            management: Management::Untracked,
+            management,
             status: State::Present,
             data: Data::Agent {
                 client,
@@ -89,7 +95,83 @@ pub(crate) fn profile_roots_matching(
     Ok(profiles)
 }
 
-fn discover_roots(ctx: &Context) -> Result<Vec<(String, String, PathBuf)>> {
+pub(crate) struct SessionProfile {
+    pub(crate) client: &'static str,
+    pub(crate) name: String,
+    pub(crate) path: PathBuf,
+}
+
+pub(crate) fn resolve_session_profile(ctx: &Context, selector: &str) -> Result<SessionProfile> {
+    let id_lookup = selector.starts_with("agent:");
+    let ambiguous = || {
+        Error::attention(
+            "session_profile_ambiguous",
+            "档案名称有重复，请使用详情中的档案 ID",
+        )
+    };
+    let mut selection = None;
+    let mut source_error = None;
+    let sources = [
+        (
+            "codex",
+            crate::codex_install::managed_profiles as fn(&Context) -> Result<_>,
+        ),
+        ("claude", crate::claude_install::managed_profiles),
+    ];
+    for (client, load) in sources {
+        let prefix = format!("{client}:");
+        if !id_lookup && !selector.starts_with(&prefix) {
+            continue;
+        }
+        let profiles = match load(ctx) {
+            Ok(profiles) => profiles,
+            Err(error) => {
+                source_error = Some(error);
+                continue;
+            }
+        };
+        for (leaf, path) in profiles {
+            let Some(short) = leaf.strip_prefix(&format!(".{client}-")) else {
+                continue;
+            };
+            let name = format!("{prefix}{short}");
+            if (id_lookup && resource::id("agent", &(client, &path))? != selector)
+                || (!id_lookup && name != selector)
+            {
+                continue;
+            }
+            if !id_lookup && client == "claude" {
+                let alternate = paths::read_path(&ctx.home.join(&leaf))?;
+                if alternate.is_dir() && !managed_root(&alternate) {
+                    return Err(ambiguous());
+                }
+            }
+            if selection
+                .replace(SessionProfile { client, name, path })
+                .is_some()
+            {
+                return Err(ambiguous());
+            }
+        }
+    }
+    selection.ok_or_else(|| source_error.unwrap_or_else(session_unavailable))
+}
+
+pub(crate) fn session_unavailable() -> Error {
+    Error::attention(
+        "codex_session_profile_unavailable",
+        "请选择已纳管的独立档案",
+    )
+}
+
+struct ProfileRoot {
+    client: String,
+    name: String,
+    path: PathBuf,
+    management: Management,
+}
+
+fn discover_roots(ctx: &Context) -> Result<Vec<ProfileRoot>> {
     let mut roots = vec![];
     for entry in std::fs::read_dir(paths::read_path(&ctx.home)?)? {
         let entry = entry?;
@@ -107,36 +189,71 @@ fn discover_roots(ctx: &Context) -> Result<Vec<(String, String, PathBuf)>> {
             continue;
         };
         let path = entry.path();
-        if entry.file_type()?.is_dir() || entry.file_type()?.is_symlink() {
-            roots.push((client.to_owned(), name.to_owned(), path));
+        if matches!(client, "codex" | "claude")
+            && paths::read_path(&path).is_ok_and(|target| managed_root(&target))
+        {
+            continue;
         }
+        if entry.file_type()?.is_dir() || entry.file_type()?.is_symlink() {
+            roots.push(ProfileRoot {
+                client: client.to_owned(),
+                name: name.to_owned(),
+                path,
+                management: Management::Untracked,
+            });
+        }
+    }
+    for (name, profile) in crate::codex_install::managed_profiles(ctx)? {
+        roots.push(ProfileRoot {
+            client: "codex".into(),
+            name,
+            path: profile,
+            management: Management::Adopted,
+        });
+    }
+    for (name, profile) in crate::claude_install::managed_profiles(ctx)? {
+        roots.push(ProfileRoot {
+            client: "claude".into(),
+            name,
+            path: profile,
+            management: Management::Adopted,
+        });
     }
     for (client, path) in [
         ("claude", ctx.harness.claude.as_ref()),
         ("codex", ctx.harness.codex.as_ref()),
     ] {
         if let Some(path) = path {
-            paths::read_path(path)?;
-            if !roots.iter().any(|(_, _, p)| p == path) {
-                roots.push((
-                    client.into(),
-                    format!(".{client}-environment"),
-                    path.clone(),
-                ));
+            let physical = paths::read_path(path)?;
+            if managed_root(&physical) {
+                continue;
+            }
+            if !roots.iter().any(|root| &root.path == path) {
+                roots.push(ProfileRoot {
+                    client: client.into(),
+                    name: format!(".{client}-environment"),
+                    path: path.clone(),
+                    management: Management::Untracked,
+                });
             }
         }
     }
     Ok(roots)
 }
 
+fn managed_root(path: &Path) -> bool {
+    crate::codex_install::reserved(path) || crate::claude_install::reserved(path)
+}
+
 fn profile(
     ctx: &Context,
-    client: &str,
-    name: &str,
-    path: &Path,
+    root: &ProfileRoot,
     project: Option<&Path>,
     applications: &[Resource],
 ) -> Result<Resource> {
+    let client = root.client.as_str();
+    let name = root.name.as_str();
+    let path = root.path.as_path();
     if !std::fs::metadata(paths::read_path(path)?)?.is_dir() {
         return Err(Error::new("invalid_profile_root", "profile 根不是目录"));
     }
@@ -166,7 +283,7 @@ fn profile(
             format!("{client}-{profile}"),
             format!("agent:{client}:{profile}"),
         ],
-        management: Management::Untracked,
+        management: root.management.clone(),
         status,
         data: Data::Agent {
             client: client.into(),

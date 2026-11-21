@@ -157,6 +157,9 @@ pub fn canonical(p: &Package) -> Result<Option<String>> {
     if let Provider::BrewFormula { query, .. } = &p.provider {
         return crate::policy::brew::logical_id(&query.key).map(Some);
     }
+    if let Provider::Mise { package } = &p.provider {
+        return crate::resource::id("mise-tool", package).map(Some);
+    }
     if crate::policy::uv_local::is_uv(&p.provider) {
         return crate::uv_ownership::identity(p);
     }

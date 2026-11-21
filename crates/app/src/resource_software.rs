@@ -151,10 +151,15 @@ fn provider_key(provider: &Provider, ctx: &Context) -> (String, String, String) 
             package.clone(),
             ctx.home.display().to_string(),
         ),
+        Provider::BrewFormula { query, .. } => (
+            "brew".into(),
+            query.key.full_name.clone(),
+            query.key.canonical_prefix.display().to_string(),
+        ),
         Provider::Mise { package } => (
             "mise".into(),
             package.clone(),
-            ctx.home.display().to_string(),
+            mise_scope(ctx).display().to_string(),
         ),
         Provider::Npm {
             package, prefix, ..
@@ -262,6 +267,16 @@ fn declared_app_locations(
     Ok(())
 }
 
+pub(crate) fn mise_scope(ctx: &Context) -> std::path::PathBuf {
+    let get = |key: &str| ctx.scope.paths.get(key).and_then(Option::as_ref);
+    get("MISE_DATA_DIR").cloned().unwrap_or_else(|| {
+        get("XDG_DATA_HOME")
+            .cloned()
+            .unwrap_or_else(|| ctx.home.join(".local/share"))
+            .join("mise")
+    })
+}
+
 pub fn mise(ctx: &Context, project: Option<&Path>) -> Result<(Vec<Resource>, Coverage)> {
     let mut report = Coverage {
         source: "mise".into(),
@@ -300,15 +315,10 @@ pub fn mise(ctx: &Context, project: Option<&Path>) -> Result<(Vec<Resource>, Cov
             return Ok((vec![], report));
         }
     };
-    let scope = ctx
-        .scope
-        .paths
-        .get("MISE_DATA_DIR")
-        .and_then(Option::as_ref)
-        .cloned()
-        .unwrap_or_else(|| ctx.home.join(".local/share/mise"));
+    let scope = mise_scope(ctx);
     let mut resources = vec![];
     for (key, versions) in data {
+        let name = policy::source_label(&key);
         let releases = versions
             .into_iter()
             .map(|v| Release {
@@ -319,13 +329,13 @@ pub fn mise(ctx: &Context, project: Option<&Path>) -> Result<(Vec<Resource>, Cov
             .collect();
         resources.push(Resource {
             id: resource::id("application", &("mise", &key, &scope))?,
-            name: policy::source_label(&key),
+            name: name.clone(),
             aliases: vec![],
             management: Management::Native,
             status: State::Present,
             data: Data::Application {
                 manager: "mise".into(),
-                native_id: policy::source_label(&key),
+                native_id: name,
                 scope: scope.display().to_string(),
                 releases,
                 baseline: None,
@@ -790,6 +800,7 @@ fn declarations(
         if manager == "declared-recipe" {
             native.clone_from(&package.id);
         }
+        let aliases = declaration_aliases(ctx, package)?;
         let identity =
             if let Some((name, binding)) = crate::policy::uv_local::descriptor(&package.provider) {
                 native = crate::policy::uv_local::normalize_name(name)?;
@@ -814,6 +825,11 @@ fn declarations(
                 crate::policy::targets::npm_id(&prefix, package)?
             } else if let Provider::ObservedApp { path, .. } = &package.provider {
                 resource::id("application", &("app-path", path))?
+            } else if let Provider::BrewFormula { query, .. } = &package.provider {
+                resource::id(
+                    "application",
+                    &("brew", &query.key.canonical_prefix, &query.key.full_name),
+                )?
             } else {
                 resource::id("application", &(&manager, &native, &scope))?
             };
@@ -841,7 +857,7 @@ fn declarations(
         resources.push(Resource {
             id: identity,
             name: package.name.clone(),
-            aliases: vec![package.id.clone()],
+            aliases,
             management: if adopted.contains(&package.id) {
                 Management::Adopted
             } else {
@@ -860,4 +876,20 @@ fn declarations(
         });
     }
     Ok(resources)
+}
+
+fn declaration_aliases(ctx: &Context, package: &crate::domain::Package) -> Result<Vec<String>> {
+    let mut aliases = vec![package.id.clone()];
+    let original = match &package.provider {
+        Provider::Mise { package } => Some(("mise", package)),
+        Provider::BrewFormula { .. } => Some(("declared-recipe", &package.id)),
+        _ => None,
+    };
+    if let Some((manager, name)) = original {
+        aliases.push(resource::id(
+            "application",
+            &(manager, name, ctx.home.display().to_string()),
+        )?);
+    }
+    Ok(aliases)
 }

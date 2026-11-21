@@ -19,6 +19,7 @@ pub(crate) enum Kind {
     Capabilities,
     Apps,
     Agents,
+    History,
 }
 
 impl Kind {
@@ -29,10 +30,17 @@ impl Kind {
             Self::Capabilities => "能力",
             Self::Apps => "软件",
             Self::Agents => "Agent 档案",
+            Self::History => "最近操作",
         }
     }
 
-    pub(crate) const TABS: [Self; 4] = [Self::Apps, Self::Capabilities, Self::Agents, Self::Config];
+    pub(crate) const TABS: [Self; 5] = [
+        Self::Apps,
+        Self::Capabilities,
+        Self::Agents,
+        Self::Config,
+        Self::History,
+    ];
 }
 
 #[derive(Debug, Serialize)]
@@ -68,6 +76,7 @@ pub(crate) enum Session {
     Capabilities,
     Apps,
     Agents,
+    History,
 }
 
 impl Session {
@@ -82,6 +91,7 @@ impl Session {
             Kind::Capabilities => Ok((Self::Capabilities, crate::capabilities::browse(ctx, true)?)),
             Kind::Apps => Ok((Self::Apps, resource_view(ctx, "applications")?)),
             Kind::Agents => Ok((Self::Agents, resource_view(ctx, "agents")?)),
+            Kind::History => Ok((Self::History, history_view(ctx)?)),
         }
     }
 
@@ -95,6 +105,7 @@ impl Session {
             Self::Capabilities => crate::capabilities::browse(ctx, true),
             Self::Apps => resource_view(ctx, "applications"),
             Self::Agents => resource_view(ctx, "agents"),
+            Self::History => history_view(ctx),
         }
     }
 
@@ -105,10 +116,9 @@ impl Session {
     ) -> Result<crate::chezmoi_native::ViewerFile> {
         match self {
             Self::Config(browser) => browser.select_file(id, source),
-            Self::Skills | Self::Capabilities | Self::Apps | Self::Agents => Err(Error::attention(
-                "file_unavailable",
-                "此入口提供技能管理详情",
-            )),
+            Self::Skills | Self::Capabilities | Self::Apps | Self::Agents | Self::History => Err(
+                Error::attention("file_unavailable", "此入口提供技能管理详情"),
+            ),
         }
     }
 }
@@ -136,6 +146,7 @@ pub(crate) fn entry(cli: &Cli) -> Option<ExitCode> {
         Command::Skills { command: None } => Kind::Skills,
         Command::Apps => Kind::Apps,
         Command::Agents => Kind::Agents,
+        Command::History { id: None } if interactive && !cli.yes => Kind::History,
         _ => return None,
     };
     let mut warnings = Vec::new();
@@ -179,6 +190,92 @@ pub(crate) fn entry(cli: &Cli) -> Option<ExitCode> {
         }
     };
     Some(ExitCode::from(code))
+}
+
+fn history_view(ctx: &Context) -> Result<View> {
+    let mut history = crate::store::history(ctx)?;
+    history.sort_by(|a, b| {
+        b.started_at
+            .cmp(&a.started_at)
+            .then_with(|| b.id.cmp(&a.id))
+    });
+    let empty = history.is_empty();
+    Ok(View {
+        scope: "global".into(),
+        items: history
+            .into_iter()
+            .map(|journal| {
+                let awaiting_publication =
+                    crate::codex_install::awaiting_publication(ctx, &journal).ok();
+                history_item(journal, awaiting_publication)
+            })
+            .collect(),
+        coverage: "observed",
+        difference_coverage: "not_applicable",
+        observed_at: Some(crate::store::now()),
+        note: if empty {
+            "暂无操作记录"
+        } else {
+            "按开始时间排序"
+        }
+        .into(),
+        incomplete: false,
+    })
+}
+
+fn history_item(journal: crate::domain::Journal, awaiting_publication: Option<bool>) -> Item {
+    use crate::{
+        domain::{Action, Phase},
+        resource::Management,
+    };
+    let operation = match journal.plan.action {
+        Action::Maintain => "维护",
+        Action::Install => "安装",
+        Action::Upgrade => "升级",
+        Action::Uninstall => "卸载",
+        Action::Update => "刷新索引",
+        Action::Adopt => "纳管",
+        Action::Cleanup => "清理",
+        Action::Start => "启动",
+        Action::Stop => "停止",
+        Action::Apply => "应用配置",
+        Action::Restore => "还原",
+        Action::Reconcile => "核对",
+    };
+    let phase = match journal.phase {
+        Phase::Prepared => "已准备",
+        Phase::Running => "运行中",
+        Phase::Unknown => "待核对",
+        Phase::Failed => "失败",
+        Phase::Succeeded if awaiting_publication == Some(true) => "原生安装完成，待登记",
+        Phase::Succeeded if awaiting_publication.is_none() => "原生阶段完成，登记状态待查",
+        Phase::Succeeded => "已完成",
+    };
+    let summary = format!("{operation} · {phase}");
+    let mut details = vec![
+        summary.clone(),
+        format!("操作 {}", journal.id),
+        format!("目标 {}", journal.plan.package.id),
+        format!("原状态目录 {}", journal.state.display()),
+    ];
+    if crate::policy::state::pending(journal.phase) || awaiting_publication == Some(true) {
+        details.push("保留当前运行环境及作用域参数".into());
+        details.push(format!("只读预演  mo recover {} --dry-run", journal.id));
+        details.push(format!("核对原结果  mo recover {}", journal.id));
+    }
+    Item {
+        id: journal.id,
+        name: journal.plan.package.name,
+        summary,
+        managed: true,
+        management: Management::Native,
+        directory: false,
+        path: None,
+        source: None,
+        agents: vec![],
+        loaded: None,
+        details,
+    }
 }
 
 fn execute(
@@ -327,3 +424,7 @@ fn resource_item(resource: crate::resource::Resource) -> Option<Item> {
         details,
     })
 }
+
+#[cfg(test)]
+#[path = "../tests/unit/history_browser.rs"]
+mod tests;

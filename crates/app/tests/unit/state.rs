@@ -3,6 +3,88 @@ use super::*;
 use crate::{domain::*, test_support::*};
 
 #[test]
+fn verified_mise_receipt_retains_the_first_materialized_scope() -> TestResult {
+    let mut journal = journal()?;
+    journal.plan.action = Action::Install;
+    journal.plan.package.provider = Provider::Mise {
+        package: "fixture-runtime".into(),
+    };
+    journal.plan.recipe_sha256 = fingerprint(&journal.plan.package)?;
+    let query = MiseQuery {
+        command: CommandSpec {
+            program: "/fixture/bin/mise".into(),
+            args: vec![
+                "ls".into(),
+                "--installed".into(),
+                "--json".into(),
+                "fixture-runtime".into(),
+            ],
+        },
+        namespace: MiseNamespace {
+            home: "/fixture/home".into(),
+            data: "/fixture/home/data".into(),
+            config: "/fixture/home/config".into(),
+            installs: "/fixture/home/data/installs".into(),
+            global_file: None,
+            config_file: None,
+            data_identity: None,
+            config_identity: None,
+            installs_identity: None,
+        },
+        retirement: None,
+    };
+    journal.plan.query = Some(QuerySpec::Mise(query.clone()));
+    let observed = Observation::Present {
+        version: "2.0.0".into(),
+        evidence: None,
+    };
+    let mut exact = query;
+    exact.namespace.data_identity = Some(FileId {
+        device: 1,
+        inode: 10,
+    });
+    let verified = Some(QuerySpec::Mise(exact.clone()));
+    let mut receipts = Receipts::default();
+    assert!(commit_verified_receipt(
+        &mut receipts,
+        &journal,
+        observed.clone(),
+        1,
+        verified.clone()
+    )?);
+    assert_eq!(
+        receipts.installations[&journal.plan.package.id].query,
+        verified
+    );
+    assert!(!commit_verified_receipt(
+        &mut receipts,
+        &journal,
+        observed.clone(),
+        2,
+        verified.clone()
+    )?);
+    exact.namespace.data_identity = Some(FileId {
+        device: 1,
+        inode: 11,
+    });
+    assert!(
+        commit_verified_receipt(
+            &mut receipts,
+            &journal,
+            observed,
+            3,
+            Some(QuerySpec::Mise(exact))
+        )
+        .is_err()
+    );
+    assert_eq!(
+        receipts.installations[&journal.plan.package.id].query,
+        verified
+    );
+    Ok(())
+}
+
+#[test]
 fn journal_integrity_checks_each_frozen_binding() -> TestResult {
     let valid = journal()?;
     validate_journal(&valid)?;

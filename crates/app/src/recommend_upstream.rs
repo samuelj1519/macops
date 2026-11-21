@@ -41,15 +41,239 @@ pub(crate) fn repository_subject(value: &str) -> Option<&str> {
     repository_id(value.strip_suffix(".git").unwrap_or(value)).ok()
 }
 
+pub(super) const REPOSITORY_SEARCH: &str = "https://api.github.com/search/repositories?";
+
+#[derive(PartialEq, Eq, Debug)]
+pub(super) struct RepositoryMatch {
+    pub name: String,
+    pub fork: bool,
+}
+
+fn search_url(name: &str) -> Option<String> {
+    repository_id(&format!("github/{name}")).ok()?;
+    Some(format!(
+        "{REPOSITORY_SEARCH}q={name}%20in%3Aname%20is%3Apublic%20archived%3Afalse&per_page=8"
+    ))
+}
+
+fn search_matches(name: &str, data: &Value) -> Vec<RepositoryMatch> {
+    let mut seen = std::collections::BTreeSet::new();
+    data["items"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .take(8)
+        .filter_map(|entry| {
+            let full_name = repository_id(entry["full_name"].as_str()?).ok()?;
+            let (_, short) = full_name.split_once('/')?;
+            let fork = entry["fork"].as_bool()?;
+            if !name.eq_ignore_ascii_case(short)
+                || entry["private"] != false
+                || entry["archived"] != false
+                || entry["disabled"] == true
+                || !seen.insert(full_name.to_ascii_lowercase())
+            {
+                return None;
+            }
+            Some(RepositoryMatch {
+                name: full_name.into(),
+                fork,
+            })
+        })
+        .collect()
+}
+
+pub(super) fn search(ctx: &Context, name: &str) -> Option<Result<Vec<RepositoryMatch>>> {
+    let url = search_url(name)?;
+    let deadline = Instant::now() + Duration::from_secs(ctx.timeout_secs.min(15));
+    Some(
+        crate::recommend_model::fetch_public(&url, deadline)
+            .map(|data| search_matches(name, &data)),
+    )
+}
+
 struct RepositoryEvidence {
     repository: String,
     commit: crate::policy::source_git::ObjectId,
+    default_branch: Option<String>,
     documents: Vec<Document>,
 }
 
 struct Document {
     path: String,
     content: String,
+}
+
+const CODEX_MARKETPLACE: &str = ".agents/plugins/marketplace.json";
+const CODEX_PLUGIN: &str = ".codex-plugin/plugin.json";
+
+fn documents_claude_market(evidence: &RepositoryEvidence) -> bool {
+    evidence.documents.iter().any(|doc| {
+        doc.content.lines().any(|line| {
+            let mut words = line.split_ascii_whitespace();
+            words
+                .by_ref()
+                .take(4)
+                .eq(["claude", "plugin", "marketplace", "add"])
+                && words
+                    .next()
+                    .and_then(repository_subject)
+                    .is_some_and(|repo| repo.eq_ignore_ascii_case(&evidence.repository))
+                && words.next().is_none()
+        })
+    })
+}
+
+fn claude_marketplace(
+    evidence: &RepositoryEvidence,
+    fetch: &mut impl FnMut(&str) -> Result<Value>,
+) -> Option<crate::claude_install_source::Offer> {
+    use crate::claude_install_source::{MARKET, Offer, PLUGIN};
+    if !documents_claude_market(evidence) {
+        return None;
+    }
+    let base = format!("https://api.github.com/repos/{}", evidence.repository);
+    let market = public_file(fetch, &base, MARKET, &evidence.commit)?;
+    let plugin = public_file(fetch, &base, PLUGIN, &evidence.commit)?;
+    let offer = Offer::identify(
+        &evidence.repository,
+        &evidence.commit,
+        market.content.as_bytes(),
+        plugin.content.as_bytes(),
+    )
+    .ok()?;
+    let id = offer.native_id();
+    evidence
+        .documents
+        .iter()
+        .any(|doc| {
+            doc.content.lines().any(|line| {
+                let mut words = line.split_ascii_whitespace();
+                words
+                    .by_ref()
+                    .take(4)
+                    .eq(["claude", "plugin", "install", id.as_str()])
+                    && matches!(
+                        (words.next(), words.next(), words.next()),
+                        (None, None, None) | (Some("--scope"), Some("user"), None)
+                    )
+            })
+        })
+        .then_some(offer)
+}
+
+fn public_file(
+    fetch: &mut impl FnMut(&str) -> Result<Value>,
+    base: &str,
+    path: &str,
+    commit: &crate::policy::source_git::ObjectId,
+) -> Option<Document> {
+    let value = fetch(&format!("{base}/contents/{path}?ref={}", commit.as_str())).ok()?;
+    document(&value, Some(path))
+}
+
+fn documents_codex_market(evidence: &RepositoryEvidence, doc: &Document) -> bool {
+    doc.content.lines().any(|line| {
+        let mut words = line.split_ascii_whitespace();
+        words
+            .by_ref()
+            .take(4)
+            .eq(["codex", "plugin", "marketplace", "add"])
+            && words
+                .next()
+                .and_then(repository_subject)
+                .is_some_and(|source| source.eq_ignore_ascii_case(&evidence.repository))
+            && match (words.next(), words.next(), words.next()) {
+                (None, None, None) => true,
+                (Some("--ref"), Some(reference), None) => {
+                    reference == evidence.commit.as_str()
+                        || Some(reference) == evidence.default_branch.as_deref()
+                }
+                _ => false,
+            }
+    })
+}
+
+fn documents_codex_plugin(doc: &Document, id: &str) -> bool {
+    doc.content.lines().any(|line| {
+        line.split_ascii_whitespace()
+            .eq(["codex", "plugin", "add", id])
+    })
+}
+
+fn codex_marketplace(
+    evidence: &RepositoryEvidence,
+    fetch: &mut impl FnMut(&str) -> Result<Value>,
+) -> Option<Value> {
+    use crate::policy::source_git::{ObjectId, Repository};
+    let repo = &evidence.repository;
+    let market_instructions: Vec<_> = evidence
+        .documents
+        .iter()
+        .filter(|doc| documents_codex_market(evidence, doc))
+        .collect();
+    if market_instructions.is_empty() {
+        return None;
+    }
+    let base = format!("https://api.github.com/repos/{repo}");
+    let market_doc = public_file(fetch, &base, CODEX_MARKETPLACE, &evidence.commit)?;
+    let market = crate::policy::json::parse(market_doc.content.as_bytes()).ok()?;
+    let market_name = market["name"]
+        .as_str()
+        .filter(|name| crate::native_plugins::valid_name(name))?;
+    let candidates = market["plugins"]
+        .as_array()
+        .filter(|rows| rows.len() <= 512)?;
+    let mut matching = candidates.iter().filter_map(|item| {
+        let name = item["name"]
+            .as_str()
+            .filter(|name| crate::native_plugins::valid_name(name))?;
+        let id = format!("{name}@{market_name}");
+        let instructions = market_instructions
+            .iter()
+            .find(|doc| documents_codex_plugin(doc, &id))?;
+        Some((name, &item["source"], *instructions))
+    });
+    let (plugin_name, source, instructions) = matching.next()?;
+    if matching.next().is_some()
+        || source["source"] != "url"
+        || !source["path"].is_null()
+        || !source["sha"].is_null()
+    {
+        return None;
+    }
+    let url = source["url"].as_str()?;
+    let canonical = Repository::parse(repo).ok()?.url();
+    if url != canonical && canonical.strip_suffix(".git") != Some(url) {
+        return None;
+    }
+    let reference = source["ref"]
+        .as_str()
+        .filter(|value| crate::native_plugins::valid_name(value) && !value.contains(".."))?;
+    let commit = if let Ok(commit) = ObjectId::parse(reference) {
+        commit
+    } else {
+        let resolved = fetch(&format!("{base}/commits/{reference}")).ok()?;
+        ObjectId::parse(resolved["sha"].as_str()?).ok()?
+    };
+    let plugin_doc = public_file(fetch, &base, CODEX_PLUGIN, &commit)?;
+    let plugin = crate::policy::json::parse(plugin_doc.content.as_bytes()).ok()?;
+    if plugin["name"].as_str() != Some(plugin_name) {
+        return None;
+    }
+    let version = plugin["version"]
+        .as_str()
+        .filter(|version| crate::native_plugins::valid_name(version))?;
+    let sha256 = |doc: &Document| format!("{:x}", Sha256::digest(doc.content.as_bytes()));
+    Some(json!({
+        "marketplace":market_name,"plugin":plugin_name,"declaredVersion":version,
+        "repository":repo,"payloadRef":reference,
+        "marketplaceCommit":evidence.commit.as_str(),"payloadCommit":commit.as_str(),
+        "marketplaceSha256":sha256(&market_doc),"pluginManifestSha256":sha256(&plugin_doc),
+        "instructions":instructions.path,"marketplaceManifest":CODEX_MARKETPLACE,
+        "pluginManifest":CODEX_PLUGIN,
+        "status":if commit == evidence.commit {"same-commit-observed"} else {"divergent-commits"}
+    }))
 }
 
 fn document(value: &Value, expected_path: Option<&str>) -> Option<Document> {
@@ -104,6 +328,7 @@ fn repository_evidence(
     Ok(RepositoryEvidence {
         repository: repository.into(),
         commit,
+        default_branch: metadata["default_branch"].as_str().map(str::to_owned),
         documents: readme.into_iter().chain(install).collect(),
     })
 }
@@ -117,7 +342,7 @@ pub(crate) fn show_repository(
     if dry_run {
         return show(ctx, repo, repo, true);
     }
-    let deadline = Instant::now() + Duration::from_secs(ctx.timeout_secs.min(15));
+    let deadline = Instant::now() + Duration::from_secs(ctx.timeout_secs.min(30));
     Ok(repository_review(ctx, repo, interactive, |url| {
         crate::recommend_model::fetch_public(url, deadline)
     }))
@@ -127,10 +352,12 @@ fn repository_review(
     ctx: &Context,
     repo: &str,
     interactive: bool,
-    fetch: impl FnMut(&str) -> Result<Value>,
+    mut fetch: impl FnMut(&str) -> Result<Value>,
 ) -> Value {
-    match repository_evidence(repo, fetch) {
+    match repository_evidence(repo, &mut fetch) {
         Ok(evidence) => {
+            let codex_marketplace = codex_marketplace(&evidence, &mut fetch);
+            let claude_marketplace = claude_marketplace(&evidence, &mut fetch);
             let model = match interactive
                 .then(|| crate::recommend_setup::read(ctx))
                 .transpose()
@@ -152,12 +379,19 @@ fn repository_review(
                 "url": format!("https://github.com/{}/blob/{commit}/{}", evidence.repository, doc.path),
                 "sha256": format!("{:x}", Sha256::digest(doc.content.as_bytes())),
             })).collect();
-            json!({
+            let mut data = json!({
                 "query":repo,"repository":evidence.repository,"commit":commit,
                 "documents":documents,"model":model,
                 "evidenceStatus":if documents.is_empty() {"documents-unavailable"} else {"public-commit"},
                 "canExecute":false,"persistentWrites":false
-            })
+            });
+            if let Some(market) = codex_marketplace {
+                data["codexMarketplace"] = market;
+            }
+            if let Some(market) = claude_marketplace {
+                data["claudeMarketplace"] = json!(market);
+            }
+            data
         }
         Err(error) => json!({
             "query":repo,"repository":repo,"evidenceStatus":"source-unavailable",

@@ -377,50 +377,63 @@ pub fn launch(store: &Store, journal: &mut Journal, binding: &RunBinding) -> Res
 
 pub fn observe(store: &Store, journal: &Journal, binding: &RunBinding) -> Result<NativeOutcome> {
     store.verify_namespace()?;
-    let observed = (|| {
-        validate(journal, binding)?;
-        if self::binding(store, journal)? != *binding {
+    let observed = self::binding(store, journal).and_then(|saved| {
+        if saved != *binding {
             return Err(invalid());
         }
-        let directory = opened(binding)?;
-        let worker: WorkerBinding = read(&directory, &name(journal, "worker"))?;
-        if worker.binding_sha256 != fingerprint(binding)?
-            || Some(worker.process_group) != journal.process_group
-            || worker.worker_pid != worker.process_group
-        {
-            return Err(invalid());
-        }
-        let exists = directory
-            .metadata(OsStr::new(&binding.completion_name))?
-            .is_some();
-        if !exists {
-            return Ok(if crate::process::group_alive(worker.process_group) {
-                NativeOutcome::Running
-            } else {
-                unknown("native_completion_missing")
-            });
-        }
-        let completion: Completion = read(&directory, &binding.completion_name)?;
-        if completion.binding_sha256 != fingerprint(binding)?
-            || completion.worker != worker
-            || completion.child_pid == 0
-            || completion.code.is_some() == completion.signal.is_some()
-        {
-            return Err(invalid());
-        }
-        if crate::process::group_alive(worker.process_group) {
-            return Ok(NativeOutcome::Running);
-        }
-        if completion.uncertain {
-            return Ok(unknown("native_result_uncertain"));
-        }
-        Ok(NativeOutcome::Exited {
-            code: completion.code,
-            signal: completion.signal,
-        })
-    })();
+        inspect(journal, binding)
+    });
     store.verify_namespace()?;
     Ok(observed.unwrap_or_else(|_| unknown("native_completion_unverified")))
+}
+
+pub(crate) fn original_outcome(journal: &Journal) -> Result<NativeOutcome> {
+    let (directory, _) = private_state(&journal.state)?;
+    let binding: RunBinding = read(&directory, &name(journal, "binding"))?;
+    inspect(journal, &binding)
+}
+
+fn inspect(journal: &Journal, binding: &RunBinding) -> Result<NativeOutcome> {
+    validate(journal, binding)?;
+    let directory = opened(binding)?;
+    if read::<RunBinding>(&directory, &name(journal, "binding"))? != *binding {
+        return Err(invalid());
+    }
+    let worker: WorkerBinding = read(&directory, &name(journal, "worker"))?;
+    if worker.binding_sha256 != fingerprint(binding)?
+        || Some(worker.process_group) != journal.process_group
+        || worker.worker_pid != worker.process_group
+    {
+        return Err(invalid());
+    }
+    let exists = directory
+        .metadata(OsStr::new(&binding.completion_name))?
+        .is_some();
+    if !exists {
+        return Ok(if crate::process::group_alive(worker.process_group) {
+            NativeOutcome::Running
+        } else {
+            unknown("native_completion_missing")
+        });
+    }
+    let completion: Completion = read(&directory, &binding.completion_name)?;
+    if completion.binding_sha256 != fingerprint(binding)?
+        || completion.worker != worker
+        || completion.child_pid == 0
+        || completion.code.is_some() == completion.signal.is_some()
+    {
+        return Err(invalid());
+    }
+    if crate::process::group_alive(worker.process_group) {
+        return Ok(NativeOutcome::Running);
+    }
+    if completion.uncertain {
+        return Ok(unknown("native_result_uncertain"));
+    }
+    Ok(NativeOutcome::Exited {
+        code: completion.code,
+        signal: completion.signal,
+    })
 }
 
 pub fn worker(

@@ -273,6 +273,7 @@ pub fn binding(package: &Package, query: &QuerySpec) -> Result<()> {
         QuerySpec::LocalNpm(query) => validate_local_npm_binding(package, query),
         QuerySpec::Command(command) => validate_legacy_npm_command(package, command),
         QuerySpec::NativeConfig(_)
+        | QuerySpec::Mise(_)
         | QuerySpec::BrewFormula(_)
         | QuerySpec::LocalConfig(_)
         | QuerySpec::LocalCapability(_)

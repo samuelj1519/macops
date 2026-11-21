@@ -284,6 +284,39 @@ impl Git {
         full.extend(args.iter().map(std::ffi::OsString::from));
         self.run(&full, limit)
     }
+
+    pub fn mirror_listing(&self, tree: &ObjectId) -> Result<Vec<u8>> {
+        self.object_command(&["ls-tree", "-rlz", tree.as_str()], 16 * 1024 * 1024)
+    }
+
+    pub fn mirror_blobs(&self, objects: &[&ObjectId], limit: u64) -> Result<Vec<u8>> {
+        use std::ffi::OsString;
+        use std::io::{Seek as _, Write as _};
+        let mut input = tempfile::tempfile_in(&self.temp)?;
+        for object in objects {
+            writeln!(input, "{}", object.as_str())?;
+        }
+        input.rewind()?;
+        let args = [
+            OsString::from("--git-dir"),
+            self.repo.as_os_str().to_owned(),
+            "cat-file".into(),
+            "--batch".into(),
+        ];
+        let mut command = self.command(&args)?;
+        command.stdin(Stdio::from(input));
+        let output = crate::process::capture_bytes_guarded(
+            &mut command,
+            Duration::from_secs(60),
+            limit,
+            || self.storage_usage().map(|_| ()),
+        )?;
+        self.verify()?;
+        if output.code != Some(0) || output.uncertain {
+            return Err(invalid());
+        }
+        Ok(output.stdout)
+    }
     fn bind(&mut self, repository: &Repository) -> Result<()> {
         self.verify()?;
         if let Some(before) = &self.repository {
@@ -345,6 +378,58 @@ impl Git {
             ],
             2 * 1024 * 1024,
         )?;
+        self.fetched_tree(commit)
+    }
+
+    pub fn fetch_full_mirror(
+        &self,
+        repository: &Repository,
+        commit: &ObjectId,
+        branch: &str,
+    ) -> Result<(ObjectId, &Path)> {
+        self.fetch_full_mirror_using(repository, commit, branch, |git, argv| {
+            git.object_command(argv, 2 * 1024 * 1024)
+        })
+    }
+
+    fn fetch_full_mirror_using(
+        &self,
+        repository: &Repository,
+        commit: &ObjectId,
+        branch: &str,
+        fetch: fn(&Self, &[&str]) -> Result<Vec<u8>>,
+    ) -> Result<(ObjectId, &Path)> {
+        use crate::policy::source_git::Reference;
+        if self.repository.is_some()
+            || !matches!(Reference::parse(Some(branch))?, Reference::Named(_))
+            || branch.starts_with("refs/")
+        {
+            return Err(invalid());
+        }
+        fetch(
+            self,
+            &[
+                "fetch",
+                "--depth=1",
+                "--no-tags",
+                "--no-recurse-submodules",
+                "--",
+                &repository.url(),
+                commit.as_str(),
+            ],
+        )?;
+        self.pin_fetched_mirror(commit, branch)
+    }
+
+    fn pin_fetched_mirror(&self, commit: &ObjectId, branch: &str) -> Result<(ObjectId, &Path)> {
+        let tree = self.fetched_tree(commit)?;
+        let target = format!("refs/heads/{branch}");
+        self.object_command(&["update-ref", &target, commit.as_str()], 1024)?;
+        self.object_command(&["symbolic-ref", "HEAD", &target], 1024)?;
+        Ok((tree, &self.repo))
+    }
+
+    fn fetched_tree(&self, commit: &ObjectId) -> Result<ObjectId> {
         let actual =
             self.object_command(&["rev-parse", "--verify", "FETCH_HEAD^{commit}"], 1024)?;
         let value = std::str::from_utf8(&actual)

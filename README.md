@@ -8,7 +8,7 @@ Download the Apple Silicon archive and `SHA256SUMS` from the [GitHub releases](h
 
 ```sh
 shasum -a 256 -c SHA256SUMS
-tar -xzf macops-v0.2.1-darwin-arm64.tar.gz
+tar -xzf macops-v0.3.0-darwin-arm64.tar.gz
 ```
 
 For a new installation, place the binary in your user directory and create both command names.
@@ -23,13 +23,17 @@ mo --version
 
 Add `$HOME/.local/bin` to `PATH` if needed.
 
+To upgrade an existing installation, replace `$HOME/.local/libexec/macops` with the verified binary and confirm the version with `mo --version`.
+
 To build from source, use the Rust version pinned in `rust-toolchain.toml` and run `cargo build --release --locked`. The build produces `target/release/macops`.
 
 ## Browse resources
 
-Run `mo` or `mo list` in a terminal. The inventory has application, capability, agent, and configuration tabs. The capability tab includes skills and native plugins. Use `mo help advanced` for the full command and option reference.
+Run `mo` or `mo list` in a terminal. The inventory has application, capability, agent, configuration, and recent-operation tabs. The capability tab includes skills and native plugins. Use `mo help advanced` for the full command and option reference.
 
 `mo apps`, `mo agents`, `mo skills`, and `mo config` remain direct entry points.
+
+`mo history` opens recent operations in a terminal. Open an entry awaiting verification or registration and press `c` to confirm recovery of the original operation in its recorded scope. The detail page also shows the operation ID and recovery commands. Explicit target queries and `--json` retain the journal response.
 
 | Key | Action |
 | --- | --- |
@@ -40,14 +44,17 @@ Run `mo` or `mo list` in a terminal. The inventory has application, capability, 
 | `Enter` / `Esc` | Open details or go back |
 | `q` | Quit |
 | `a` in Skills | Toggle discovered-only skills |
-| `a` in unified application or capability details | Check whether the selected instance can be adopted |
-| `u` / `x` in unified application details | Preview upgrade or removal for an eligible registered npm instance |
+| `a` in software details or the unified capability tab | Check whether the selected instance can be adopted |
+| `u` in software details | Preview an upgrade for an eligible npm instance, Homebrew formula, or registered mise tool |
+| `x` in software details | Preview removal for an eligible npm instance, Homebrew formula, or inactive mise release |
+| `u` / `x` in managed Skills CLI details | Confirm upgrade or removal of the selected native recipe |
+| `e` / `l` in managed agent details | Set the plugin preference or launch an independent session |
 | `r` in Config | Refresh the enrolled chezmoi inventory |
 | `o` / `s` in Config details | Read the destination or source file |
 
-Skill searches can include an agent such as `@codex`. The configuration viewer opens verified, regular UTF-8 files up to 256 KiB in read-only mode.
+Homebrew actions show the native formula, Cellar, selected versions, and target before confirmation. A registered mise upgrade shows the active and target versions, the installation scope, and the effect on user configuration. Skill lists start with all discovered entries. Searches can include an agent such as `@codex`. The configuration viewer opens verified, regular UTF-8 files up to 256 KiB in read-only mode.
 
-Skill details show observed files and the profiles that can discover them through their own, shared, or compatible directories. These are local directory observations. Plugin details in the capability tab show the native registration, payload, and configured enablement separately for each observed Codex or Claude profile. Cursor plugin enablement and session loading remain unverified.
+Skill details show observed files and the profiles that can discover them through their own, shared, or compatible directories. These are local directory observations. Plugin details show the native registration, payload, and configured enablement separately for each observed Codex or Claude profile. Cursor project declarations are shown separately from installation and session loading.
 
 The direct browser shortcuts return a text list without a terminal. Non-interactive `mo list` retains its structured inventory output. Use `--json` for the response envelope and `mo list --kind applications|agents|capabilities|configs` to query a resource category. `--project /absolute/path` selects a project context. Results distinguish discovery, adoption, configured state, and verified loading. The `coverage` field reports inspected sources and incomplete evidence.
 
@@ -56,6 +63,10 @@ The direct browser shortcuts return a text list without a terminal. Non-interact
 `mo plugins` lists the native marketplace entry points for Codex, Claude Code, and Cursor. It reads locally registered Codex and Claude Code marketplaces and their observed catalog files. Use `mo plugins claude:mi` to select one Claude profile. Catalog entries describe offers. Installed plugins and their configured state appear separately in the capability tab.
 
 `mo plugins cursor --online` delegates the account marketplace query to the installed Cursor CLI. It uses the native login and may update Cursor's own cache. Use the native `/plugins` or `/plugin` entry shown for your Harness to browse online catalogs and install a new plugin. These actions follow the Harness's own scope and confirmation.
+
+Use `mo list --kind capabilities --project /absolute/path` to read plugin declarations in a Cursor project's `.cursor/settings.json`. The listing shows the declared setting and source file. Cursor handles installation and loading for that project. See [Cursor's plugin documentation](https://cursor.com/docs/plugins).
+
+For an existing Codex plugin, select its profile-specific capability ID in the inventory and run `mo adopt ID`. A verified registration and a single identifiable version cache can be recorded as an adoption baseline. The baseline is read-only for native maintenance.
 
 ```sh
 mo info agent:claude:mi
@@ -82,6 +93,8 @@ A version 1 catalog can be selected with `--catalog /absolute/path/catalog.json`
 
 Homebrew formulae bind to the executable, prefix, Cellar, and full formula name. npm binds to the prefix, package name, package manifest, and applicable npm configuration. You can adopt an npm discovery as a read-only receipt. Declare a matching catalog entry with write authority, then run `mo adopt ID --bind-recipe` to retain the same identity for maintenance.
 
+mise binds the resolved installation and global configuration paths at adoption. If a tracked mise receipt needs a path review, open its software details and use `a` to confirm the current baseline before upgrading. Removal is available for a tracked tool with a single physical release that mise reports as inactive in the selected user's home. Review any projects that still refer to that version before confirming.
+
 ### Installation advice
 
 ```sh
@@ -97,7 +110,19 @@ GitHub lookup checks a selected README and compares up to six npm or Homebrew co
 
 For a repository name or GitHub repository URL, macops pins a public commit and links to its README and `INSTALL.md` when available. Run `mo setup` in a terminal to configure a DeepSeek or custom HTTPS OpenAI-compatible endpoint. The wizard confirms a connection test and saves the key in Keychain. Repository recommendations use that profile when enabled and interactive. The model receives public document excerpts and tool names. Its structured proposals are advisory.
 
-When a name matches an eligible, registered npm recipe, the interactive recommendation can offer a versioned installation plan. It runs the selected plan after confirmation. Other proposals display their source without granting installation authority.
+When an interactive short-name lookup has no registered install candidate, macops can search public GitHub repositories by that name. Select a source to review its pinned installation evidence.
+
+When a name matches an eligible npm, Homebrew, or mise recipe, the interactive recommendation can offer a versioned installation plan. Homebrew confirms the exact formula, scope, and target version. A registered mise recipe confirms the requested version and its user configuration effect before invoking native global activation. macops checks possible configuration targets against chezmoi ownership before the native command starts.
+
+Eligible Codex and Claude Code marketplace recommendations can install into a new independent profile after confirmation. The verified Apple Silicon versions are Codex 0.170.0 and Claude Code 2.1.328. The plan binds marketplace and plugin manifests to one public Git commit. At confirmation, enter `yes` to install and enable the plugin or `disabled` to install it and keep it disabled. The result gives the independent `CODEX_HOME` or `CLAUDE_CONFIG_DIR`. The profile appears in `mo agents` after receipt publication. Other proposals remain advisory.
+
+If a native stage needs attention, use `mo recover ID` to verify its original result or finish publishing its receipt. Recovery keeps the original operation identity and never starts an installer.
+
+If a Claude Code stage is verified and a following stage has yet to start, `mo recover ID` reports a continuation command. Use `mo --dry-run resume ID` to see the retained profile, source and initial plugin setting, then `mo resume ID` to confirm the next stage.
+
+In `mo agents`, open a managed independent Codex or Claude Code profile and press `e` to choose the plugin setting for future sessions launched by macops. Press `l` to launch in the current workspace. Each independent profile retains its own native settings, model, and authentication. Use the exact ID in the details view if two profiles share a name.
+
+Use `mo launch PROFILE` to launch by name or ID. For Codex, add `--native-profile NAME` to select an existing named configuration in that independent home. `mo --dry-run --json launch PROFILE` shows the launch arguments. The launcher uses a system program search path and inherits terminal and locale settings. A plugin that runs a non-system command needs that dependency available in its native profile environment.
 
 The explicit `--model` compatibility option asks DeepSeek to explain bundled public evidence. Its generic password has service `org.macops.recommend.deepseek` and account `default`. Use `--keychain-account` to select another account. Dry runs skip model requests.
 
@@ -135,6 +160,8 @@ mo skills remove NAME
 ```
 
 Member and client selection use native installation arguments. Recipe transformations apply at installation or maintenance. Skills CLI owns the native installation record. macops owns its recipe and derived assets. Choose a unique inventory ID when a name has multiple sources. A batch upgrade records per-item results and lists remaining recipes in `unattempted` when an item fails or has an unknown outcome.
+
+Interactive `mo recommend NAME` can offer a matching, uninstalled Skills CLI recipe from the registered recipe book. Confirm the fixed source commit, Codex user scope, and manual-trigger setting. Skills CLI installs to a shared directory that other compatible agents may also discover.
 
 Use `mo skills plugins list` and `mo skills plugins check RECIPE` to inspect plugin evidence. Plugin writes follow the [native plugin contracts](docs/native-plugin-recipes.md). The verified reinstall path covers an enabled local Codex plugin with the same source and version. Claude profiles with different model settings appear as separate entries.
 

@@ -362,11 +362,19 @@ fn runner_label(command: &str) -> String {
 }
 
 pub fn codex_plugins(bytes: &[u8]) -> Result<BTreeMap<String, Option<bool>>> {
+    codex_plugins_from(&codex_config_document(bytes)?)
+}
+
+pub(super) fn codex_config_document(bytes: &[u8]) -> Result<toml_edit::DocumentMut> {
     let text = std::str::from_utf8(bytes)
         .map_err(|_| Error::new("invalid_codex_config", "Codex配置不是UTF-8"))?;
-    let doc = text
-        .parse::<toml_edit::DocumentMut>()
-        .map_err(|_| Error::new("invalid_codex_config", "Codex配置格式不兼容"))?;
+    text.parse::<toml_edit::DocumentMut>()
+        .map_err(|_| Error::new("invalid_codex_config", "Codex配置格式不兼容"))
+}
+
+pub(super) fn codex_plugins_from(
+    doc: &toml_edit::DocumentMut,
+) -> Result<BTreeMap<String, Option<bool>>> {
     let Some(item) = doc.get("plugins") else {
         return Ok(BTreeMap::new());
     };

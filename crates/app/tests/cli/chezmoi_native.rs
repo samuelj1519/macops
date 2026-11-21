@@ -943,3 +943,82 @@ fn native_configured_entry_filters_remain_partial_even_after_exit_zero() -> Test
     assert_eq!(value["data"]["filesMatch"], Value::Null);
     Ok(())
 }
+
+#[test]
+fn mise_owner_check_handles_unrefreshed_enrollment_and_keeps_disjoint_writes_available()
+-> TestResult {
+    for (mode, expected) in [
+        ("managed", Some("configuration_owner_requires_review")),
+        ("overlap", Some("config_authority_uncertain")),
+        ("refreshed", None),
+        ("late-modifier", Some("config_authority_uncertain")),
+        ("late-encrypted", Some("config_authority_uncertain")),
+        ("unrelated-modifier", None),
+        ("late-external", Some("config_authority_uncertain")),
+        ("late-remove", Some("config_authority_uncertain")),
+        ("unrelated-external", None),
+        ("disjoint", None),
+    ] {
+        let mut native = Native::new()?;
+        if mode != "disjoint" {
+            native.destination = native.fixture.home.clone();
+        }
+        if mode == "managed" {
+            let file = native
+                .source
+                .join("home/dot_config/mise/private_config.toml");
+            fs::create_dir_all(file.parent().ok_or("native source root")?)?;
+            fs::write(file, b"[tools]\ndemo='1.0.0'\n")?;
+        }
+        let f = &native.fixture;
+        let mut catalog = f.read_json("catalog.json")?;
+        catalog["packages"][0]["provider"] = json!({"type":"mise","package":"demo"});
+        super::write_json(&f.catalog, &catalog)?;
+        let version = f.home.join("mise-version");
+        fs::write(&version, b"1.0.0")?;
+        f.script(
+            "mise",
+            r#"case "$1" in
+ls) printf '[{"version":"%s","active":true}]' "$(/bin/cat "$HOME/mise-version")";;
+use) [ "$2 $3 $4" = '--global --pin demo@2.0.0' ]; printf 2.0.0 > "$HOME/mise-version";;
+*) exit 92;;
+esac"#,
+        )?;
+        assert_code(&f.run(&["adopt", "demo", "--yes"])?.0, 0);
+        native.enroll()?;
+        if mode != "overlap" && mode != "disjoint" && mode != "managed" {
+            fs::write(
+                native.source.join("home/.chezmoiignore"),
+                b"# refreshed control file\n",
+            )?;
+            assert_code(&native.run(&["config", "list", "--refresh"])?.0, 0);
+        }
+        let added = match mode {
+            "late-modifier" => Some("home/dot_config/mise/modify_config.toml"),
+            "late-encrypted" => Some("home/dot_config/mise/encrypted_private_config.toml.age"),
+            "unrelated-modifier" => Some("home/modify_dot_bashrc"),
+            "late-external" => Some("home/dot_config/mise/.chezmoiexternal.toml"),
+            "late-remove" => Some("home/dot_config/mise/.chezmoiremove"),
+            "unrelated-external" => Some("home/dot_config/other/.chezmoiexternal.toml"),
+            _ => None,
+        };
+        if let Some(added) = added {
+            let file = native.source.join(added);
+            fs::create_dir_all(file.parent().ok_or("native source root")?)?;
+            fs::write(file, b"# synthetic source control\n")?;
+        }
+        let calls = native.calls()?;
+        let (stdout, result) = f.run(&["upgrade", "demo", "--version", "2.0.0"])?;
+        if let Some(error) = expected {
+            assert_code(&stdout, 3);
+            assert_eq!(result["error"]["code"], error, "{result}");
+            assert_eq!(fs::read(&version)?, b"1.0.0");
+        } else {
+            assert_code(&stdout, 0);
+            assert_eq!(result["data"]["phase"], "succeeded");
+            assert_eq!(fs::read(&version)?, b"2.0.0");
+        }
+        assert_eq!(native.calls()?, calls);
+    }
+    Ok(())
+}

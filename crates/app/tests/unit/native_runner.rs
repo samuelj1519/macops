@@ -138,6 +138,13 @@ fn observe_needs_original_nonce_worker_and_exit_proof_and_cannot_infer_from_payl
             signal: None
         }
     );
+    assert_eq!(
+        original_outcome(&journal)?,
+        NativeOutcome::Exited {
+            code: Some(0),
+            signal: None,
+        }
+    );
     for variant in 0..7 {
         let mut changed = completion.clone();
         match variant {

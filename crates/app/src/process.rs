@@ -77,8 +77,12 @@ pub fn command(spec: &CommandSpec, scope: &crate::domain::Scope) -> Result<Comma
 
 pub fn query(scope: &crate::domain::Scope, spec: &CommandSpec) -> Result<Output> {
     let mut c = command(spec, scope)?;
-    c.process_group(0);
-    capture(&mut c, Duration::from_secs(60))
+    capture_query(&mut c)
+}
+
+pub(crate) fn capture_query(command: &mut Command) -> Result<Output> {
+    command.process_group(0);
+    capture(command, Duration::from_secs(60))
 }
 
 pub struct BinaryOutput {

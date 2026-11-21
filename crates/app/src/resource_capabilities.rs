@@ -25,6 +25,9 @@ pub(crate) fn collect_observed(
     for_browser: bool,
 ) -> Result<(Vec<Resource>, Vec<Coverage>)> {
     let (mut resources, mut reports) = collect_raw(ctx, profiles, project)?;
+    if let Some(project) = project {
+        reports.push(cursor_project_plugins(project, &mut resources)?);
+    }
     if for_browser
         && profiles.iter().any(
             |profile| matches!(&profile.data, Data::Agent { client, .. } if client == "cursor"),
@@ -54,6 +57,115 @@ pub(crate) fn collect_observed(
     }
     apply_receipts(ctx, &mut resources, &mut reports)?;
     Ok((resources.into_values().collect(), reports))
+}
+
+fn cursor_project_settings(path: &Path) -> Result<Option<serde_json::Value>> {
+    let mut reader = crate::native_plugins_files::Passive::new()?;
+    let bytes = reader.file(path)?;
+    reader.verify()?;
+    bytes.as_deref().map(crate::policy::json::parse).transpose()
+}
+
+fn cursor_project_plugins(
+    project: &Path,
+    resources: &mut BTreeMap<String, Resource>,
+) -> Result<Coverage> {
+    let path = project.join(".cursor/settings.json");
+    let mut report = Coverage {
+        source: "cursor-project-plugin-settings".into(),
+        state: CoverageState::Absent,
+        count: 0,
+        roots: vec![path.clone()],
+        issues: vec![],
+    };
+    let settings = match cursor_project_settings(&path) {
+        Ok(Some(value)) if value.is_object() => value,
+        Ok(None) => return Ok(report),
+        Ok(Some(_)) | Err(_) => {
+            report.state = CoverageState::Invalid;
+            report
+                .issues
+                .push("cursor_project_settings_unreadable".into());
+            return Ok(report);
+        }
+    };
+    report.state = CoverageState::Complete;
+    let Some(entries) = settings.get("plugins") else {
+        return Ok(report);
+    };
+    let Some(entries) = entries.as_object() else {
+        report.state = CoverageState::Invalid;
+        report.issues.push("cursor_project_plugins_invalid".into());
+        return Ok(report);
+    };
+    if entries.len() > 1024 {
+        report.state = CoverageState::Truncated;
+        report.issues.push("cursor_project_plugins_limit".into());
+        return Ok(report);
+    }
+    for (key, value) in entries {
+        let name = crate::native_plugins::valid_name;
+        let key_valid = key.split_once('/').map_or_else(
+            || name(key),
+            |(market, plugin)| name(market) && name(plugin),
+        );
+        if !key_valid || !value.is_object() {
+            report.state = CoverageState::Invalid;
+            report
+                .issues
+                .push("cursor_project_plugin_entry_invalid".into());
+            continue;
+        }
+        let enabled = value["enabled"].as_bool();
+        if value.get("enabled").is_some() && enabled.is_none() {
+            report.state = CoverageState::Invalid;
+            report
+                .issues
+                .push("cursor_project_plugin_enabled_invalid".into());
+        }
+        let repository = value["gitUrl"]
+            .as_str()
+            .filter(|url| url.starts_with("https://github.com/"))
+            .and_then(crate::plugin_marketplaces::public_repository);
+        let revision = value["gitRef"]
+            .as_str()
+            .and_then(|value| crate::policy::source_git::ObjectId::parse(value).ok());
+        let logical = resource::id("capability", &("cursor-project-plugin", &path, key))?;
+        let revision = Revision {
+            declared: revision.map(|id| id.as_str().to_owned()),
+            ..Revision::default()
+        };
+        resources.insert(
+            logical.clone(),
+            Resource {
+                id: logical,
+                name: key.clone(),
+                aliases: vec![],
+                management: Management::Declared,
+                status: State::Declared,
+                data: Data::Capability {
+                    delivery_kind: "cursor-project-plugin".into(),
+                    native_id: key.clone(),
+                    origin: Origin {
+                        manager: "cursor".into(),
+                        label: repository,
+                        record: path.clone(),
+                        native_key: key.clone(),
+                    },
+                    revision,
+                    contents: vec![],
+                    deployments: vec![],
+                    configured_enabled: enabled,
+                    loaded: None,
+                    baseline: None,
+                },
+            },
+        );
+        report.count += 1;
+    }
+    report.issues.sort();
+    report.issues.dedup();
+    Ok(report)
 }
 
 pub(crate) fn collect_raw(
@@ -150,14 +262,15 @@ fn apply_receipts(
             }
             continue;
         }
-        let status = if base.comparison == crate::resource::Comparison::Unknown {
-            State::Unknown
-        } else {
-            State::Missing
+        let status = match (&base.comparison, &base.current) {
+            (crate::resource::Comparison::Unknown, _) => State::Unknown,
+            (_, crate::domain::Observation::CapabilityPack { pack: Some(_), .. }) => State::Present,
+            _ => State::Missing,
         };
         let delivery_kind = match capability {
             crate::domain::CapabilityKind::SkillsCli => "skill",
-            crate::domain::CapabilityKind::ClaudePlugin => "plugin",
+            crate::domain::CapabilityKind::ClaudePlugin
+            | crate::domain::CapabilityKind::CodexPlugin => "plugin",
         };
         let alias_prefix = delivery_kind;
         resources.insert(
@@ -167,7 +280,7 @@ fn apply_receipts(
                 name: native_id.clone(),
                 aliases: vec![format!("{alias_prefix}:{native_id}")],
                 management: Management::Adopted,
-                status,
+                status: status.clone(),
                 data: Data::Capability {
                     delivery_kind: delivery_kind.into(),
                     native_id: native_id.clone(),
@@ -182,7 +295,7 @@ fn apply_receipts(
                         id: resource::id("content", payload)?,
                         path: payload.clone(),
                         realpath: None,
-                        status: State::Missing,
+                        status,
                     }],
                     deployments: vec![],
                     configured_enabled: None,
@@ -638,7 +751,7 @@ fn codex(
                         }
                     }
                 }
-                let key = resource::id("capability", &("codex-plugin", &profile.id, &name))?;
+                let key = crate::policy::capability_local::codex_capability_id(&profile.id, &name)?;
                 resources.insert(
                     key.clone(),
                     Resource {

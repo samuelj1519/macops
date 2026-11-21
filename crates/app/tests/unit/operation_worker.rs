@@ -1,7 +1,23 @@
 use super::*;
 use crate::{cli::Cli, test_support::TestResult};
 use clap::Parser;
-use std::{ffi::OsStr, fs};
+use std::{ffi::OsStr, fs, os::unix::fs::PermissionsExt as _};
+
+#[test]
+fn isolated_plugin_install_requires_its_native_supervisor() -> TestResult {
+    let mut journal = crate::test_support::journal()?;
+    journal.plan.action = Action::Install;
+    journal.plan.delegated = true;
+    for family in ["codex", "claude"] {
+        journal.plan.warnings = vec![format!("{family}-isolated-install-v1:{}", "a".repeat(64))];
+        journal.plan_sha256 = fingerprint(&journal.plan)?;
+        let error = prepare_worker(&journal, Path::new("/private/tmp/fixture"), 11000, 11000)
+            .err()
+            .ok_or("the ordinary worker must reject an isolated plugin plan")?;
+        assert_eq!(error.code, "native_plugin_worker_required");
+    }
+    Ok(())
+}
 
 #[test]
 fn a_prepared_generic_worker_uses_only_its_original_scope_program_and_actor_record() -> TestResult {
@@ -218,5 +234,70 @@ fn legacy_npm_observation_cannot_prove_uninstall_or_rebind_to_a_linked_prefix() 
     );
     assert!(prefix.is_dir());
     assert!(alias.is_symlink());
+    Ok(())
+}
+
+#[test]
+fn mise_worker_refuses_a_configuration_owner_discovered_after_planning() -> TestResult {
+    let home = tempfile::tempdir_in("/private/tmp")?;
+    let tool = home.path().join("fixture-mise");
+    fs::write(&tool, b"#!/bin/sh\nprintf '[]'\n")?;
+    fs::set_permissions(&tool, fs::Permissions::from_mode(0o700))?;
+    let cli = Cli::try_parse_from([
+        "macops",
+        "--home",
+        home.path().to_str().ok_or("fixture home")?,
+        "list",
+    ])?;
+    let ctx = Context::from_cli(&cli, &mut vec![])?;
+    assert!(!crate::mise_owner::declared_owner(&ctx)?);
+    let mut plan = crate::test_support::journal()?.plan;
+    plan.package.provider = Provider::Mise {
+        package: "fixture-tool".into(),
+    };
+    plan.before = Observation::Missing { evidence: None };
+    plan.query = Some(QuerySpec::Mise(crate::mise_owner::capture_query(
+        &ctx.scope,
+        crate::domain::CommandSpec {
+            program: tool.clone(),
+            args: vec![
+                "ls".into(),
+                "--installed".into(),
+                "--json".into(),
+                "fixture-tool".into(),
+            ],
+        },
+    )?));
+    plan.action = Action::Install;
+    plan.target = Some("2.0.0".into());
+    plan.command = Some(crate::domain::CommandSpec {
+        program: tool,
+        args: vec![
+            "use".into(),
+            "--global".into(),
+            "--pin".into(),
+            "fixture-tool@2.0.0".into(),
+        ],
+    });
+    plan.recipe_sha256 = fingerprint(&plan.package)?;
+    let mut journal = new_journal(&ctx, plan)?;
+    journal.phase = Phase::Running;
+    journal.process_group = Some(41111);
+    let job = ctx
+        .state
+        .join("operations")
+        .join(format!("{}.json", journal.id));
+    assert!(prepare_worker(&journal, &job, 41111, 41111).is_ok());
+    let source = ctx
+        .home
+        .join(".local/share/chezmoi/dot_config/mise/private_config.local.toml");
+    fs::create_dir_all(source.parent().ok_or("mise source root")?)?;
+    fs::write(&source, b"[tools]\nfixture-tool='1.0.0'\n")?;
+    let blocked = prepare_worker(&journal, &job, 41111, 41111)
+        .err()
+        .ok_or("new owner")?;
+    assert_eq!(blocked.code, "configuration_owner_requires_review");
+    assert_eq!(fs::read(&source)?, b"[tools]\nfixture-tool='1.0.0'\n");
+    assert!(!ctx.state.exists());
     Ok(())
 }

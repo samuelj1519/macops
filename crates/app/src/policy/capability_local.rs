@@ -34,6 +34,31 @@ pub fn plugin_capability_id(profile_id: &str, native_id: &str) -> String {
     format!("capability:{:x}", Sha256::digest(bytes))
 }
 
+pub fn codex_capability_id(profile_id: &str, native_id: &str) -> Result<String> {
+    crate::resource::id("capability", &("codex-plugin", profile_id, native_id))
+}
+
+fn codex_cache_binding<'a>(
+    record: &Path,
+    payload: &'a Path,
+    native_id: &'a str,
+) -> Option<(&'a str, &'a str)> {
+    let (plugin, market) = native_id.rsplit_once('@')?;
+    let root = record.parent()?;
+    let version = payload.file_name()?.to_str()?;
+    (record.file_name().and_then(std::ffi::OsStr::to_str) == Some("config.toml")
+        && valid_plugin_id(native_id)
+        && crate::native_plugins::valid_name(version)
+        && payload.parent()
+            == Some(
+                root.join("plugins/cache")
+                    .join(market)
+                    .join(plugin)
+                    .as_path(),
+            ))
+    .then_some((market, version))
+}
+
 pub fn valid_plugin_id(value: &str) -> bool {
     value.rsplit_once('@').is_some_and(|(name, market)| {
         crate::policy::resources::component(name) && crate::policy::resources::component(market)
@@ -97,7 +122,61 @@ pub fn validate_package(package: &Package) -> Result<()> {
             }
             Ok(())
         }
+        CapabilityKind::CodexPlugin => {
+            crate::policy::paths::lexical(record)?;
+            let root = record.parent().ok_or_else(invalid_plan)?;
+            let profile = crate::resource::id("agent", &("codex", root)).ok();
+            if package.kind != Kind::Plugin
+                || manager != "codex-config"
+                || source.is_some()
+                || settings.is_some()
+                || !profile.as_ref().is_some_and(|profile| {
+                    profile_id.as_ref() == Some(profile)
+                        && codex_capability_id(profile, native_id).is_ok_and(|id| package.id == id)
+                })
+                || codex_cache_binding(record, payload, native_id).is_none()
+            {
+                return Err(Error::new("invalid_capability_package", &package.id));
+            }
+            Ok(())
+        }
     }
+}
+
+pub fn parse_codex_record(
+    id: &str,
+    record: &Path,
+    payload: &Path,
+    native_id: &str,
+    bytes: &[u8],
+) -> Result<Option<ParsedRecord>> {
+    let (market, version) =
+        codex_cache_binding(record, payload, native_id).ok_or_else(invalid_plan)?;
+    let config = crate::policy::resources::codex_config_document(bytes)?;
+    let plugins = crate::policy::resources::codex_plugins_from(&config)?;
+    let Some(configured_enabled) = plugins.get(native_id).copied() else {
+        return Ok(None);
+    };
+    let market_record = config
+        .get("marketplaces")
+        .and_then(toml_edit::Item::as_table_like)
+        .and_then(|table| table.get(market))
+        .map(ToString::to_string);
+    fingerprint(&(
+        "macops-codex-plugin-v1",
+        id,
+        native_id,
+        version,
+        configured_enabled,
+        market_record,
+    ))
+    .map(|digest| {
+        Some(ParsedRecord {
+            digest,
+            revision: Some(version.into()),
+            configured_enabled,
+        })
+    })
 }
 
 fn invalid_plan() -> Error {

@@ -145,6 +145,8 @@ pub enum Command {
         #[arg(long, help = "人工核对后记录失败并解除阻断；不修复软件")]
         resolve_failed: bool,
     },
+    #[command(about = "确认并继续已核验的 Claude Code 首装")]
+    Resume { operation_id: String },
     #[command(about = "技能与插件来源维护")]
     Skills {
         #[command(subcommand)]
@@ -169,6 +171,12 @@ pub enum Command {
     Apps,
     #[command(about = "浏览 Agent 和 Harness 档案")]
     Agents,
+    #[command(about = "启动 macops 纳管的独立 Agent 档案")]
+    Launch {
+        profile: String,
+        #[arg(long)]
+        native_profile: Option<String>,
+    },
     #[command(about = "工具链查询")]
     Toolchain {
         #[command(subcommand)]

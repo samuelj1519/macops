@@ -17,7 +17,7 @@ mod native_routing;
 mod plugin_marketplaces;
 use common::{Fixture, TestResult, assert_code, uv_tool, write_json};
 use serde_json::json;
-use std::{fs, os::unix::fs::symlink};
+use std::{fs, os::unix::fs::symlink, path::PathBuf};
 
 fn npm_manifest(prefix: &std::path::Path, name: &str, version: &str) -> TestResult {
     let module = prefix.join("lib/node_modules").join(name);
@@ -5428,5 +5428,811 @@ fn manifest_preserves_missing_legacy_scope_without_treating_it_as_current_author
     assert_code(&out, 3);
     assert_eq!(replay["error"]["code"], "manifest_scope_changed");
     assert_eq!(fs::read(path)?, before);
+    Ok(())
+}
+
+#[test]
+fn operation_history_browses_newest_pending_record_without_mutating_state() -> TestResult {
+    let f = Fixture::new()?;
+    chezmoi_native::run_browser_pty(&f, &["history"], "history-empty", &f.home, "78", "0")?;
+    assert!(!f.file("state").exists());
+    let (out, result) = f.run(&["install", "demo", "--version", "1.0.0", "--yes"])?;
+    assert_code(&out, 0);
+    let mut pending = result["data"].clone();
+    assert_eq!(pending["phase"], "succeeded");
+    pending["id"] = json!("OP-fixture-recent");
+    pending["phase"] = json!("unknown");
+    pending["started_at"] = json!(pending["started_at"].as_u64().ok_or("started")? + 1);
+    pending["message"] = json!("SYNTHETIC_PRIVATE_COMMAND_OUTPUT");
+    let path = f.file("state/operations/OP-fixture-recent.json");
+    write_json(&path, &pending)?;
+    let record_bytes = fs::read(&path)?;
+    let active = fs::read(f.file("state/active.json"))?;
+    let receipts = fs::read(f.file("state/receipts.json"))?;
+    chezmoi_native::run_browser_pty(&f, &["history"], "history-direct", &f.home, "78", "0")?;
+    chezmoi_native::run_browser_pty(&f, &["list"], "history-unified", &f.home, "96", "0")?;
+    let (out, json) = f.run(&["history", "fixture:demo"])?;
+    assert_code(&out, 0);
+    let rows = json["data"].as_array().ok_or("journal response")?;
+    assert_eq!(rows.len(), 2);
+    assert!(rows.contains(&pending));
+    assert_eq!(fs::read(path)?, record_bytes);
+    assert_eq!(fs::read(f.file("state/active.json"))?, active);
+    assert_eq!(fs::read(f.file("state/receipts.json"))?, receipts);
+    Ok(())
+}
+
+#[test]
+fn codex_launch_json_and_unknown_profiles_never_dispatch() -> TestResult {
+    let f = Fixture::new()?;
+    let (result, value) = f.run(&["launch", "codex:default"])?;
+    assert_code(&result, 1);
+    assert_eq!(value["error"]["code"], "launch_json_requires_preview");
+    let (result, value) = f.run(&["launch", "codex:default", "--dry-run"])?;
+    assert_code(&result, 3);
+    assert_eq!(value["error"]["code"], "codex_session_profile_unavailable");
+    assert!(!f.file("state").exists());
+    Ok(())
+}
+
+#[test]
+fn history_recovery_requires_confirmation_of_the_same_original_record() -> TestResult {
+    let f = Fixture::new()?;
+    let (out, installed) = f.run(&["install", "demo", "--version", "1.0.0", "--yes"])?;
+    assert_code(&out, 0);
+    let mut pending = installed["data"].clone();
+    pending["id"] = json!("OP-fixture-recovery");
+    pending["phase"] = json!("prepared");
+    pending["process_group"] = serde_json::Value::Null;
+    pending["started_at"] = json!(pending["started_at"].as_u64().ok_or("started")? + 1);
+    let active = f.file("state/active.json");
+    let history = f.file("state/operations/OP-fixture-recovery.json");
+    write_json(&active, &pending)?;
+    write_json(&history, &pending)?;
+    let frozen_record = fs::read(&history)?;
+    let before = fs::read(&active)?;
+    let calls = fs::read(f.file("calls"))?;
+    let receipts = fs::read(f.file("state/receipts.json"))?;
+    chezmoi_native::run_browser_pty(
+        &f,
+        &["history"],
+        "history-recover-cancel",
+        &active,
+        "96",
+        "0",
+    )?;
+    assert_eq!(fs::read(&active)?, before);
+    assert_eq!(fs::read(&history)?, frozen_record);
+    chezmoi_native::run_browser_pty(
+        &f,
+        &["history"],
+        "history-recover-stale",
+        &active,
+        "96",
+        "0",
+    )?;
+    assert_eq!(fs::read(&history)?, frozen_record);
+    let changed = f.read_json("state/active.json")?;
+    assert_eq!(changed["phase"], "prepared");
+    assert_eq!(
+        changed["message"],
+        "operation progress changed during confirmation"
+    );
+    chezmoi_native::run_browser_pty(
+        &f,
+        &["history"],
+        "history-recover-confirm",
+        &active,
+        "96",
+        "0",
+    )?;
+    let checked = f.read_json("state/operations/OP-fixture-recovery.json")?;
+    assert_eq!(checked["phase"], "failed");
+    assert_eq!(checked["id"], "OP-fixture-recovery");
+    assert_eq!(checked["plan_sha256"], pending["plan_sha256"]);
+    assert_eq!(fs::read(f.file("calls"))?, calls);
+    assert_eq!(fs::read(f.file("state/receipts.json"))?, receipts);
+    Ok(())
+}
+
+#[test]
+fn skills_inventory_confirms_exact_maintenance_recipe_and_rejects_changed_book() -> TestResult {
+    let f = Fixture::new()?;
+    let name = "fixture-skill";
+    native_skill_fixture(&f, &[name])?;
+    let recipe = fixed_native_recipe(&f, name)?;
+    let recipe = recipe.to_str().ok_or("recipe")?;
+    let (out, value) = f.run(&[
+        "skills",
+        "adopt",
+        "skill:fixture-skill",
+        "--recipe",
+        recipe,
+        "--yes",
+    ])?;
+    assert_code(&out, 0);
+    assert_eq!(value["data"]["journal"]["phase"], "succeeded");
+    let before = fs::read(f.file("state/active.json"))?;
+    let receipts = fs::read(f.file("state/receipts.json"))?;
+    let book = f.home.join(".config/macops/native-skills-recipes.json");
+    let book_before = fs::read(&book)?;
+    for scenario in ["skill-maintenance-cancel", "skill-maintenance-stale"] {
+        chezmoi_native::run_browser_pty(&f, &["skills"], scenario, &book, "104", "0")?;
+        assert_eq!(fs::read(f.file("state/receipts.json"))?, receipts);
+        assert_eq!(fs::read(f.file("state/active.json"))?, before);
+        assert!(
+            f.home
+                .join(".agents/skills/fixture-skill/SKILL.md")
+                .is_file()
+        );
+        assert!(!f.home.join("cap-poison").exists());
+        if scenario == "skill-maintenance-cancel" {
+            assert_eq!(fs::read(&book)?, book_before);
+        } else {
+            assert_ne!(fs::read(&book)?, book_before);
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn skills_inventory_removes_the_original_installation_with_one_native_call() -> TestResult {
+    let f = Fixture::new()?;
+    let name = "fixture-skill";
+    native_skill_fixture(&f, &[name])?;
+    let recipe = fixed_native_recipe(&f, name)?;
+    let raw: serde_json::Value = serde_json::from_slice(&fs::read(&recipe)?)?;
+    let runner = raw["runner"]["node"].as_str().ok_or("runner")?;
+    fs::write(
+        runner,
+        r#"#!/bin/sh
+set -eu
+if [ "$1" = --version ]; then printf 'v26.13.1\n'; exit 0; fi
+if [ "$2" = --version ]; then printf '1.9.0\n'; exit 0; fi
+[ "$#" = 8 ]
+[ "$2 $3 $4 $5 $6 $7 $8" = 'remove --global --yes --agent codex --skill fixture-skill' ]
+printf 'remove\n' >> "$HOME/removal-calls"
+/bin/rm "$HOME/.agents/skills/fixture-skill/SKILL.md"
+/bin/rmdir "$HOME/.agents/skills/fixture-skill"
+printf '{"version":3,"skills":{}}\n' > "$HOME/.agents/.skill-lock.json"
+"#,
+    )?;
+    let (out, adopted) = f.run(&[
+        "skills",
+        "adopt",
+        "skill:fixture-skill",
+        "--recipe",
+        recipe.to_str().ok_or("recipe")?,
+        "--yes",
+    ])?;
+    assert_code(&out, 0);
+    assert_eq!(adopted["data"]["journal"]["phase"], "succeeded");
+    chezmoi_native::run_browser_pty(
+        &f,
+        &["skills"],
+        "skill-maintenance-removed",
+        &f.home,
+        "104",
+        "0",
+    )?;
+    assert_eq!(
+        fs::read_to_string(f.home.join("removal-calls"))?,
+        "remove\n"
+    );
+    assert!(!f.home.join(".agents/skills/fixture-skill").exists());
+    assert_eq!(
+        f.read_json("state/receipts.json")?["installations"],
+        json!({})
+    );
+    let active = f.read_json("state/active.json")?;
+    assert_eq!(active["phase"], "succeeded");
+    assert_eq!(active["plan"]["action"], "uninstall");
+    Ok(())
+}
+
+#[test]
+fn recommend_skill_chooses_fixed_registered_scope_and_refuses_changed_recipe() -> TestResult {
+    for scenario in ["recommend-skill-cancel", "recommend-skill-stale"] {
+        let f = Fixture::new()?;
+        let name = "fixture-skill";
+        native_skill_fixture(&f, &[name])?;
+        let recipe_file = fixed_native_recipe(&f, name)?;
+        let mut recipe: serde_json::Value = serde_json::from_slice(&fs::read(recipe_file)?)?;
+        recipe["manualOnly"] = json!(true);
+        recipe["runner"]["sha256"] = json!("c".repeat(64));
+        fs::remove_dir_all(f.home.join(".agents/skills").join(name))?;
+        write_json(
+            &f.home.join(".agents/.skill-lock.json"),
+            &json!({"version":3,"skills":{}}),
+        )?;
+        let book = f.home.join(".config/macops/native-skills-recipes.json");
+        fs::create_dir_all(book.parent().ok_or("recipe parent")?)?;
+        write_json(&book, &json!({"schemaVersion":1,"recipes":[recipe]}))?;
+        chezmoi_native::run_browser_pty(&f, &["recommend", name], scenario, &book, "102", "3")?;
+        assert!(!f.home.join("cap-poison").exists());
+        assert!(!f.file("state/active.json").exists());
+        assert!(!f.file("state/receipts.json").exists());
+        assert!(!f.home.join(".agents/skills").join(name).exists());
+        if scenario == "recommend-skill-cancel" {
+            assert!(!f.file("state").exists());
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn empty_claude_resume_preview_does_not_create_state() -> TestResult {
+    let f = Fixture::new()?;
+    let (result, value) = f.run(&["resume", "OP-fixture", "--dry-run"])?;
+    assert_ne!(result.status.code(), Some(0));
+    assert!(value["data"].is_null());
+    assert!(!f.file("state").exists());
+    Ok(())
+}
+
+#[test]
+fn generic_mise_distinguishes_checked_alternate_layers_from_unselected_override() -> TestResult {
+    for (dir, name, owned) in [
+        ("mise", "private_config.local.toml", true),
+        ("mise", "private_config.fixture.toml", true),
+        ("mise", "private_Config.TOML", true),
+        ("miſe", "private_config.toml", true),
+        ("mise", "private_config.override.toml", false),
+    ] {
+        let f = Fixture::new()?;
+        let mut catalog = f.read_json("catalog.json")?;
+        catalog["packages"][0]["provider"] = json!({"type":"mise","package":"demo"});
+        write_json(&f.catalog, &catalog)?;
+        let root = f.home.join("alternate-chezmoi");
+        let declared = root.join("managed/dot_config").join(dir).join(name);
+        fs::create_dir_all(declared.parent().ok_or("managed path")?)?;
+        fs::write(root.join(".chezmoiroot"), b"managed\n")?;
+        fs::write(&declared, b"[tools]\ndemo='1.0.0'\n")?;
+        let cfg = f.home.join(".config/chezmoi/chezmoi.toml");
+        fs::create_dir_all(cfg.parent().ok_or("configuration root")?)?;
+        fs::write(
+            &cfg,
+            format!("sourceDir = {:?}\n", root.display().to_string()),
+        )?;
+        let version = f.home.join("native-version");
+        fs::write(&version, b"1.0.0")?;
+        f.script(
+            "chezmoi",
+            r#"printf unexpected > "$MACOPS_TEST_HOME/owner-query"; exit 97"#,
+        )?;
+        f.script(
+            "mise",
+            r#"case "$1" in
+ls) printf '[{"version":"%s","active":true}]' "$(/bin/cat "$HOME/native-version")";;
+use) [ "$2 $3 $4" = '--global --pin demo@2.0.0' ]; printf 2.0.0 > "$HOME/native-version";;
+*) exit 98;;
+esac"#,
+        )?;
+        assert_code(&f.run(&["adopt", "demo", "--yes"])?.0, 0);
+        let (out, result) = f.run(&["upgrade", "demo", "--version", "2.0.0"])?;
+        if owned {
+            assert_code(&out, 3);
+            assert_eq!(
+                result["error"]["code"],
+                "configuration_owner_requires_review"
+            );
+            assert_eq!(fs::read(&version)?, b"1.0.0");
+        } else {
+            assert_code(&out, 0);
+            assert_eq!(result["data"]["phase"], "succeeded");
+            assert_eq!(fs::read(&version)?, b"2.0.0");
+        }
+        assert!(!f.home.join("owner-query").exists());
+        assert_eq!(fs::read(declared)?, b"[tools]\ndemo='1.0.0'\n");
+    }
+    Ok(())
+}
+
+#[test]
+fn recommended_registered_mise_tool_is_confirmed_and_uses_native_global_activation() -> TestResult {
+    let f = Fixture::new()?;
+    let mut catalog = f.read_json("catalog.json")?;
+    catalog["packages"][0]["provider"] = json!({"type":"mise","package":"demo"});
+    write_json(&f.catalog, &catalog)?;
+    f.script(
+        "mise",
+        r#"case "$1" in
+ls) if [ -f "$HOME/selected-version" ]; then
+    printf '[{"version":"%s","active":true}]' "$(/bin/cat "$HOME/selected-version")";
+    else printf '[]'; fi;;
+use) [ "$2 $3 $4" = '--global --pin demo@1.2.3' ]
+     /bin/mkdir -p "$MISE_DATA_DIR" "$MISE_CONFIG_DIR"
+     printf 1.2.3 > "$HOME/selected-version";;
+*) exit 79;;
+esac"#,
+    )?;
+    chezmoi_native::run_browser_pty(
+        &f,
+        &["recommend", "demo"],
+        "recommend-mise",
+        &f.home,
+        "104",
+        "0",
+    )?;
+    assert_eq!(fs::read(f.home.join("selected-version"))?, b"1.2.3");
+    let receipt = f.read_json("state/receipts.json")?;
+    assert_eq!(
+        receipt["installations"]["fixture:demo"]["observation"]["version"],
+        "1.2.3"
+    );
+    let namespace = &receipt["installations"]["fixture:demo"]["query"]["namespace"];
+    assert!(namespace["data_identity"].is_object(), "{namespace}");
+    assert!(namespace["config_identity"].is_object(), "{namespace}");
+    Ok(())
+}
+
+#[test]
+fn direct_apps_adopts_one_registered_mise_row_and_confirms_the_exact_upgrade() -> TestResult {
+    use sha2::Digest as _;
+
+    let f = Fixture::new()?;
+    let mut catalog = f.read_json("catalog.json")?;
+    catalog["packages"][0]["provider"] = json!({"type":"mise","package":"demo"});
+    write_json(&f.catalog, &catalog)?;
+    let version = f.home.join("active-version");
+    fs::write(&version, b"1.2.3")?;
+    f.script(
+        "mise",
+        r#"case "$1" in
+ls) current=$(/bin/cat "$HOME/active-version")
+    [ "$2 $3" = '--installed --json' ] || exit 84
+    if [ "$#" = 3 ]; then printf '{"demo":[{"version":"%s","active":true}]}' "$current"
+    else [ "$4" = demo ]; printf '[{"version":"%s","active":true}]' "$current"; fi;;
+latest) [ "$2" = demo ]; printf '2.0.0\n';;
+use) [ "$2 $3 $4" = '--global --pin demo@2.0.0' ] || exit 93
+     printf 2.0.0 > "$HOME/active-version";;
+*) exit 94;;
+esac"#,
+    )?;
+    let (out, data) = f.run(&["list", "--kind", "applications"])?;
+    assert_code(&out, 0);
+    let resources = data["data"]["resources"]
+        .as_array()
+        .ok_or("software resources")?;
+    let observed = resources
+        .iter()
+        .filter(|row| row["native_id"] == "demo")
+        .collect::<Vec<_>>();
+    assert_eq!(observed.len(), 1, "{data}");
+    assert_eq!(observed[0]["recipe_ref"], "fixture:demo");
+    assert_eq!(observed[0]["releases"][0]["version"], "1.2.3");
+    let lookup = serde_json::to_vec(&("mise", "demo", f.home.display().to_string()))?;
+    let earlier_id = format!("application:{:x}", sha2::Sha256::digest(lookup));
+    assert!(
+        observed[0]["aliases"]
+            .as_array()
+            .ok_or("software aliases")?
+            .contains(&json!(earlier_id))
+    );
+    for (scenario, expected) in [
+        ("mise-adopt", b"1.2.3"),
+        ("mise-upgrade-cancel", b"1.2.3"),
+        ("mise-upgrade-conflict", b"1.2.3"),
+        ("mise-upgrade", b"2.0.0"),
+        ("mise-retire", b"2.0.0"),
+    ] {
+        chezmoi_native::run_browser_pty(
+            &f,
+            &["apps"],
+            scenario,
+            std::path::Path::new("demo"),
+            "110",
+            if scenario == "mise-upgrade-conflict" {
+                "3"
+            } else {
+                "0"
+            },
+        )?;
+        if scenario == "mise-upgrade-conflict" {
+            write_json(&f.catalog, &catalog)?;
+        }
+        assert_eq!(fs::read(&version)?, expected);
+        assert_eq!(
+            f.read_json("state/receipts.json")?["installations"]["fixture:demo"]["observation"]["version"],
+            std::str::from_utf8(expected)?
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn registered_mise_receipt_binds_the_actual_data_directory_across_commands() -> TestResult {
+    let f = Fixture::new()?;
+    let mut catalog = f.read_json("catalog.json")?;
+    catalog["packages"][0]["provider"] = json!({"type":"mise","package":"demo"});
+    write_json(&f.catalog, &catalog)?;
+    let a = f.home.join("scope-a");
+    let b = f.home.join("scope-b");
+    let alias = f.home.join("mise-data");
+    for path in [&a, &b] {
+        fs::create_dir(path)?;
+        fs::write(path.join("version"), b"1.2.3")?;
+    }
+    symlink(&a, &alias)?;
+    f.script(
+        "mise",
+        r#"case "$1" in
+ls) printf '[{"version":"%s","active":true}]' "$(/bin/cat "$MISE_DATA_DIR/version")";;
+use) [ "$2 $3 $4" = '--global --pin demo@2.0.0' ] || exit 93
+     printf 2.0.0 > "$MISE_DATA_DIR/version";;
+*) exit 94;;
+esac"#,
+    )?;
+    let run = |arguments: &[&str]| {
+        f.command()
+            .env("HOME", &f.home)
+            .env("MISE_DATA_DIR", &alias)
+            .env_remove("XDG_DATA_DIRS")
+            .env_remove("XDG_CONFIG_DIRS")
+            .args(arguments)
+            .output()
+    };
+    assert_code(&run(&["adopt", "demo", "--yes"])?, 0);
+    let adopted = fs::read(f.file("state/receipts.json"))?;
+    fs::remove_file(&alias)?;
+    symlink(&b, &alias)?;
+    let out = run(&["upgrade", "demo", "--version", "2.0.0"])?;
+    assert_code(&out, 3);
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout)?;
+    assert_eq!(value["error"]["code"], "manager_identity_changed");
+    assert_eq!(fs::read(a.join("version"))?, b"1.2.3");
+    assert_eq!(fs::read(b.join("version"))?, b"1.2.3");
+    assert_eq!(fs::read(f.file("state/receipts.json"))?, adopted);
+    fs::remove_file(&alias)?;
+    symlink(&a, &alias)?;
+    let original = f.home.join("original-data");
+    fs::rename(&a, &original)?;
+    fs::rename(&b, &a)?;
+    let replaced = run(&["upgrade", "demo", "--version", "2.0.0"])?;
+    assert_code(&replaced, 3);
+    assert_eq!(fs::read(a.join("version"))?, b"1.2.3");
+    assert_eq!(fs::read(original.join("version"))?, b"1.2.3");
+    assert_eq!(fs::read(f.file("state/receipts.json"))?, adopted);
+    fs::rename(&a, &b)?;
+    fs::rename(&original, &a)?;
+    assert_code(&run(&["upgrade", "demo", "--version", "2.0.0"])?, 0);
+    assert_eq!(fs::read(a.join("version"))?, b"2.0.0");
+    assert_eq!(fs::read(b.join("version"))?, b"1.2.3");
+    Ok(())
+}
+
+#[test]
+fn mise_first_install_recovery_keeps_the_first_observed_directory_identity() -> TestResult {
+    let f = Fixture::new()?;
+    let mut catalog = f.read_json("catalog.json")?;
+    catalog["packages"][0]["provider"] = json!({"type":"mise","package":"demo"});
+    write_json(&f.catalog, &catalog)?;
+    let replacement = f.home.join("replacement-data");
+    fs::create_dir(&replacement)?;
+    fs::write(replacement.join("version"), b"1.2.3")?;
+    fs::write(f.home.join("swap-on-verification"), b"")?;
+    f.script(
+        "mise",
+        r#"case "$1" in
+ls) if [ -f "$MISE_DATA_DIR/version" ]; then
+       version=$(/bin/cat "$MISE_DATA_DIR/version")
+       if [ -f "$HOME/swap-on-verification" ]; then
+           /bin/mv "$MISE_DATA_DIR" "$HOME/original-data"
+           /bin/mv "$HOME/replacement-data" "$MISE_DATA_DIR"
+           /bin/rm "$HOME/swap-on-verification"
+       fi
+       printf '[{"version":"%s","active":true}]' "$version"
+    else printf '[]'; fi;;
+use) [ "$2 $3 $4" = '--global --pin demo@1.2.3' ] || exit 93
+     /bin/mkdir -p "$MISE_DATA_DIR"
+     printf 1.2.3 > "$MISE_DATA_DIR/version"
+     printf writer >> "$HOME/native-writers";;
+*) exit 94;;
+esac"#,
+    )?;
+    let (out, initial) = f.run(&["install", "demo", "--version", "1.2.3"])?;
+    assert_code(&out, 3);
+    assert_eq!(initial["data"]["phase"], "unknown");
+    let id = initial["data"]["id"]
+        .as_str()
+        .ok_or("original operation identity")?;
+    let (out, foreign) = f.run(&["recover", id, "--yes"])?;
+    assert_code(&out, 3);
+    assert_eq!(foreign["data"]["phase"], "unknown");
+    assert_eq!(foreign["data"]["id"], id);
+    assert!(!f.file("state/receipts.json").exists());
+    let root = f.home.join(".local/share/mise");
+    fs::rename(&root, &replacement)?;
+    fs::rename(f.home.join("original-data"), &root)?;
+    let completion = f.file(&format!("state/{id}-mise-completion.json"));
+    let bytes = fs::read(&completion)?;
+    fs::remove_file(&completion)?;
+    let (out, missing) = f.run(&["recover", id, "--yes"])?;
+    assert_code(&out, 3);
+    assert_eq!(missing["data"]["phase"], "unknown");
+    assert!(!f.file("state/receipts.json").exists());
+    fs::write(&completion, bytes)?;
+    let (out, repaired) = f.run(&["recover", id, "--yes"])?;
+    assert_code(&out, 0);
+    assert_eq!(repaired["data"]["phase"], "succeeded");
+    assert_eq!(repaired["data"]["id"], id);
+    assert_eq!(fs::read(f.home.join("native-writers"))?, b"writer");
+    assert_eq!(fs::read(replacement.join("version"))?, b"1.2.3");
+    Ok(())
+}
+
+fn inactive_mise_fixture() -> Result<(Fixture, PathBuf), Box<dyn std::error::Error>> {
+    let f = Fixture::new()?;
+    let mut catalog = f.read_json("catalog.json")?;
+    catalog["packages"][0]["provider"] = json!({"type":"mise","package":"demo"});
+    write_json(&f.catalog, &catalog)?;
+    let payload = f.home.join(".local/share/mise/installs/demo/1.2.3");
+    fs::create_dir_all(&payload)?;
+    fs::write(payload.join("tool"), b"fixture payload")?;
+    f.script(
+        "mise",
+        r#"scope="${MISE_INSTALLS_DIR:-$HOME/.local/share/mise/installs}"
+payload="$scope/demo/1.2.3"
+case "$1" in
+ls)
+    if [ -f "$HOME/fixture-response" ]; then
+        /bin/cat "$HOME/fixture-response"
+    elif [ -f "$payload/tool" ]; then
+        row=$(printf '{"version":"1.2.3","active":false,"install_path":"%s"}' "$payload")
+        if [ "$#" = 3 ]; then printf '{"demo":[%s]}' "$row"
+        else printf '[%s]' "$row"; fi
+    else
+        if [ "$#" = 3 ]; then printf '{}'; else printf '[]'; fi
+    fi;;
+where) [ "$#" = 2 ] && [ "$2" = 'demo@1.2.3' ]; printf '%s\n' "$payload";;
+uninstall) [ "$#" = 2 ] && [ "$2" = 'demo@1.2.3' ]
+    /bin/rm "$payload/tool"
+    /bin/rmdir "$payload"
+    printf writer >> "$HOME/retirement-writers";;
+*) exit 94;;
+esac"#,
+    )?;
+    assert_code(&f.run(&["adopt", "demo", "--yes"])?.0, 0);
+    Ok((f, payload))
+}
+
+#[test]
+fn mise_retirement_rejects_unproved_release_evidence_without_a_native_writer() -> TestResult {
+    let (f, payload) = inactive_mise_fixture()?;
+    let proof = f.home.join("fixture-response");
+    let receipt = fs::read(f.file("state/receipts.json"))?;
+    let version = |active: bool, path: &std::path::Path| json!({"version":"1.2.3","active":active,"install_path":path});
+    for rows in [
+        json!([version(true, &payload)]),
+        json!([{"version":"1.2.3","install_path":&payload}]),
+        json!([version(false, &payload), version(false, &payload)]),
+        json!([version(false, &f.home.join("outside/demo/1.2.3"))]),
+        json!({"failed":"unexpected native format"}),
+    ] {
+        write_json(&proof, &rows)?;
+        let (out, data) = f.run(&["uninstall", "demo", "--yes"])?;
+        assert_code(&out, 3);
+        assert_eq!(data["error"]["code"], "consumer_review_required");
+        assert!(payload.join("tool").exists());
+        assert_eq!(fs::read(f.file("state/receipts.json"))?, receipt);
+        assert!(!f.home.join("retirement-writers").exists());
+    }
+    let other_backend = f.home.join(".local/share/mise/installs/other-demo/1.2.3");
+    fs::create_dir_all(&other_backend)?;
+    write_json(&proof, &json!([version(false, &other_backend)]))?;
+    let (out, mismatch) = f.run(&["uninstall", "demo", "--yes"])?;
+    assert_code(&out, 3);
+    assert_eq!(mismatch["error"]["code"], "mise_release_changed");
+    assert!(other_backend.exists() && payload.exists());
+    assert!(!f.home.join("retirement-writers").exists());
+    Ok(())
+}
+
+#[test]
+fn mise_retirement_recovery_requires_the_original_absence_proof_and_preserves_new_receipts()
+-> TestResult {
+    let (f, payload) = inactive_mise_fixture()?;
+    let known = f.read_json("state/receipts.json")?;
+    let (out, removed) = f.run(&["uninstall", "demo", "--yes"])?;
+    assert_code(&out, 0);
+    assert_eq!(removed["data"]["phase"], "succeeded");
+    assert!(!payload.exists());
+    let id = removed["data"]["id"]
+        .as_str()
+        .ok_or("retirement operation")?;
+    let proof = f.file(&format!("state/{id}-mise-release-absence.json"));
+    let bytes = fs::read(&proof)?;
+    let receipt_path = f.file("state/receipts.json");
+    let committed = fs::read(&receipt_path)?;
+    let mut interrupted = removed["data"].clone();
+    interrupted["phase"] = json!("unknown");
+    write_json(&f.file("state/active.json"), &interrupted)?;
+    fs::remove_file(&proof)?;
+    assert_code(&f.run(&["recover", id])?.0, 3);
+    assert_eq!(fs::read(&receipt_path)?, committed);
+
+    fs::write(&proof, bytes)?;
+    let mut rebound = known;
+    rebound["installations"]["fixture:demo"]["operation_id"] = json!("OP-new-owner");
+    write_json(&receipt_path, &rebound)?;
+    let foreign = fs::read(&receipt_path)?;
+    assert_code(&f.run(&["recover", id])?.0, 3);
+    assert_eq!(fs::read(&receipt_path)?, foreign);
+    fs::write(&receipt_path, &committed)?;
+    let (result, verified) = f.run(&["recover", id])?;
+    assert_code(&result, 0);
+    assert_eq!(verified["data"]["phase"], "succeeded");
+    assert_code(&f.run(&["recover", id])?.0, 0);
+    assert_eq!(fs::read(receipt_path)?, committed);
+    assert_eq!(fs::read(f.home.join("retirement-writers"))?, b"writer");
+    Ok(())
+}
+
+#[test]
+fn direct_apps_confirms_inactive_mise_retirement_and_refuses_replaced_payload() -> TestResult {
+    for scenario in [
+        "mise-retirement-cancel",
+        "mise-retirement-stale",
+        "mise-retirement-confirm",
+    ] {
+        let (f, payload) = inactive_mise_fixture()?;
+        let original = fs::read(f.file("state/receipts.json"))?;
+        let config = f.home.join(".config/mise/config.toml");
+        fs::create_dir_all(config.parent().ok_or("mise configuration root")?)?;
+        fs::write(&config, b"[env]\nFIXTURE = 'retained'\n")?;
+        assert_code(&f.run(&["adopt", "demo", "--yes"])?.0, 0);
+        assert_ne!(fs::read(f.file("state/receipts.json"))?, original);
+        let bound = fs::read(f.file("state/receipts.json"))?;
+        chezmoi_native::run_browser_pty(
+            &f,
+            &["apps"],
+            scenario,
+            std::path::Path::new("demo"),
+            "150",
+            "0",
+        )?;
+        let completed = scenario == "mise-retirement-confirm";
+        assert_eq!(payload.exists(), !completed);
+        assert_eq!(f.home.join("retirement-writers").exists(), completed);
+        assert_eq!(fs::read(config)?, b"[env]\nFIXTURE = 'retained'\n");
+        if completed {
+            assert!(f.read_json("state/receipts.json")?["installations"]["fixture:demo"].is_null());
+        } else {
+            assert_eq!(fs::read(f.file("state/receipts.json"))?, bound);
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn mise_installs_override_does_not_invalidate_an_existing_other_provider_receipt() -> TestResult {
+    let f = Fixture::new()?;
+    let scope = f.home.join("alternate-mise-installs");
+    fs::create_dir_all(&scope)?;
+    let command = || {
+        let mut command = f.command();
+        command
+            .env("HOME", &f.home)
+            .env_remove("MISE_INSTALLS_DIR")
+            .env_remove("XDG_DATA_DIRS")
+            .env_remove("XDG_CONFIG_DIRS");
+        command
+    };
+    let before = command()
+        .args(["install", "demo", "--version", "1.2.3"])
+        .output()?;
+    assert_code(&before, 0);
+    let report = command()
+        .env("MISE_INSTALLS_DIR", scope)
+        .args(["upgrade", "demo", "--version", "2.0.0"])
+        .output()?;
+    assert_code(&report, 0);
+    assert_eq!(fs::read(f.file("version"))?, b"2.0.0");
+    Ok(())
+}
+
+#[test]
+fn cursor_project_plugin_observation_preserves_declared_scope_and_native_authority() -> TestResult {
+    let f = Fixture::new()?;
+    let project = f.home.join("workspace");
+    let cursor = project.join(".cursor");
+    fs::create_dir_all(&cursor)?;
+    let settings = cursor.join("settings.json");
+    let commit = "a".repeat(40);
+    let inaccessible = format!("https://{}@github.com/example/private", "fixture-private");
+    write_json(
+        &settings,
+        &json!({"plugins":{
+            "public-plugin":{"enabled":true},
+            "team-market/member":{"enabled":false,"gitUrl":"https://github.com/example/tools.git","gitRef":&commit},
+            "private-plugin":{"gitUrl":inaccessible,"gitRef":"fixture-private-ref"}
+        }}),
+    )?;
+    let project = project.to_str().ok_or("fixture project")?;
+    let commands = ["list", "--kind", "capabilities", "--project", project];
+    let (output, snapshot) = f.run(&commands)?;
+    assert_code(&output, 0);
+    let items = snapshot["data"]["resources"]
+        .as_array()
+        .ok_or("capability resources")?;
+    let get = |id: &str| items.iter().find(|item| item["native_id"] == id);
+    let selected = get("team-market/member").ok_or("configured Cursor plugin")?;
+    assert_eq!(selected["management"], "declared");
+    assert_eq!(selected["status"], "declared");
+    assert_eq!(selected["origin"]["record"], json!(settings));
+    assert_eq!(
+        selected["origin"]["label"],
+        "https://github.com/example/tools"
+    );
+    assert_eq!(selected["revision"]["declared"], commit);
+    assert_eq!(selected["configured_enabled"], false);
+    assert!(selected["loaded"].is_null());
+    assert_eq!(selected["contents"], json!([]));
+    assert_eq!(selected["deployments"], json!([]));
+    assert_eq!(
+        get("public-plugin").ok_or("public entry")?["configured_enabled"],
+        true
+    );
+    let private = get("private-plugin").ok_or("private source entry")?;
+    assert!(private["origin"]["label"].is_null());
+    assert!(private["revision"]["declared"].is_null());
+    assert!(private["configured_enabled"].is_null());
+    assert!(!String::from_utf8(output.stdout)?.contains("fixture-private"));
+    let id = selected["id"].as_str().ok_or("resource identity")?;
+    let (output, detail) = f.run(&["info", id, "--project", project])?;
+    assert_code(&output, 0);
+    assert_eq!(detail["data"]["resource"]["id"], id);
+    let (output, _) = f.run(&["adopt", id, "--yes"])?;
+    assert_code(&output, 3);
+    assert!(!f.file("state").exists());
+    Ok(())
+}
+
+#[test]
+fn cursor_project_plugin_coverage_reports_malformed_and_unbound_settings() -> TestResult {
+    let f = Fixture::new()?;
+    let project = f.home.join("workspace");
+    let cursor = project.join(".cursor");
+    fs::create_dir_all(&cursor)?;
+    let settings = cursor.join("settings.json");
+    let project = project.to_str().ok_or("fixture project")?;
+    let commands = ["list", "--kind", "capabilities", "--project", project];
+    let status = || -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+        let (_, snapshot) = f.run(&commands)?;
+        let observed = snapshot["data"]["coverage"]
+            .as_array()
+            .ok_or("coverage")?
+            .iter()
+            .find(|row| row["source"] == "cursor-project-plugin-settings")
+            .ok_or("Cursor coverage")?;
+        Ok(observed.clone())
+    };
+    assert_eq!(status()?["state"], "absent");
+    write_json(&settings, &json!({}))?;
+    assert_eq!(status()?["state"], "complete");
+    write_json(&settings, &json!({"plugins":22}))?;
+    assert_eq!(status()?["issues"][0], "cursor_project_plugins_invalid");
+    write_json(
+        &settings,
+        &json!({"plugins":{"bad/key/more":{},"good":{"enabled":1}}}),
+    )?;
+    let invalid = status()?;
+    assert_eq!(invalid["state"], "invalid");
+    assert_eq!(invalid["count"], 1);
+    assert_eq!(
+        invalid["issues"],
+        json!([
+            "cursor_project_plugin_enabled_invalid",
+            "cursor_project_plugin_entry_invalid"
+        ])
+    );
+    let excessive = (0..1025)
+        .map(|n| (format!("plugin-{n}"), json!({})))
+        .collect::<serde_json::Map<_, _>>();
+    write_json(&settings, &json!({"plugins":excessive}))?;
+    assert_eq!(status()?["state"], "truncated");
+    fs::remove_file(&settings)?;
+    std::os::unix::fs::symlink(&f.catalog, &settings)?;
+    assert_eq!(status()?["issues"][0], "cursor_project_settings_unreadable");
     Ok(())
 }

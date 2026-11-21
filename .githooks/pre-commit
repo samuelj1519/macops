@@ -6,5 +6,5 @@ export RUSTC_WRAPPER='' RUSTC_WORKSPACE_WRAPPER=''
 export CARGO_TARGET_DIR="$PWD/target"
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features --locked --offline -- -D warnings
-cargo test --workspace --all-targets --all-features --locked --offline
+bash tools/run_ci_tests.sh cargo test
 cargo test --workspace --doc --all-features --locked --offline

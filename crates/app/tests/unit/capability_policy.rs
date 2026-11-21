@@ -585,3 +585,99 @@ fn delegated_native_recipe_cannot_bypass_the_package_identity_validator() -> Tes
     assert!(validate_plan(&j.plan).is_err());
     Ok(())
 }
+
+#[test]
+fn codex_capability_receipts_bind_profile_cache_and_selected_registration() -> TestResult {
+    let root = Path::new("/fixture/codex");
+    let record = root.join("config.toml");
+    let payload = root.join("plugins/cache/market/fixture/1.0.0");
+    let profile = crate::resource::id("agent", &("codex", root))?;
+    let id = codex_capability_id(&profile, "fixture@market")?;
+    let mut pkg = plugin_pkg();
+    pkg.id = id.clone();
+    pkg.provider = Provider::CapabilityObserved {
+        capability: CapabilityKind::CodexPlugin,
+        native_id: "fixture@market".into(),
+        manager: "codex-config".into(),
+        record: record.clone(),
+        payload: payload.clone(),
+        source: None,
+        profile_id: Some(profile),
+        settings: None,
+    };
+    validate_package(&pkg)?;
+    let parsed = |raw| parse_codex_record(&id, &record, &payload, "fixture@market", raw);
+    let enabled = b"[plugins.'fixture@market']\nenabled = false\n";
+    let status = parsed(enabled)?.ok_or("configured plugin")?;
+    assert_eq!(status.revision.as_deref(), Some("1.0.0"));
+    assert_eq!(status.configured_enabled, Some(false));
+    assert!(parsed(b"")?.is_none());
+    assert!(parsed(b"[[broken").is_err());
+    assert!(parsed(b"[plugins.'fixture@market']\nenabled = 'x'\n").is_err());
+    let different = parsed(
+        b"[marketplaces.market]\nsource = 'fixture'\n[plugins.'fixture@market']\nenabled = false\n",
+    )?
+    .ok_or("with market")?;
+    assert_ne!(status.digest, different.digest);
+    assert_eq!(
+        status.digest,
+        parsed(b"model = 'example'\n[plugins.'fixture@market']\nenabled = false\n")?
+            .ok_or("with model")?
+            .digest
+    );
+
+    for variant in 0..10 {
+        let mut invalid = pkg.clone();
+        let Provider::CapabilityObserved {
+            manager,
+            source,
+            settings,
+            profile_id,
+            record,
+            payload,
+            native_id,
+            ..
+        } = &mut invalid.provider
+        else {
+            return Err("fixture provider".into());
+        };
+        match variant {
+            0 => invalid.kind = Kind::Skill,
+            1 => manager.clear(),
+            2 => *source = Some("example/fixture".into()),
+            3 => *settings = Some("/other/settings".into()),
+            4 => *profile_id = Some("agent:other".into()),
+            5 => invalid.id = "capability:other".into(),
+            6 => *payload = "/fixture/codex/plugins/cache/other/fixture/1.0.0".into(),
+            7 => *record = "/".into(),
+            8 => *native_id = "invalid".into(),
+            _ => *record = "/relative/../config.toml".into(),
+        }
+        assert!(validate_package(&invalid).is_err(), "{invalid:?}");
+    }
+    for (record, payload, native_id) in [
+        (root.join("wrong.toml"), payload.clone(), "fixture@market"),
+        (record.clone(), PathBuf::from("/"), "fixture@market"),
+        (PathBuf::from("/"), payload.clone(), "fixture@market"),
+        (
+            root.join(std::ffi::OsString::from_vec(vec![0xff])),
+            payload.clone(),
+            "fixture@market",
+        ),
+        (record.clone(), payload.clone(), "..@market"),
+        (record.clone(), payload.clone(), "invalid"),
+        (
+            record.clone(),
+            payload.with_file_name("invalid version"),
+            "fixture@market",
+        ),
+        (
+            record.clone(),
+            payload.with_file_name(std::ffi::OsString::from_vec(vec![0xff])),
+            "fixture@market",
+        ),
+    ] {
+        assert!(parse_codex_record(&id, &record, &payload, native_id, enabled).is_err());
+    }
+    Ok(())
+}

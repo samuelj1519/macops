@@ -1,6 +1,7 @@
 """Drive the compiled CLI on a disposable terminal using synthetic profiles."""
 import errno
 import fcntl
+import json
 import os
 from pathlib import Path
 import pty
@@ -80,15 +81,15 @@ try:
         expect("cancelled", offset)
     elif scenario == "recommend-advice-only":
         expect("当前没有可执行的已核验安装计划")
-    elif scenario in ("recommend-install", "recommend-cancel"):
+    elif scenario in ("recommend-install", "recommend-cancel", "recommend-mise"):
         expect("选择安装候选")
         type_key(b"1\r")
         expect("输入精确版本")
         type_key(b"1.2.3\r")
         expect("安装并纳管")
-        expect("安装范围")
-        offset = type_key(b"yes\r" if scenario == "recommend-install" else b"no\r")
-        expect("succeeded" if scenario == "recommend-install" else "cancelled", offset)
+        expect("用户级配置" if scenario == "recommend-mise" else "安装范围")
+        offset = type_key(b"no\r" if scenario == "recommend-cancel" else b"yes\r")
+        expect("cancelled" if scenario == "recommend-cancel" else "succeeded", offset)
     elif scenario == "inventory-reject-scope":
         expect("Tab 切换")
         type_key(b"/" + target.encode() + b"\r")
@@ -117,6 +118,65 @@ try:
             offset = type_key(b"\x1b")
             expect("a 检查纳管", offset)
         type_key(b"q")
+    elif scenario in ("mise-adopt", "mise-upgrade-cancel", "mise-upgrade-conflict", "mise-upgrade", "mise-retire"):
+        expect("软件")
+        offset = type_key(b"/" + target.encode() + b"\r")
+        expect(target, offset)
+        offset = type_key(b"\r")
+        expect("a 检查纳管", offset)
+        if scenario == "mise-retire":
+            offset = type_key(b"x")
+            expect("consumer_review_required", offset)
+        else:
+            adopt = scenario == "mise-adopt"
+            action = "纳管" if adopt else "升级"
+            offset = type_key(b"a" if adopt else b"u")
+            expect("Enter 确认" + action, offset)
+            expect("当前版本 1.2.3", offset)
+            expect("安装范围", offset)
+            if not adopt:
+                expect("目标版本 2.0.0", offset)
+                expect("安装并更新用户级配置中的版本", offset)
+            if scenario == "mise-upgrade-cancel":
+                offset = type_key(b"\x1b")
+                expect("a 检查纳管", offset)
+            elif scenario == "mise-upgrade-conflict":
+                catalog = Path(command[command.index("--catalog") + 1])
+                data = json.loads(catalog.read_text())
+                duplicate = dict(data["packages"][0], id="fixture:mise-duplicate")
+                data["packages"].append(duplicate)
+                catalog.write_text(json.dumps(data))
+                offset = type_key(b"\r")
+                expect("plan_stale", offset)
+            else:
+                offset = type_key(b"\r")
+                expect(action + "结果 succeeded", offset)
+        type_key(b"q")
+    elif scenario in ("mise-retirement-cancel", "mise-retirement-stale", "mise-retirement-confirm"):
+        expect("软件")
+        offset = type_key(b"/" + target.encode() + b"\r")
+        expect(target, offset)
+        offset = type_key(b"\r")
+        expect("x 卸载", offset)
+        offset = type_key(b"x")
+        expect("Enter 确认卸载", offset)
+        expect("移除版本 1.2.3", offset)
+        expect("其他项目仍可能使用此版本", offset)
+        if scenario == "mise-retirement-cancel":
+            offset = type_key(b"\x1b")
+            expect("x 卸载", offset)
+        elif scenario == "mise-retirement-stale":
+            home = Path(command[command.index("--home") + 1])
+            payload = home / ".local/share/mise/installs/demo/1.2.3"
+            payload.rename(home / "original-retirement-payload")
+            payload.mkdir()
+            (payload / "tool").write_text("same observable version")
+            offset = type_key(b"\r")
+            expect("载荷或原生程序已改变", offset)
+        else:
+            offset = type_key(b"\r")
+            expect("卸载结果 succeeded", offset)
+        type_key(b"q")
     elif scenario == "unified-list":
         expect("Tab 切换")
         offset = type_key(b"\t")
@@ -132,12 +192,70 @@ try:
         type_key(b"q")
     elif scenario == "skills-discovered":
         expect("fixture-skill")
-        assert b"fixture-loose" not in capture
+        expect("fixture-loose")
+        expect("全部发现")
         offset = type_key(b"a")
-        expect("loose", offset)
+        expect("已登记筛选", offset)
         type_key(b"/fixture-loose\r")
+        offset = type_key(b"r")
+        expect("0 / 2", offset)
+        offset = type_key(b"a")
+        expect("fixture-loose", offset)
         offset = type_key(b"\r")
         expect("载荷", offset)
+        type_key(b"q")
+    elif scenario in ("recommend-skill-cancel", "recommend-skill-stale"):
+        expect("Skills CLI · Codex 用户级 · 共享技能目录")
+        type_key(b"1\r")
+        expect("仅手动触发 是")
+        expect("其他支持的 Agent 也可能发现")
+        if scenario == "recommend-skill-stale":
+            import json
+            book = Path(target)
+            data = json.loads(book.read_text())
+            data["recipes"][0]["source"]["commit"] = "b" * 40
+            book.write_text(json.dumps(data))
+            offset = type_key(b"yes\r")
+            expect("plan_stale", offset)
+        else:
+            type_key(b"n\r")
+    elif scenario == "history-empty":
+        expect("暂无操作记录")
+        type_key(b"q")
+    elif scenario in ("history-direct", "history-unified"):
+        if scenario == "history-unified":
+            expect("Tab 切换")
+            offset = type_key(b"\x1b[Z")
+            expect("按开始时间排序", offset)
+        else:
+            expect("按开始时间排序")
+        offset = type_key(b"\r")
+        expect("mo recover OP-fixture-recent --dry-run", offset)
+        expect("核对原结果", offset)
+        expect("保留当前运行环境及作用域参数", offset)
+        assert b"SYNTHETIC_PRIVATE_COMMAND_OUTPUT" not in capture
+        type_key(b"q")
+    elif scenario in ("history-recover-cancel", "history-recover-stale", "history-recover-confirm"):
+        expect("按开始时间排序")
+        offset = type_key(b"\r")
+        expect("c 核对原操作", offset)
+        offset = type_key(b"c")
+        expect("Enter 确认核对", offset)
+        expect("OP-fixture-recovery", offset)
+        expect("回退该操作的改动", offset)
+        if scenario == "history-recover-cancel":
+            offset = type_key(b"\x1b")
+            expect("c 核对原操作", offset)
+        else:
+            if scenario == "history-recover-stale":
+                import json
+                active = Path(target)
+                changed = json.loads(active.read_text())
+                changed["message"] = "operation progress changed during confirmation"
+                active.write_text(json.dumps(changed))
+            offset = type_key(b"\r")
+            outcome = "plan_stale" if scenario == "history-recover-stale" else "核对结果 已记录失败"
+            expect(outcome, offset)
         type_key(b"q")
     elif scenario == "skill":
         expect("技能清单")
@@ -150,12 +268,37 @@ try:
         type_key(b"\x03")
     elif scenario == "skill-visibility":
         expect("技能清单")
-        type_key(b"/@cursor\r")
+        type_key(b"/fixture-skill @cursor\r")
         expect("fixture-skill")
         offset = type_key(b"\r")
         expect("安装状态 在磁盘上", offset)
         expect("可发现 cursor:default · 共享目录", offset)
         expect("会话载入 未知", offset)
+        type_key(b"q")
+    elif scenario in ("skill-maintenance-cancel", "skill-maintenance-stale", "skill-maintenance-removed"):
+        expect("fixture-skill")
+        offset = type_key(b"/fixture-skill\r\r")
+        expect("u 升级", offset)
+        offset = type_key(b"u" if scenario == "skill-maintenance-cancel" else b"x")
+        expect("Codex 用户级共享技能目录", offset)
+        expect("上游成员 fixture-skill", offset)
+        if scenario != "skill-maintenance-cancel":
+            expect("将无法再发现该技能", offset)
+        expect("已登记提交", offset)
+        expect("输入 yes", offset)
+        if scenario == "skill-maintenance-stale":
+            import json
+            book = Path(target)
+            changed = json.loads(book.read_text())
+            changed["recipes"][0]["source"]["commit"] = "b" * 40
+            book.write_text(json.dumps(changed))
+        offset = type_key(b"n\r" if scenario == "skill-maintenance-cancel" else b"yes\r")
+        result = {
+            "skill-maintenance-cancel": "cancelled",
+            "skill-maintenance-stale": "plan_stale",
+            "skill-maintenance-removed": "卸载结果 succeeded",
+        }[scenario]
+        expect(result, offset)
         type_key(b"q")
     elif scenario == "plugin-visibility":
         expect("Tab 切换")
@@ -250,9 +393,10 @@ try:
             offset = type_key(b"s")
             expect("synthetic-source-content", offset)
         type_key(b"q")
-    if scenario not in ("setup-cancel", "setup-hide-key", "recommend-install", "recommend-cancel", "recommend-advice-only"):
+    if scenario not in ("setup-cancel", "setup-hide-key") and not scenario.startswith("recommend-"):
         expect("\x1b[?1049l")
-    assert process.wait(timeout=8) == int(exit_code)
+    actual_exit = process.wait(timeout=8)
+    assert actual_exit == int(exit_code), (scenario, actual_exit, exit_code)
     assert termios.tcgetattr(writer) == original, "terminal settings were not restored"
 finally:
     record = os.environ.get("MACOPS_BROWSER_TRANSCRIPT")

@@ -166,7 +166,7 @@ fn invalid() -> Error {
     Error::attention("marketplace_metadata_unknown", "无法核对原生市场元数据")
 }
 
-fn public_repository(value: &str) -> Option<String> {
+pub(crate) fn public_repository(value: &str) -> Option<String> {
     let repo = value.strip_prefix("https://github.com/").unwrap_or(value);
     let repo = repo.strip_suffix(".git").unwrap_or(repo);
     let (owner, name) = repo.split_once('/')?;

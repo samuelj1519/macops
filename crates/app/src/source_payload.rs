@@ -192,9 +192,18 @@ pub fn materialize(
     payload: &Payload,
     mode: u32,
 ) -> Result<(Slot, Tree)> {
+    payload.validate()?;
+    materialize_tree(parent, name, payload, mode)
+}
+
+pub(crate) fn materialize_tree(
+    parent: &Directory,
+    name: &str,
+    payload: &Payload,
+    mode: u32,
+) -> Result<(Slot, Tree)> {
     let owner = nix::unistd::geteuid().as_raw();
     Component::parse(name)?;
-    payload.validate()?;
     let expected = payload.shape(owner, mode);
     expected.validate(owner)?;
     let meta = parent.file().metadata()?;

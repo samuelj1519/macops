@@ -14,7 +14,11 @@ mod capability_store;
 mod capability_tx;
 mod chezmoi_binding;
 mod chezmoi_native;
+mod claude_install;
+mod claude_install_source;
 mod cli;
+mod codex_install;
+mod codex_install_source;
 mod config_inventory;
 mod config_local;
 mod config_tx;
@@ -34,6 +38,7 @@ mod migration_fs;
 mod migration_scan;
 mod migration_tx;
 mod migration_writers;
+mod mise_owner;
 mod native_plugin_tx;
 mod native_plugins;
 mod native_plugins_files;
@@ -179,6 +184,29 @@ fn run_scoped_entry(
     if matches!(cli.command, cli::Command::Setup) {
         return recommend_setup::run(ctx, cli.json, cli.dry_run).map(Some);
     }
+    if let cli::Command::Resume { operation_id } = &cli.command {
+        return claude_install::resume(ctx, operation_id, cli.dry_run, cli.yes).map(Some);
+    }
+    if let cli::Command::Launch {
+        profile,
+        native_profile,
+    } = &cli.command
+    {
+        if cli.json && !cli.dry_run {
+            return Err(error::Error::new(
+                "launch_json_requires_preview",
+                "使用 --dry-run 查看启动计划",
+            ));
+        }
+        return codex_install::session::launch(
+            ctx,
+            profile,
+            native_profile.as_deref(),
+            cli.dry_run,
+            cli.yes,
+        )
+        .map(Some);
+    }
     if let cli::Command::Plugins { profile, online } = &cli.command {
         return plugin_marketplaces::list(ctx, profile.as_deref(), *online, cli.dry_run).map(Some);
     }
@@ -288,6 +316,10 @@ type NativeAfter = fn(
 fn native_callbacks(journal: &domain::Journal) -> error::Result<(NativeGuard, NativeAfter)> {
     if policy::chezmoi_native::is_native(&journal.plan) {
         Ok((chezmoi_native::worker_guard, chezmoi_native::worker_after))
+    } else if codex_install::is_install(journal) {
+        Ok((codex_install::worker_guard, codex_install::worker_after))
+    } else if claude_install::is_install(journal) {
+        Ok((claude_install::worker_guard, claude_install::worker_after))
     } else if native_plugin_tx::is_plugin(journal) {
         Ok((
             native_plugin_tx::worker_guard,

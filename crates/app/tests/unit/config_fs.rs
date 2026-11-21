@@ -133,6 +133,7 @@ fn cached_virtual_target_reports_missing_or_changed_bound_destination() -> TestR
             provenance: "native-cached".into(),
         }),
         candidates: vec![],
+        uncertain_targets: vec![],
         native_targets: vec![target.clone()],
         destination: Some(config_inventory::Destination::capture(&destination)?),
         coverage: Coverage {

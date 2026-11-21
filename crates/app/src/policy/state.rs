@@ -496,6 +496,16 @@ pub fn commit_receipt(
     observation: Observation,
     now: u64,
 ) -> Result<bool> {
+    commit_verified_receipt(receipts, journal, observation, now, None)
+}
+
+pub(crate) fn commit_verified_receipt(
+    receipts: &mut crate::domain::Receipts,
+    journal: &Journal,
+    observation: Observation,
+    now: u64,
+    verified_query: Option<crate::domain::QuerySpec>,
+) -> Result<bool> {
     crate::policy::uv_local::validate_commit(journal, receipts, &observation)?;
     if matches!(
         journal.plan.package.provider,
@@ -513,7 +523,11 @@ pub fn commit_receipt(
             .remove(&journal.plan.package.id)
             .is_some())
     } else {
-        let query = crate::policy::npm_local::committed_query(&journal.plan, &observation)?;
+        let query = if let Some(query) = verified_query {
+            Some(query)
+        } else {
+            crate::policy::npm_local::committed_query(&journal.plan, &observation)?
+        };
         if let Some(existing) = receipts.installations.get(&journal.plan.package.id)
             && existing.operation_id == journal.id
         {

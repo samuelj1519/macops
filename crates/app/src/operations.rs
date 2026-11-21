@@ -88,33 +88,18 @@ pub fn plan(
             delegated: false,
         });
     }
+    let retirement = frozen
+        .as_ref()
+        .and_then(crate::mise_owner::retirement::query_witness);
     let target = match resolution {
         crate::policy::state::Resolution::Explicit(v)
         | crate::policy::state::Resolution::Cached(v) => Some(v),
         crate::policy::state::Resolution::Latest => Some(crate::updates::latest(ctx, package)?),
         crate::policy::state::Resolution::Absent | crate::policy::state::Resolution::Unresolved => {
-            None
+            retirement.map(|release| release.version.clone())
         }
     };
-    let native_version = if matches!(package.provider, Provider::Brew { .. }) {
-        None
-    } else {
-        target.as_deref()
-    };
-    let mut command = providers::mutation_spec(ctx, package, action, native_version)?;
-    if let Some(QuerySpec::LocalNpm(query)) = &frozen {
-        crate::npm_local::verify_plain_namespace_for_write(query, action)?;
-        crate::policy::npm_local::bind_canonical_command_paths(
-            &mut command,
-            &query.namespace.canonical_prefix,
-        )?;
-    }
-    if ctx.isolated && !paths::read_path(&command.program)?.starts_with(&ctx.home) {
-        return Err(Error::new(
-            "global_write_in_fixture",
-            "fixture 只能运行 fixture 内声明的写程序",
-        ));
-    }
+    let command = native_write_spec(ctx, package, action, target.as_deref(), frozen.as_ref())?;
     let query = match frozen {
         Some(query) => query,
         None => providers::query_spec(ctx, package)?,
@@ -141,6 +126,40 @@ pub fn plan(
         synchronous: providers::synchronous(package),
         delegated: false,
     })
+}
+
+fn native_write_spec(
+    ctx: &Context,
+    package: &Package,
+    action: Action,
+    target: Option<&str>,
+    frozen: Option<&QuerySpec>,
+) -> Result<crate::domain::CommandSpec> {
+    let native_version = if matches!(package.provider, Provider::Brew { .. }) {
+        None
+    } else {
+        target
+    };
+    let mut command =
+        if let Some(release) = frozen.and_then(crate::mise_owner::retirement::query_witness) {
+            crate::mise_owner::retirement::write_spec(package, action, native_version, release)?
+        } else {
+            providers::mutation_spec(ctx, package, action, native_version)?
+        };
+    if let Some(QuerySpec::LocalNpm(query)) = frozen {
+        crate::npm_local::verify_plain_namespace_for_write(query, action)?;
+        crate::policy::npm_local::bind_canonical_command_paths(
+            &mut command,
+            &query.namespace.canonical_prefix,
+        )?;
+    }
+    if ctx.isolated && !paths::read_path(&command.program)?.starts_with(&ctx.home) {
+        return Err(Error::new(
+            "global_write_in_fixture",
+            "fixture 只能运行 fixture 内声明的写程序",
+        ));
+    }
+    Ok(command)
 }
 
 pub fn new_journal(ctx: &Context, plan: Plan) -> Result<Journal> {
@@ -187,37 +206,19 @@ pub(crate) fn execute_checked(
         plan.action,
         Action::Uninstall | Action::Adopt | Action::Start | Action::Stop
     ) {
-        confirm(&format!("{:?} {}", plan.action, plan.package.id), yes)?;
+        confirm(&confirmation(ctx, &plan), yes)?;
     }
     let store = Store::lock(ctx)?;
     store.check_pending()?;
     store.receipts()?;
-    let observed = match &plan.query {
-        Some(
-            query @ (QuerySpec::LocalUvTool(_)
-            | QuerySpec::LocalNpm(_)
-            | QuerySpec::LocalConfig(_)
-            | QuerySpec::LocalCapability(_)),
-        ) => providers::observe_query(&plan.package, query, &ctx.scope, false)?,
-        _ => inventory::observe(ctx, &plan.package),
+    let frozen = plan.query.as_ref().filter(|query| checked_query(query));
+    let observed = match frozen {
+        Some(query) => providers::observe_query(&plan.package, query, &ctx.scope, false)?,
+        None => inventory::observe(ctx, &plan.package),
     };
     let current = crate::target::refresh(ctx, &plan.package)?;
     crate::policy::state::require_fresh_plan(&plan, &current, &observed)?;
-    check_before(
-        ctx,
-        &plan.package,
-        plan.action,
-        &observed,
-        plan.query.as_ref().filter(|query| {
-            matches!(
-                query,
-                QuerySpec::LocalUvTool(_)
-                    | QuerySpec::LocalNpm(_)
-                    | QuerySpec::LocalConfig(_)
-                    | QuerySpec::LocalCapability(_)
-            )
-        }),
-    )?;
+    check_before(ctx, &plan.package, plan.action, &observed, frozen)?;
     if let Some(QuerySpec::LocalNpm(query)) = &plan.query {
         crate::npm_local::verify_plain_namespace_for_write(query, plan.action)?;
     }
@@ -225,6 +226,12 @@ pub(crate) fn execute_checked(
         crate::uv_ownership::check(ctx, &plan, None)?;
     }
     check()?;
+    if crate::mise_owner::applies(&plan)
+        && let Some(spec) = &plan.command
+    {
+        let mut command = process::command(spec, &ctx.scope)?;
+        mise_admission(ctx, &plan, &mut command)?;
+    }
     let mut journal = new_journal(ctx, plan)?;
     store.save(&journal)?;
     if journal.plan.action == Action::Adopt {
@@ -270,11 +277,41 @@ pub(crate) fn execute_checked(
         store.save(&journal)?;
         return Ok(json!(journal));
     }
+    if let Err(error) = crate::mise_owner::record_completion(&store, &journal) {
+        journal.phase = Phase::Unknown;
+        journal.message = error.to_string();
+        store.save(&journal)?;
+        return Ok(json!(journal));
+    }
     finish(&store, &mut journal)?;
     Ok(json!(journal))
 }
 
-fn observe_frozen(store: &Store, journal: &Journal) -> Result<Observation> {
+fn confirmation(ctx: &Context, plan: &Plan) -> String {
+    if crate::mise_owner::retirement::bound_query(plan).is_some() {
+        format!(
+            "卸载 {}\n{}",
+            crate::browser::sanitize(&plan.package.name, false),
+            crate::recommend::plan_scope(ctx, plan)
+        )
+    } else {
+        format!("{:?} {}", plan.action, plan.package.id)
+    }
+}
+
+fn mise_admission(ctx: &Context, plan: &Plan, command: &mut std::process::Command) -> Result<()> {
+    crate::mise_owner::bind_mutation(&ctx.scope, plan, command)?;
+    if plan.action == Action::Uninstall {
+        crate::mise_owner::retirement::check_receipt(ctx, plan)
+    } else {
+        crate::mise_owner::check_command(ctx, command)
+    }
+}
+
+fn observe_frozen(
+    store: &Store,
+    journal: &Journal,
+) -> Result<(Observation, Option<crate::domain::MiseQuery>)> {
     let receipts = store.receipts()?;
     let committed = receipts
         .installations
@@ -287,28 +324,60 @@ fn observe_frozen(store: &Store, journal: &Journal) -> Result<Observation> {
         .query
         .as_ref()
         .ok_or_else(|| Error::new("verification_missing", "原操作没有冻结验证查询"))?;
-    providers::observe_query(
+    if let QuerySpec::Mise(query) = spec {
+        let final_query = crate::mise_owner::completion_query(store, journal, query)?;
+        let finalized = QuerySpec::Mise(final_query.clone());
+        if receipts
+            .installations
+            .get(&journal.plan.package.id)
+            .is_some_and(|known| {
+                known.operation_id == journal.id && known.query.as_ref() != Some(&finalized)
+            })
+        {
+            return Err(Error::attention(
+                "commit_conflict",
+                "已登记的 mise 安装目录身份发生变化",
+            ));
+        }
+        let observed =
+            providers::observe_query(&journal.plan.package, &finalized, &journal.scope, true)?;
+        return Ok((observed, Some(final_query)));
+    }
+    let observed = providers::observe_query(
         &journal.plan.package,
         committed.as_ref().unwrap_or(spec),
         &journal.scope,
         true,
-    )
+    )?;
+    Ok((observed, None))
 }
 
 fn finish(store: &Store, journal: &mut Journal) -> Result<()> {
-    let observed = match observe_frozen(store, journal) {
-        Ok(v) => v,
-        Err(e) => Observation::Unknown {
-            reason: e.to_string(),
-        },
-    };
+    let (observed, mise) = observe_frozen(store, journal).unwrap_or_else(|error| {
+        (
+            Observation::Unknown {
+                reason: error.to_string(),
+            },
+            None,
+        )
+    });
     if expected(journal, &observed) {
-        match store.commit(journal, observed) {
+        let committed = if let Some(query) = mise {
+            store.commit_mise(journal, observed, query)
+        } else {
+            store.commit(journal, observed)
+        };
+        match committed {
             Ok(()) => {
                 journal.phase = Phase::Succeeded;
                 journal.message = "安装状态通过冻结契约验证".into();
             }
-            Err(error) if error.code == "commit_conflict" => {
+            Err(error)
+                if matches!(
+                    error.code.as_str(),
+                    "commit_conflict" | "mise_scope_changed" | "mise_release_changed"
+                ) =>
+            {
                 journal.phase = Phase::Unknown;
                 journal.message = error.to_string();
             }
@@ -337,6 +406,14 @@ fn recover_owned(
         crate::native_skills::recover(ctx, store, journal, resolve_failed, yes)?
     } else if crate::ai_tx::is_native(journal) {
         crate::ai_tx::recover(ctx, store, journal, resolve_failed, yes)?
+    } else if crate::codex_install::is_install(journal) {
+        crate::codex_install::recover(ctx, store, journal, resolve_failed, yes)?
+    } else if crate::codex_install::is_publication(journal) {
+        crate::codex_install::recover_publication(ctx, store, journal, resolve_failed)?
+    } else if crate::claude_install::is_install(journal) {
+        crate::claude_install::recover(ctx, store, journal, resolve_failed, yes)?
+    } else if crate::claude_install::is_publication(journal) {
+        crate::claude_install::recover_publication(ctx, store, journal, resolve_failed)?
     } else if crate::native_plugin_tx::is_plugin(journal) {
         crate::native_plugin_tx::recover(ctx, store, journal, resolve_failed, yes)?
     } else if matches!(
@@ -367,12 +444,93 @@ pub fn recover(
     resolve_failed: bool,
     yes: bool,
 ) -> Result<Value> {
+    recover_requested(ctx, id, dry_run, resolve_failed, yes, None)
+}
+
+pub(crate) struct RecoveryPreview {
+    pub journal: Journal,
+    sha256: String,
+}
+
+impl RecoveryPreview {
+    pub(crate) fn read(ctx: &Context, id: &str) -> Result<Self> {
+        let journal = validated_recovery_journal(ctx, id)?;
+        if journal.id != id {
+            return Err(Error::attention("operation_conflict", "原操作标识不一致"));
+        }
+        require_recoverable_from_history(ctx, &journal)?;
+        if journal.home != ctx.home
+            || journal.state != ctx.state
+            || journal.cache != ctx.cache
+            || journal.settings != ctx.settings
+            || journal.scope != ctx.scope
+        {
+            return Err(Error::attention(
+                "recovery_scope_changed",
+                "请用原环境及作用域核对",
+            ));
+        }
+        let sha256 = fingerprint(&journal)?;
+        Ok(Self { journal, sha256 })
+    }
+
+    pub(crate) fn confirm(self, ctx: &Context) -> Result<Value> {
+        recover_requested(
+            ctx,
+            &self.journal.id,
+            false,
+            false,
+            true,
+            Some(&self.sha256),
+        )
+    }
+}
+
+fn require_recoverable_from_history(ctx: &Context, journal: &Journal) -> Result<()> {
+    if crate::policy::state::pending(journal.phase)
+        || crate::codex_install::awaiting_publication(ctx, journal)?
+    {
+        Ok(())
+    } else {
+        Err(Error::attention(
+            "operation_finished",
+            "此操作已结束，请刷新清单",
+        ))
+    }
+}
+
+pub(crate) fn verify_recovery_preview(expected: Option<&str>, current: &Journal) -> Result<()> {
+    if let Some(expected) = expected
+        && fingerprint(current)? != expected
+    {
+        return Err(Error::attention(
+            "plan_stale",
+            "原操作发生变化，请刷新后重新核对",
+        ));
+    }
+    Ok(())
+}
+
+fn validated_recovery_journal(ctx: &Context, id: &str) -> Result<Journal> {
     if !store::valid_id(id) {
         return Err(Error::new("invalid_operation_id", id));
     }
-    let mut journal = requested_journal(ctx, id)?;
+    let journal = requested_journal(ctx, id)?;
     store::validate_journal(&journal)?;
     crate::identity::validate(&journal.scope)?;
+    Ok(journal)
+}
+
+fn recover_requested(
+    ctx: &Context,
+    id: &str,
+    dry_run: bool,
+    resolve_failed: bool,
+    yes: bool,
+    expected: Option<&str>,
+) -> Result<Value> {
+    let mut journal = validated_recovery_journal(ctx, id)?;
+    verify_recovery_preview(expected, &journal)?;
     if journal.plan.brew.is_some() {
         if journal.id != id {
             return Err(Error::attention(
@@ -380,7 +538,7 @@ pub fn recover(
                 "原 Brew 操作标识不一致",
             ));
         }
-        return crate::brew::recover(ctx, &journal, dry_run, resolve_failed, yes);
+        return crate::brew::recover(ctx, &journal, dry_run, resolve_failed, yes, expected);
     }
     if matches!(
         journal.plan.package.provider,
@@ -397,6 +555,10 @@ pub fn recover(
     let store = Store::lock(ctx)?;
     store.check_migration_pending()?;
     journal = locked_journal(&store, id)?;
+    verify_recovery_preview(expected, &journal)?;
+    if expected.is_some() {
+        require_recoverable_from_history(ctx, &journal)?;
+    }
     if journal.plan.npm_binding.is_some() {
         return crate::npm_adoption::recover(ctx, &store, &mut journal);
     }
@@ -572,7 +734,10 @@ fn prepare_worker(
     if crate::policy::uv_local::is_uv(&journal.plan.package.provider) {
         return Err(crate::policy::uv_local::blocked());
     }
-    if crate::native_plugin_tx::is_plugin(journal) {
+    if crate::native_plugin_tx::is_plugin(journal)
+        || crate::codex_install::is_install(journal)
+        || crate::claude_install::is_install(journal)
+    {
         return Err(crate::native_plugins::refusal(
             "native_plugin_worker_required",
         ));
@@ -584,12 +749,11 @@ fn prepare_worker(
         ));
     }
     crate::policy::state::worker_identity(journal, path, pid, group)?;
-    if let Some(
-        query @ (QuerySpec::LocalUvTool(_)
-        | QuerySpec::LocalNpm(_)
-        | QuerySpec::LocalConfig(_)
-        | QuerySpec::LocalCapability(_)),
-    ) = &journal.plan.query
+    if let Some(query) = journal
+        .plan
+        .query
+        .as_ref()
+        .filter(|query| checked_query(query))
     {
         let current =
             providers::observe_query(&journal.plan.package, query, &journal.scope, false)?;
@@ -605,7 +769,23 @@ fn prepare_worker(
         .ok_or_else(|| Error::new("worker_command_missing", "没有写命令"))?;
     let native = crate::ai_tx::worker_command(journal)?;
     let spec = native.as_ref().unwrap_or(spec);
-    process::command(spec, &journal.scope)
+    let mut command = process::command(spec, &journal.scope)?;
+    if crate::mise_owner::applies(&journal.plan) {
+        let ctx = crate::mise_owner::worker_context(journal)?;
+        mise_admission(&ctx, &journal.plan, &mut command)?;
+    }
+    Ok(command)
+}
+
+fn checked_query(query: &QuerySpec) -> bool {
+    matches!(
+        query,
+        QuerySpec::Mise(_)
+            | QuerySpec::LocalUvTool(_)
+            | QuerySpec::LocalNpm(_)
+            | QuerySpec::LocalConfig(_)
+            | QuerySpec::LocalCapability(_)
+    )
 }
 
 #[cfg(test)]
@@ -652,10 +832,13 @@ fn check_before(
         let receipt = receipts.installations.get(&package.id).ok_or_else(|| {
             Error::attention("adoption_required", "先 adopt 采纳已安装基线，再升级或卸载")
         })?;
-        let query = match frozen {
+        let mut query = match frozen {
             Some(query) => query.clone(),
             None => providers::query_spec(ctx, package)?,
         };
+        if let QuerySpec::Mise(query) = &mut query {
+            query.retirement = None;
+        }
         crate::policy::state::receipt_matches(&ctx.scope, package, before, &query, receipt)?;
     }
     Ok(())
@@ -684,6 +867,8 @@ fn adoption_plan(
     before: Observation,
     frozen: Option<QuerySpec>,
 ) -> Result<Plan> {
+    crate::codex_install::require_ordinary_adoption(package)?;
+    crate::claude_install::require_ordinary_adoption(package)?;
     if matches!(before, Observation::Missing { .. }) {
         return Err(Error::attention("not_installed", &package.id));
     }
@@ -740,10 +925,12 @@ fn local_query(ctx: &Context, package: &Package, action: Action) -> Result<Optio
     Ok(
         if matches!(
             package.provider,
-            Provider::Uv {
-                binding: Some(_),
-                ..
-            } | Provider::UvObserved { .. }
+            Provider::Mise { .. }
+                | Provider::Uv {
+                    binding: Some(_),
+                    ..
+                }
+                | Provider::UvObserved { .. }
                 | Provider::Npm { .. }
                 | Provider::NpmObserved { .. }
                 | Provider::ConfigObserved { .. }

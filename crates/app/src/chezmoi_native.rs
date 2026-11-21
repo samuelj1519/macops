@@ -847,6 +847,7 @@ pub fn cached_snapshot(ctx: &Context) -> crate::config_inventory::Snapshot {
     let mut result = crate::config_inventory::Snapshot {
         roots: None,
         candidates: vec![],
+        uncertain_targets: vec![],
         native_targets: vec![],
         destination: None,
         coverage: Coverage {
@@ -909,6 +910,96 @@ pub(crate) fn cached_packages(ctx: &Context) -> Result<Vec<Package>> {
         .values()
         .map(|entry| package(&entry.absolute, &entry.source_absolute))
         .collect()
+}
+
+pub(crate) fn owns_possible_target(
+    ctx: &Context,
+    matches: &impl Fn(&Path) -> Result<bool>,
+    overlaps: &impl Fn(&Path) -> Result<bool>,
+) -> Result<bool> {
+    let cache = io::read::<Cache>(ctx, "chezmoi-metadata.json");
+    if let Ok(Some(cache)) = &cache
+        && cache.binding.record_state == ctx.state
+        && validate_cache(ctx, cache).is_ok()
+    {
+        for candidate in cache.entries.values() {
+            if matches(&candidate.absolute)? {
+                return Ok(true);
+            }
+        }
+    }
+    let Some(binding) = io::read::<Binding>(ctx, "chezmoi-owner.json")? else {
+        return Ok(false);
+    };
+    let relevant = overlaps(&binding.destination)?;
+    let uncertain = || {
+        Error::attention(
+            "config_authority_uncertain",
+            "需要刷新所选范围的 chezmoi 管理清单",
+        )
+    };
+    if binding.scope != ctx.scope
+        || binding.record_state != ctx.state
+        || policy::validate(&binding).is_err()
+    {
+        return if relevant {
+            Err(uncertain())
+        } else {
+            Ok(false)
+        };
+    }
+    let mut registered = ctx.clone();
+    registered.chezmoi.source = Some(binding.configured_source.clone());
+    registered.chezmoi.destination = Some(binding.destination.clone());
+    registered.chezmoi.config = None;
+    let candidate = crate::config_inventory::discover(&registered);
+    for file in &candidate.candidates {
+        if matches(&file.target)? {
+            return Ok(true);
+        }
+    }
+    if crate::config_inventory::uncertainty_affects(&candidate, matches, overlaps)? {
+        return Err(Error::attention(
+            "config_authority_uncertain",
+            "chezmoi 源包含可能影响 mise 配置的原生规则，请核对对应配置文件",
+        ));
+    }
+    if !relevant {
+        return Ok(false);
+    }
+    if matches!(
+        candidate.coverage.state,
+        crate::resource::CoverageState::Invalid
+            | crate::resource::CoverageState::Truncated
+            | crate::resource::CoverageState::Unavailable
+            | crate::resource::CoverageState::Absent
+    ) || candidate
+        .roots
+        .as_ref()
+        .is_none_or(|roots| roots.effective_source != binding.effective_source)
+    {
+        return Err(uncertain());
+    }
+    let cache = cache.map_err(|_| uncertain())?.ok_or_else(uncertain)?;
+    validate_cache(ctx, &cache).map_err(|_| uncertain())?;
+    let cached = &cache.binding;
+    if !cache.complete
+        || cached.record_state != binding.record_state
+        || cached.lookup != binding.lookup
+        || cached.anchors != binding.anchors
+        || cached.program != binding.program
+        || cached.version != binding.version
+        || cached.destination != binding.destination
+        || cached.config != binding.config
+        || cached.cache != binding.cache
+        || cached.persistent_state != binding.persistent_state
+        || cached.configured_source != binding.configured_source
+        || cached.effective_source != binding.effective_source
+        || io::verify(cached).is_err()
+    {
+        return Err(uncertain());
+    }
+    Ok(false)
 }
 
 pub fn public_package(ctx: &Context, key: &str) -> Result<Option<Package>> {

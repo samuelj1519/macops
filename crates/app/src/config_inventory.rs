@@ -15,6 +15,15 @@ use std::{
 pub use crate::policy::config_tx::ConfigRootInputs as Inputs;
 impl Inputs {
     pub fn capture(cli: &Cli, isolated: bool) -> Self {
+        Self {
+            source: cli.chezmoi_source.clone(),
+            destination: cli.chezmoi_destination.clone(),
+            config: cli.chezmoi_config.clone(),
+            ..Self::environment(isolated)
+        }
+    }
+
+    pub(crate) fn environment(isolated: bool) -> Self {
         let mut env = BTreeMap::new();
         if !isolated {
             for key in [
@@ -29,9 +38,9 @@ impl Inputs {
             }
         }
         Self {
-            source: cli.chezmoi_source.clone(),
-            destination: cli.chezmoi_destination.clone(),
-            config: cli.chezmoi_config.clone(),
+            source: None,
+            destination: None,
+            config: None,
             env,
         }
     }
@@ -53,9 +62,29 @@ pub struct Mapping {
 pub struct Snapshot {
     pub roots: Option<Roots>,
     pub candidates: Vec<Mapping>,
+    pub(crate) uncertain_targets: Vec<UnverifiedTarget>,
     pub native_targets: Vec<PathBuf>,
     pub coverage: Coverage,
     pub destination: Option<Destination>,
+}
+
+#[derive(Debug)]
+pub(crate) struct UnverifiedTarget {
+    path: PathBuf,
+    descendants: bool,
+}
+
+pub(crate) fn uncertainty_affects(
+    snapshot: &Snapshot,
+    matches: &impl Fn(&Path) -> Result<bool>,
+    overlaps: &impl Fn(&Path) -> Result<bool>,
+) -> Result<bool> {
+    for target in &snapshot.uncertain_targets {
+        if matches(&target.path)? || (target.descendants && overlaps(&target.path)?) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 #[derive(Debug)]
@@ -95,6 +124,7 @@ pub fn discover(ctx: &Context) -> Snapshot {
     let mut snapshot = Snapshot {
         roots: None,
         candidates: vec![],
+        uncertain_targets: vec![],
         native_targets: vec![],
         destination: None,
         coverage: Coverage {
@@ -105,7 +135,7 @@ pub fn discover(ctx: &Context) -> Snapshot {
             issues: vec!["physical_candidates_only".into()],
         },
     };
-    match observe(ctx, &mut snapshot.coverage) {
+    match observe(ctx, &mut snapshot.coverage, &mut snapshot.uncertain_targets) {
         Ok(Some((roots, candidates, destination))) => {
             snapshot.destination = Some(destination);
             snapshot.roots = Some(roots);
@@ -135,6 +165,7 @@ pub fn discover(ctx: &Context) -> Snapshot {
 fn observe(
     ctx: &Context,
     report: &mut Coverage,
+    uncertain_targets: &mut Vec<UnverifiedTarget>,
 ) -> Result<Option<(Roots, Vec<Mapping>, Destination)>> {
     let (source, destination, config, provenance) = root_paths(ctx)?;
     let destination_binding = Destination::capture(&destination)?;
@@ -170,6 +201,7 @@ fn observe(
         destination: &roots.destination,
         budget: Budget::new(10_000, 16),
         report,
+        uncertain_targets,
     }
     .walk(directory, Path::new(""), 0)?;
     if let Some(selected) = &effective {
@@ -403,6 +435,7 @@ struct SourceWalker<'a> {
     destination: &'a Path,
     budget: Budget,
     report: &'a mut Coverage,
+    uncertain_targets: &'a mut Vec<UnverifiedTarget>,
 }
 impl SourceWalker<'_> {
     fn walk(&mut self, dir: &Directory, relative: &Path, depth: usize) -> Result<Vec<Mapping>> {
@@ -471,6 +504,7 @@ impl SourceWalker<'_> {
                 CoverageState::Unsupported,
                 format!("unsupported_source_type:{}", source.display()),
             );
+            self.mark_uncertain(name, relative, true);
             return Ok(vec![]);
         }
         let mapped = match policy::source_name(name, meta.kind == EntryKind::Directory) {
@@ -483,6 +517,16 @@ impl SourceWalker<'_> {
                         format!("source_control_not_evaluated:{}", source.display()),
                     );
                 }
+                if name.starts_with(".chezmoiexternal.")
+                    || name.starts_with(".chezmoiexternals.")
+                    || name == ".chezmoiremove"
+                    || name.starts_with(".chezmoiremove.")
+                {
+                    self.uncertain_targets.push(UnverifiedTarget {
+                        path: self.destination.join(relative),
+                        descendants: true,
+                    });
+                }
                 return Ok(vec![]);
             }
             Err(error) if error.code == "unsupported_source_attribute" => {
@@ -491,6 +535,7 @@ impl SourceWalker<'_> {
                     CoverageState::Unsupported,
                     format!("{}:{}", error.code, source.display()),
                 );
+                self.mark_uncertain(name, relative, meta.kind == EntryKind::Directory);
                 return Ok(vec![]);
             }
             Err(error) => return Err(error),
@@ -526,6 +571,24 @@ impl SourceWalker<'_> {
                 target,
             }])
         }
+    }
+
+    fn mark_uncertain(&mut self, name: &str, relative: &Path, directory: bool) {
+        if name.starts_with("run_") {
+            return;
+        }
+        let parent = self.destination.join(relative);
+        let possible = ["modify_", "remove_", "exact_", "create_", "empty_"]
+            .into_iter()
+            .find_map(|prefix| name.strip_prefix(prefix))
+            .or_else(|| {
+                (!name.starts_with("encrypted_") && !name.starts_with("external_")).then_some(name)
+            })
+            .and_then(|name| policy::source_name(name, directory).ok().flatten());
+        let descendants = directory || possible.is_none();
+        let path = possible.map_or_else(|| parent.clone(), |mapped| parent.join(mapped.target));
+        self.uncertain_targets
+            .push(UnverifiedTarget { path, descendants });
     }
 }
 
