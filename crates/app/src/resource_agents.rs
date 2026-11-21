@@ -45,17 +45,26 @@ pub fn collect(
 }
 
 pub fn profile_roots(ctx: &Context) -> Result<Vec<Resource>> {
+    profile_roots_matching(ctx, |_, _| true)
+}
+
+pub(crate) fn profile_roots_matching(
+    ctx: &Context,
+    include: impl Fn(&str, &str) -> bool,
+) -> Result<Vec<Resource>> {
     let mut profiles = vec![];
     for (client, name, path) in discover_roots(ctx)? {
-        if !std::fs::metadata(paths::read_path(&path)?).is_ok_and(|m| m.is_dir()) {
-            continue;
-        }
         let prefix = format!(".{client}-");
         let prof = if name == format!(".{client}") {
             "default"
         } else {
             name.strip_prefix(&prefix).unwrap_or(&name)
         };
+        if !include(&client, prof)
+            || !std::fs::metadata(paths::read_path(&path)?).is_ok_and(|m| m.is_dir())
+        {
+            continue;
+        }
         profiles.push(Resource {
             id: resource::id("agent", &(&client, &path))?,
             name: format!("{client}:{prof}"),

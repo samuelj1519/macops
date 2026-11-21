@@ -27,22 +27,35 @@ To build from source, use the Rust version pinned in `rust-toolchain.toml` and r
 
 ## Browse resources
 
-Run `mo apps`, `mo agents`, `mo skills`, or `mo config` for an interactive list.
+Run `mo` or `mo list` in a terminal. The inventory has application, capability, agent, and configuration tabs. The capability tab includes skills and native plugins. Use `mo help advanced` for the full command and option reference.
+
+`mo apps`, `mo agents`, `mo skills`, and `mo config` remain direct entry points.
 
 | Key | Action |
 | --- | --- |
+| Tab / Shift+Tab | Switch inventory tabs |
 | Arrow keys or `j` / `k` | Move the selection |
 | `Ctrl+u` / `Ctrl+d` | Scroll by half a page |
 | `/` | Search |
 | `Enter` / `Esc` | Open details or go back |
 | `q` | Quit |
 | `a` in Skills | Toggle discovered-only skills |
+| `a` in unified application or capability details | Check whether the selected instance can be adopted |
+| `u` / `x` in unified application details | Preview upgrade or removal for an eligible registered npm instance |
 | `r` in Config | Refresh the enrolled chezmoi inventory |
 | `o` / `s` in Config details | Read the destination or source file |
 
 Skill searches can include an agent such as `@codex`. The configuration viewer opens verified, regular UTF-8 files up to 256 KiB in read-only mode.
 
-In a pipeline, with `TERM=dumb`, or during a dry run, the browser returns text. Use `--json` for structured output and `mo list --kind applications|agents|capabilities|configs` to query a resource category. `--project /absolute/path` selects a project context. Results distinguish discovery, adoption, configured state, and verified loading. The `coverage` field reports which sources were checked and where evidence is incomplete.
+Skill details show observed files and the profiles that can discover them through their own, shared, or compatible directories. These are local directory observations. Plugin details in the capability tab show the native registration, payload, and configured enablement separately for each observed Codex or Claude profile. Cursor plugin enablement and session loading remain unverified.
+
+The direct browser shortcuts return a text list without a terminal. Non-interactive `mo list` retains its structured inventory output. Use `--json` for the response envelope and `mo list --kind applications|agents|capabilities|configs` to query a resource category. `--project /absolute/path` selects a project context. Results distinguish discovery, adoption, configured state, and verified loading. The `coverage` field reports inspected sources and incomplete evidence.
+
+### Plugin marketplaces
+
+`mo plugins` lists the native marketplace entry points for Codex, Claude Code, and Cursor. It reads locally registered Codex and Claude Code marketplaces and their observed catalog files. Use `mo plugins claude:mi` to select one Claude profile. Catalog entries describe offers. Installed plugins and their configured state appear separately in the capability tab.
+
+`mo plugins cursor --online` delegates the account marketplace query to the installed Cursor CLI. It uses the native login and may update Cursor's own cache. Use the native `/plugins` or `/plugin` entry shown for your Harness to browse online catalogs and install a new plugin. These actions follow the Harness's own scope and confirmation.
 
 ```sh
 mo info agent:claude:mi
@@ -73,6 +86,7 @@ Homebrew formulae bind to the executable, prefix, Cellar, and full formula name.
 
 ```sh
 mo recommend jq
+mo recommend ayghri/i-have-adhd
 mo recommend ripgrep --github BurntSushi/ripgrep
 mo recommend jq --model
 ```
@@ -81,7 +95,11 @@ Recommendations can use bundled evidence, a selected public GitHub repository, o
 
 GitHub lookup checks a selected README and compares up to six npm or Homebrew core suggestions with publication metadata. Requested exact npm versions are checked individually. Suggestions without a version use the current release. Repository links in publisher metadata are evidence for the comparison. A matching registered recipe is shown with its ID for a native preview.
 
-`--model` asks DeepSeek to explain the bundled public evidence. Add a separate generic password in macOS Keychain Access using the service `org.macops.recommend.deepseek` and account `default`. Use `--keychain-account` to select another account. macops falls back to local analysis when the credential, request, or response is unavailable. Dry runs use local evidence.
+For a repository name or GitHub repository URL, macops pins a public commit and links to its README and `INSTALL.md` when available. Run `mo setup` in a terminal to configure a DeepSeek or custom HTTPS OpenAI-compatible endpoint. The wizard confirms a connection test and saves the key in Keychain. Repository recommendations use that profile when enabled and interactive. The model receives public document excerpts and tool names. Its structured proposals are advisory.
+
+When a name matches an eligible, registered npm recipe, the interactive recommendation can offer a versioned installation plan. It runs the selected plan after confirmation. Other proposals display their source without granting installation authority.
+
+The explicit `--model` compatibility option asks DeepSeek to explain bundled public evidence. Its generic password has service `org.macops.recommend.deepseek` and account `default`. Use `--keychain-account` to select another account. Dry runs skip model requests.
 
 ## Configuration
 

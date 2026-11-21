@@ -4,6 +4,129 @@ use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf};
 
 const FIXTURE_TOKEN: &str = "synthetic-token-do-not-log";
 
+#[test]
+fn repository_proposals_require_bound_documents_and_a_closed_shape() -> TestResult {
+    let candidate = json!({
+        "kind":"plugin","adapter":"codex-plugin","name":"example",
+        "scope":"global","document":0,"version":null,"summary":"上游插件市场"
+    });
+    let response = |candidate: Value, finish: &str| {
+        let content = json!({"candidates":[candidate]}).to_string();
+        format!(
+            "{}\n200",
+            json!({"choices":[{"finish_reason":finish,"message":{"role":"assistant","content":content}}]})
+        )
+    };
+    let result = parse_proposals(
+        response(candidate.clone(), "stop").as_bytes(),
+        FIXTURE_TOKEN,
+        1,
+    )
+    .map_err(Failure::label)?;
+    assert_eq!(result.len(), 1);
+    for (key, value) in [
+        ("document", json!(9)),
+        ("adapter", json!("arbitrary")),
+        ("summary", json!(FIXTURE_TOKEN)),
+        ("scope", json!("unrestricted")),
+        ("command", json!("fixture")),
+        ("version", json!("bad\nline")),
+    ] {
+        let mut bad = candidate.clone();
+        bad[key] = value;
+        assert!(parse_proposals(response(bad, "stop").as_bytes(), FIXTURE_TOKEN, 1).is_err());
+    }
+    assert!(parse_proposals(response(candidate, "length").as_bytes(), FIXTURE_TOKEN, 1).is_err());
+    Ok(())
+}
+
+#[test]
+fn repository_model_sends_only_public_evidence_with_an_endpoint_bound_key() -> TestResult {
+    let temp = tempfile::tempdir_in("/private/tmp")?;
+    let profile = serde_json::from_value::<crate::recommend_setup::Profile>(json!({
+        "schemaVersion":1,"enabled":true,"endpoint":"https://models.example.test/v1/chat/completions",
+        "model":"explicit-model","account":"setup-test"
+    }))?;
+    let security = script(
+        temp.path(),
+        "key",
+        &format!(
+            "[ \"$3\" = '{}' ] && [ \"$5\" = setup-test ]\nprintf '%s\\n' '{}'",
+            profile.service(temp.path()),
+            FIXTURE_TOKEN
+        ),
+    )?;
+    let http = script(
+        temp.path(),
+        "http",
+        r#"
+IFS= read -r header
+[ "$header" = 'Authorization: Bearer synthetic-token-do-not-log' ]
+found=
+last=
+for arg; do
+  case "$arg" in *synthetic-token-do-not-log*|*/private/tmp/*) exit 7 ;; esac
+  case "$arg" in *public-evidence-fixture*explicit-model*|*explicit-model*public-evidence-fixture*) found=yes ;; esac
+  last=$arg
+done
+[ "$found" = yes ] && [ "$last" = 'https://models.example.test/v1/chat/completions' ]
+printf '%s\n200' '{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"{\"candidates\":[{\"kind\":\"skill\",\"adapter\":\"skills\",\"name\":\"fixture\",\"scope\":\"global\",\"document\":0,\"summary\":\"上游安装说明\"}]}"}}]}'
+"#,
+    )?;
+    let result = repository_proposals(
+        &Clients {
+            security: &security,
+            curl: &http,
+        },
+        &profile,
+        temp.path(),
+        "owner/fixture",
+        &[("INSTALL.md", "public-evidence-fixture")],
+        Instant::now() + Duration::from_secs(4),
+    )
+    .map_err(Failure::label)?;
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].name, "fixture");
+    Ok(())
+}
+
+#[test]
+fn connection_check_reuses_the_confirmed_endpoint_and_accepts_only_a_chat_response() -> TestResult {
+    let temp = tempfile::tempdir_in("/private/tmp")?;
+    let response = script(
+        temp.path(),
+        "check",
+        r#"
+IFS= read -r header
+[ "$header" = 'Authorization: Bearer synthetic-token-do-not-log' ]
+for arg; do last=$arg; done
+[ "$last" = 'https://models.example.test/chat/completions' ] || [ "$last" = 'https://api.deepseek.com/chat/completions' ]
+printf '%s\n200' '{"choices":[{"message":{"content":"OK"}}]}'
+"#,
+    )?;
+    let bad = script(temp.path(), "bad", "printf '%s\\n200' '{}'")?;
+    let unauthorized = script(temp.path(), "unauthorized", "printf '%s\\n401' '{}'")?;
+    for endpoint in [
+        policy::ENDPOINT,
+        "https://models.example.test/chat/completions",
+    ] {
+        let profile = serde_json::from_value::<crate::recommend_setup::Profile>(json!({
+            "schemaVersion":1,"enabled":true,"endpoint":endpoint,"model":"fixture","account":"setup-test"
+        }))?;
+        let deadline = || Instant::now() + Duration::from_secs(4);
+        test_connection(&response, &profile, FIXTURE_TOKEN, deadline()).map_err(Failure::label)?;
+        assert_eq!(
+            test_connection(&bad, &profile, FIXTURE_TOKEN, deadline()),
+            Err(Failure::Unverified)
+        );
+        assert_eq!(
+            test_connection(&unauthorized, &profile, FIXTURE_TOKEN, deadline()),
+            Err(Failure::HttpStatus)
+        );
+    }
+    Ok(())
+}
+
 fn script(base: &Path, name: &str, body: &str) -> Result<PathBuf, io::Error> {
     let path = base.join(name);
     fs::write(&path, format!("#!/bin/sh\nset -eu\n{body}\n"))?;

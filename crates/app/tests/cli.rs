@@ -13,6 +13,8 @@ mod migration;
 mod native_plugins;
 #[path = "cli/native_routing.rs"]
 mod native_routing;
+#[path = "cli/plugin_marketplaces.rs"]
+mod plugin_marketplaces;
 use common::{Fixture, TestResult, assert_code, uv_tool, write_json};
 use serde_json::json;
 use std::{fs, os::unix::fs::symlink};
@@ -74,6 +76,125 @@ fn bare_skills_json_reuses_only_skill_rows_and_identifies_agent_deployments() ->
     assert_eq!(rows[0]["agents"], json!(["codex:default"]));
     assert_eq!(rows[0]["loaded"], serde_json::Value::Null);
     chezmoi_native::run_browser_pty(&f, &["skills"], "skill", &f.home, "72", "0")?;
+    assert!(!f.file("state").exists());
+    Ok(())
+}
+
+#[test]
+fn skill_browser_shows_installed_locations_and_shared_profile_visibility() -> TestResult {
+    let f = Fixture::new()?;
+    native_skill_fixture(&f, &["fixture-skill"])?;
+    for (root, name) in [
+        (".claude-mi", "fixture-skill"),
+        (".claude", "claude-import"),
+        (".codex", "codex-import"),
+    ] {
+        let folder = f.home.join(root).join("skills");
+        fs::create_dir_all(&folder)?;
+        if name == "fixture-skill" {
+            symlink(
+                f.home.join(".agents/skills/fixture-skill"),
+                folder.join(name),
+            )?;
+        } else {
+            let skill = folder.join(name);
+            fs::create_dir(&skill)?;
+            fs::write(skill.join("SKILL.md"), format!("# {name}\n"))?;
+        }
+    }
+    for root in [".claude-glm", ".cursor"] {
+        fs::create_dir(f.home.join(root))?;
+    }
+    let (out, v) = f.run(&["skills"])?;
+    assert_code(&out, 0);
+    let rows = v["data"]["items"].as_array().ok_or("items")?;
+    let row = |name: &str| {
+        rows.iter()
+            .find(|row| row["name"] == name)
+            .ok_or("missing skill")
+    };
+    let shared = row("fixture-skill")?;
+    assert_eq!(
+        shared["agents"],
+        json!(["claude:mi", "codex:default", "cursor:default"])
+    );
+    let details = shared["details"].as_array().ok_or("details")?;
+    for (label, path) in [
+        ("载荷 在磁盘上", ".agents/skills/fixture-skill"),
+        (
+            "可发现 claude:mi · 档案目录",
+            ".claude-mi/skills/fixture-skill",
+        ),
+        (
+            "可发现 cursor:default · 共享目录",
+            ".agents/skills/fixture-skill",
+        ),
+    ] {
+        assert!(
+            details.contains(&json!(format!("{label} · {}", f.home.join(path).display()))),
+            "{details:?}"
+        );
+    }
+    assert!(shared["loaded"].is_null());
+    assert_eq!(
+        row("claude-import")?["agents"],
+        json!(["claude:default", "cursor:default"])
+    );
+    assert_eq!(row("codex-import")?["agents"], json!(["cursor:default"]));
+    chezmoi_native::run_browser_pty(&f, &["skills"], "skill-visibility", &f.home, "95", "0")?;
+    assert!(!f.file("state").exists());
+    Ok(())
+}
+
+#[test]
+fn capability_browser_shows_native_plugin_configuration_per_profile() -> TestResult {
+    let f = Fixture::new()?;
+    for (profile, enabled, label) in [
+        ("mi", Some(true), "已启用"),
+        ("glm", Some(false), "已停用"),
+        ("other", None, "未知"),
+    ] {
+        let root = f.home.join(format!(".claude-{profile}"));
+        let payload = root.join("plugins/cache/official/review/1.0");
+        fs::create_dir_all(&payload)?;
+        if let Some(enabled) = enabled {
+            write_json(
+                &root.join("settings.json"),
+                &json!({"enabledPlugins":{"review@official":enabled}}),
+            )?;
+        }
+        write_json(
+            &root.join("plugins/installed_plugins.json"),
+            &json!({"version":2,"plugins":{"review@official":[{"scope":"user","installPath":payload,"version":"1.0"}]}}),
+        )?;
+        chezmoi_native::run_browser_pty(
+            &f,
+            &["list"],
+            "plugin-visibility",
+            std::path::Path::new(&format!("claude:{profile} {label}")),
+            "95",
+            "0",
+        )?;
+    }
+    assert!(!f.file("state").exists());
+    Ok(())
+}
+
+#[test]
+fn skill_browser_keeps_known_rows_when_cursor_compatibility_root_is_invalid() -> TestResult {
+    let f = Fixture::new()?;
+    native_skill_fixture(&f, &["fixture-skill"])?;
+    fs::create_dir(f.home.join(".cursor"))?;
+    fs::create_dir(f.home.join(".codex"))?;
+    fs::write(f.home.join(".codex/skills"), "this should be a directory")?;
+    let (out, v) = f.run(&["skills"])?;
+    assert_code(&out, 3);
+    assert_eq!(v["data"]["coverage"], "partial");
+    assert_eq!(v["data"]["items"][0]["name"], "fixture-skill");
+    assert_eq!(
+        v["data"]["items"][0]["agents"],
+        json!(["codex:default", "cursor:default"])
+    );
     assert!(!f.file("state").exists());
     Ok(())
 }
@@ -142,6 +263,153 @@ fn skill_browser_can_show_discovered_skills_and_refuses_unrelated_config_scope()
     assert_code(&out, 1);
     assert_eq!(v["error"]["code"], "config_scope_unsupported");
     assert!(!f.file("state").exists());
+    Ok(())
+}
+
+#[test]
+fn list_opens_a_unified_inventory_in_the_terminal_and_keeps_structured_queries() -> TestResult {
+    let f = Fixture::new()?;
+    let loose = f.home.join(".agents/skills/fixture-loose");
+    fs::create_dir_all(&loose)?;
+    fs::write(
+        loose.join("SKILL.md"),
+        "---\nname: fixture-loose\n---\nbody\n",
+    )?;
+    let (out, json) = f.run(&["list"])?;
+    assert_code(&out, 0);
+    assert!(json["data"]["resources"].is_array(), "{json}");
+    chezmoi_native::run_browser_pty(&f, &["list"], "unified-list", &f.home, "100", "0")?;
+    assert!(!f.file("state").exists());
+    Ok(())
+}
+
+#[test]
+fn inventory_adopts_the_confirmed_instance_without_reinstalling() -> TestResult {
+    let f = Fixture::new()?;
+    let prefix = f.home.join("npm-existing");
+    npm_manifest(&prefix, "@scope/demo", "1.2.3")?;
+    write_authorized_npm_catalog(&f, &prefix, true, true)?;
+    let path = prefix.join("lib/node_modules/@scope/demo/package.json");
+    let original = fs::read(&path)?;
+    f.script(
+        "npm",
+        r#"case "$1" in
+prefix) printf '%s' "$MACOPS_TEST_HOME/npm-existing" ;;
+view) printf '"2.0.0"\n' ;;
+uninstall)
+ spec=
+ for arg; do spec=$arg; done
+ [ "$4" = "$MACOPS_TEST_HOME/npm-existing" ] && [ "$spec" = '@scope/demo' ]
+ /bin/rm "$4/lib/node_modules/@scope/demo/package.json"
+ /bin/rmdir "$4/lib/node_modules/@scope/demo" ;;
+*) printf 'unexpected' >> "$MACOPS_TEST_HOME/native-called"; exit 8 ;;
+esac"#,
+    )?;
+    let (_, registry) = f.run(&["list", "--kind", "applications"])?;
+    let items = registry["data"]["resources"]
+        .as_array()
+        .ok_or("resources")?;
+    let item = items
+        .iter()
+        .find(|row| row["recipe_ref"] == "npm:scoped-demo")
+        .ok_or("npm instance")?;
+    let name = std::path::Path::new(item["name"].as_str().ok_or("name")?);
+    let source = f.home.to_str().ok_or("source")?;
+    chezmoi_native::run_browser_pty(
+        &f,
+        &["list", "--chezmoi-source", source],
+        "inventory-reject-scope",
+        name,
+        "110",
+        "0",
+    )?;
+    assert!(!f.file("state").exists());
+    chezmoi_native::run_browser_pty(&f, &["list"], "inventory-adopt-cancel", name, "110", "0")?;
+    assert!(!f.file("state").exists());
+    chezmoi_native::run_browser_pty(&f, &["list"], "inventory-adopt", name, "110", "0")?;
+    assert!(f.read_json("state/receipts.json")?["installations"]["npm:scoped-demo"].is_object());
+    assert_eq!(fs::read(&path)?, original);
+    chezmoi_native::run_browser_pty(&f, &["list"], "inventory-upgrade-cancel", name, "110", "0")?;
+    assert_eq!(fs::read(&path)?, original);
+    chezmoi_native::run_browser_pty(&f, &["list"], "inventory-remove", name, "110", "0")?;
+    assert!(!path.exists());
+    assert!(!f.home.join("native-called").exists());
+    Ok(())
+}
+
+#[test]
+fn root_help_prioritizes_daily_tasks_and_advanced_help_keeps_recovery() -> TestResult {
+    let command = env!("CARGO_BIN_EXE_macops");
+    for args in [vec![], vec!["--help"], vec!["-h"], vec!["help"]] {
+        let output = std::process::Command::new(command).args(args).output()?;
+        assert_code(&output, 0);
+        let help = String::from_utf8(output.stdout)?;
+        assert!(help.contains("mo recommend <目标>"), "{help}");
+        assert!(help.contains("mo help advanced"), "{help}");
+        assert!(!help.contains("--resolve-failed"), "{help}");
+        assert!(!help.contains("--chezmoi-source"), "{help}");
+    }
+    let detailed = std::process::Command::new(command)
+        .args(["help", "advanced"])
+        .output()?;
+    assert_code(&detailed, 0);
+    let help = String::from_utf8(detailed.stdout)?;
+    assert!(
+        help.contains("recover") && help.contains("--chezmoi-source"),
+        "{help}"
+    );
+    Ok(())
+}
+
+#[test]
+fn recommend_accepts_repository_subjects_without_a_second_argument() -> TestResult {
+    let f = Fixture::new()?;
+    for subject in ["owner/example", "https://github.com/owner/example/"] {
+        let (out, response) = f.run(&["--dry-run", "recommend", subject])?;
+        assert_code(&out, 0);
+        let data = &response["data"];
+        assert_eq!(data["repository"], "owner/example", "{data}");
+        assert_eq!(data["evidenceStatus"], "dry-run");
+        assert_eq!(data["canExecute"], false);
+        assert_eq!(data["persistentWrites"], false);
+    }
+    assert!(!f.file("state").exists());
+    Ok(())
+}
+
+#[test]
+fn setup_reports_local_mode_and_cancels_without_creating_state() -> TestResult {
+    let f = Fixture::new()?;
+    let (out, data) = f.run(&["setup"])?;
+    assert_code(&out, 0);
+    assert_eq!(data["data"]["mode"], "local", "{data}");
+    let fixture = f.command();
+    let noninteractive = std::process::Command::new(fixture.get_program())
+        .args(fixture.get_args().filter(|arg| *arg != "--json"))
+        .arg("setup")
+        .output()?;
+    assert_code(&noninteractive, 3);
+    assert!(String::from_utf8(noninteractive.stderr)?.contains("model_setup_terminal_required"));
+    chezmoi_native::run_browser_pty(&f, &["setup"], "setup-cancel", &f.home, "100", "0")?;
+    chezmoi_native::run_browser_pty(&f, &["setup"], "setup-hide-key", &f.home, "100", "0")?;
+    assert!(!f.file("state").exists());
+    assert!(!f.home.join(".config/macops/recommend-model.json").exists());
+    Ok(())
+}
+
+#[test]
+fn recommendation_only_displays_unverified_command_recipes() -> TestResult {
+    let f = Fixture::new()?;
+    chezmoi_native::run_browser_pty(
+        &f,
+        &["recommend", "demo"],
+        "recommend-advice-only",
+        &f.home,
+        "100",
+        "0",
+    )?;
+    assert!(!f.file("state").exists());
+    assert!(!f.file("calls").exists());
     Ok(())
 }
 
@@ -5030,6 +5298,54 @@ fn recommendation_matches_a_public_install_channel_to_a_registered_native_recipe
     assert_eq!(result["preview"]["entry"], "install");
     assert_eq!(result["preview"]["dryRun"], true);
     assert!(!f.file("state").exists());
+    Ok(())
+}
+
+#[test]
+fn recommend_confirms_one_frozen_npm_install_and_registers_it() -> TestResult {
+    let f = Fixture::new()?;
+    let prefix = f.home.join("npm-prefix");
+    write_authorized_npm_catalog(&f, &prefix, true, true)?;
+    let mut catalog = f.read_json("catalog.json")?;
+    catalog["packages"][0]["exact_version_required"] = json!(true);
+    write_json(&f.catalog, &catalog)?;
+    f.script(
+        "npm",
+        r#"case "$1" in
+prefix) printf '%s' "$MACOPS_TEST_HOME/npm-prefix" ;;
+install)
+ spec=
+ for arg; do spec=$arg; done
+ [ "$4" = "$MACOPS_TEST_HOME/npm-prefix" ] && [ "$spec" = '@scope/demo@1.2.3' ]
+ /bin/mkdir -p "$4/lib/node_modules/@scope/demo"
+ printf '{"name":"@scope/demo","version":"1.2.3"}' > "$4/lib/node_modules/@scope/demo/package.json"
+ printf '%s\n' "$spec" >> "$MACOPS_TEST_HOME/installed" ;;
+*) exit 8 ;;
+esac"#,
+    )?;
+    chezmoi_native::run_browser_pty(
+        &f,
+        &["recommend", "scoped-demo"],
+        "recommend-cancel",
+        &f.home,
+        "100",
+        "3",
+    )?;
+    assert!(!f.file("state").exists());
+    assert!(!f.home.join("installed").exists());
+    chezmoi_native::run_browser_pty(
+        &f,
+        &["recommend", "scoped-demo"],
+        "recommend-install",
+        &f.home,
+        "100",
+        "0",
+    )?;
+    assert_eq!(
+        fs::read_to_string(f.home.join("installed"))?,
+        "@scope/demo@1.2.3\n"
+    );
+    assert!(f.read_json("state/receipts.json")?["installations"]["npm:scoped-demo"].is_object());
     Ok(())
 }
 

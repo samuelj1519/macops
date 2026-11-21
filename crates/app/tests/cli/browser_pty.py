@@ -60,7 +60,77 @@ def type_key(key):
 
 
 try:
-    if scenario == "skills-discovered":
+    if scenario == "setup-cancel":
+        expect("推荐模型")
+        expect("自定义 OpenAI 兼容服务")
+        offset = type_key(b"\r")
+        expect("cancelled", offset)
+    elif scenario == "setup-hide-key":
+        expect("推荐模型")
+        type_key(b"2\r")
+        expect("HTTPS Base URL")
+        type_key(b"https://models.example.test/v1\r")
+        expect("模型名")
+        type_key(b"fixture-model\r")
+        expect("API key")
+        offset = type_key(b"fixture-model-keyX\x7f\r")
+        expect("发送最小测试请求", offset)
+        assert b"fixture-model-key" not in capture[offset:]
+        offset = type_key(b"n\r")
+        expect("cancelled", offset)
+    elif scenario == "recommend-advice-only":
+        expect("当前没有可执行的已核验安装计划")
+    elif scenario in ("recommend-install", "recommend-cancel"):
+        expect("选择安装候选")
+        type_key(b"1\r")
+        expect("输入精确版本")
+        type_key(b"1.2.3\r")
+        expect("安装并纳管")
+        expect("安装范围")
+        offset = type_key(b"yes\r" if scenario == "recommend-install" else b"no\r")
+        expect("succeeded" if scenario == "recommend-install" else "cancelled", offset)
+    elif scenario == "inventory-reject-scope":
+        expect("Tab 切换")
+        type_key(b"/" + target.encode() + b"\r")
+        offset = type_key(b"\r")
+        expect("a 检查纳管", offset)
+        offset = type_key(b"a")
+        expect("config_scope_unsupported", offset)
+        type_key(b"q")
+    elif scenario in ("inventory-adopt", "inventory-adopt-cancel", "inventory-remove", "inventory-upgrade-cancel"):
+        expect("Tab 切换")
+        offset = type_key(b"/" + target.encode() + b"\r")
+        expect(target, offset)
+        offset = type_key(b"\r")
+        expect("a 检查纳管", offset)
+        trigger, action = {
+            "inventory-remove": (b"x", "卸载"),
+            "inventory-upgrade-cancel": (b"u", "升级"),
+        }.get(scenario, (b"a", "纳管"))
+        offset = type_key(trigger)
+        expect("Enter 确认" + action, offset)
+        expect("当前版本 1.2.3", offset)
+        if scenario in ("inventory-adopt", "inventory-remove"):
+            offset = type_key(b"\r")
+            expect(action + "结果 succeeded", offset)
+        else:
+            offset = type_key(b"\x1b")
+            expect("a 检查纳管", offset)
+        type_key(b"q")
+    elif scenario == "unified-list":
+        expect("Tab 切换")
+        offset = type_key(b"\t")
+        expect("fixture-loose", offset)
+        expect("全部发现", offset)
+        offset = type_key(b"\r")
+        expect("载荷", offset)
+        offset = type_key(b"\x1b")
+        expect("Enter 详情", offset)
+        offset = type_key(b"a")
+        expect("已登记筛选", offset)
+        assert b"fixture-loose" not in capture[offset:]
+        type_key(b"q")
+    elif scenario == "skills-discovered":
         expect("fixture-skill")
         assert b"fixture-loose" not in capture
         offset = type_key(b"a")
@@ -78,6 +148,25 @@ try:
         offset = type_key(b"\r")
         expect("仅手动触发", offset)
         type_key(b"\x03")
+    elif scenario == "skill-visibility":
+        expect("技能清单")
+        type_key(b"/@cursor\r")
+        expect("fixture-skill")
+        offset = type_key(b"\r")
+        expect("安装状态 在磁盘上", offset)
+        expect("可发现 cursor:default · 共享目录", offset)
+        expect("会话载入 未知", offset)
+        type_key(b"q")
+    elif scenario == "plugin-visibility":
+        expect("Tab 切换")
+        offset = type_key(b"\t")
+        expect("本机能力清单", offset)
+        profile, enabled = target.split(" ", 1)
+        offset = type_key(b"/@" + profile.encode() + b"\r\r")
+        expect(f"插件配置 {profile} · {enabled}", offset)
+        expect("安装记录", offset)
+        expect("会话载入 未知", offset)
+        type_key(b"q")
     elif scenario in ("refresh", "refresh-retry"):
         expect("尚未确认受管配置清单" if scenario == "refresh-retry" else "受管配置清单")
         offset = type_key(b"r")
@@ -161,7 +250,8 @@ try:
             offset = type_key(b"s")
             expect("synthetic-source-content", offset)
         type_key(b"q")
-    expect("\x1b[?1049l")
+    if scenario not in ("setup-cancel", "setup-hide-key", "recommend-install", "recommend-cancel", "recommend-advice-only"):
+        expect("\x1b[?1049l")
     assert process.wait(timeout=8) == int(exit_code)
     assert termios.tcgetattr(writer) == original, "terminal settings were not restored"
 finally:

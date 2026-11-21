@@ -45,12 +45,14 @@ mod native_skills_steps;
 mod operations;
 mod output;
 mod paths;
+mod plugin_marketplaces;
 mod policy;
 mod process;
 mod profile_inventory;
 mod providers;
 mod recommend;
 mod recommend_model;
+mod recommend_setup;
 mod recommend_upstream;
 mod resource;
 mod resource_agents;
@@ -174,6 +176,12 @@ fn run_scoped_entry(
     ctx: &context::Context,
     chezmoi_requested: bool,
 ) -> error::Result<Option<Value>> {
+    if matches!(cli.command, cli::Command::Setup) {
+        return recommend_setup::run(ctx, cli.json, cli.dry_run).map(Some);
+    }
+    if let cli::Command::Plugins { profile, online } = &cli.command {
+        return plugin_marketplaces::list(ctx, profile.as_deref(), *online, cli.dry_run).map(Some);
+    }
     if let cli::Command::Recommend {
         product,
         evidence,
@@ -182,16 +190,30 @@ fn run_scoped_entry(
         keychain_account,
     } = &cli.command
     {
-        return recommend::show(
-            ctx,
-            product,
-            evidence.as_deref(),
-            github.as_deref(),
-            *model,
-            keychain_account.as_deref(),
-            cli.dry_run,
-        )
-        .map(Some);
+        let interactive = recommend::interactive(cli);
+        let repository = if evidence.is_none() && github.is_none() && !model {
+            recommend_upstream::repository_subject(product.trim())
+        } else {
+            None
+        };
+        let data = if let Some(repository) = repository {
+            recommend_upstream::show_repository(ctx, repository, cli.dry_run, interactive)?
+        } else {
+            recommend::show(
+                ctx,
+                product,
+                evidence.as_deref(),
+                github.as_deref(),
+                *model,
+                keychain_account.as_deref(),
+                cli.dry_run,
+            )?
+        };
+        return if interactive {
+            recommend::choose(ctx, data).map(Some)
+        } else {
+            Ok(Some(data))
+        };
     }
     if let cli::Command::Manifest { command } = &cli.command {
         return manifest::run(ctx, command, cli.dry_run, cli.yes).map(Some);
@@ -431,9 +453,22 @@ fn emit(value: &Value) -> std::io::Result<()> {
 }
 
 pub fn main_entry() -> ExitCode {
-    let raw: Vec<_> = std::env::args_os().collect();
-    if raw.len() == 1 {
-        return if cli::Cli::command().print_help().is_ok() {
+    let mut raw: Vec<_> = std::env::args_os().collect();
+    if raw.len() == 1 && browser::interactive_terminal() {
+        raw.push("list".into());
+    }
+    if matches!(&raw[1..], [help, advanced] if help == "help" && advanced == "advanced") {
+        return if cli::Cli::command().print_long_help().is_ok() {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::FAILURE
+        };
+    }
+    if raw.len() == 1
+        || matches!(&raw[1..], [arg] if arg == "--help" || arg == "-h" || arg == "help")
+    {
+        let help = "本机软件、能力与配置\n\n  mo                      浏览本机清单\n  mo recommend <目标>     查找官方渠道\n  mo plugins              查看插件市场\n  mo setup                设置推荐模型\n  mo help advanced        脚本、维护与恢复\n";
+        return if std::io::stdout().lock().write_all(help.as_bytes()).is_ok() {
             ExitCode::SUCCESS
         } else {
             ExitCode::FAILURE
@@ -476,14 +511,19 @@ pub fn main_entry() -> ExitCode {
     match result {
         Ok(data) => {
             let code = if attention(&cli.command, &data) { 3 } else { 0 };
+            if recommend::interactive(&cli) {
+                return ExitCode::from(code);
+            }
             let data = policy::brew::public_value(&data);
             let value = json!({"schemaVersion":1,"status":if code==0 {"ok"} else {"attention"},"data":data,"warnings":warnings});
             let rendered = if cli.json {
                 emit(&value)
             } else {
-                std::io::stdout()
-                    .lock()
-                    .write_all(output::human(&data).as_bytes())
+                let text = match cli.command {
+                    cli::Command::Plugins { .. } => plugin_marketplaces::human(&data),
+                    _ => output::human(&data),
+                };
+                std::io::stdout().lock().write_all(text.as_bytes())
             };
             match rendered {
                 Ok(()) => ExitCode::from(code),

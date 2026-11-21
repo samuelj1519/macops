@@ -15,7 +15,43 @@ pub fn collect(
     profiles: &[Resource],
     project: Option<&Path>,
 ) -> Result<(Vec<Resource>, Vec<Coverage>)> {
+    collect_observed(ctx, profiles, project, false)
+}
+
+pub(crate) fn collect_observed(
+    ctx: &Context,
+    profiles: &[Resource],
+    project: Option<&Path>,
+    for_browser: bool,
+) -> Result<(Vec<Resource>, Vec<Coverage>)> {
     let (mut resources, mut reports) = collect_raw(ctx, profiles, project)?;
+    if for_browser
+        && profiles.iter().any(
+            |profile| matches!(&profile.data, Data::Agent { client, .. } if client == "cursor"),
+        )
+    {
+        // Cursor imports standalone Codex skills. Keep this observation out of
+        // the native deployment and lifecycle inputs in collect_raw.
+        let mut report = Coverage {
+            source: "cursor-standalone-skills".into(),
+            state: CoverageState::Complete,
+            count: 0,
+            roots: vec![],
+            issues: vec![],
+        };
+        if let Err(error) = skill_dir(
+            &ctx.home.join(".codex/skills"),
+            None,
+            "user",
+            None,
+            &mut resources,
+            &mut report,
+        ) {
+            report.state = CoverageState::Invalid;
+            report.issues.push(error.code);
+        }
+        reports.push(report);
+    }
     apply_receipts(ctx, &mut resources, &mut reports)?;
     Ok((resources.into_values().collect(), reports))
 }
@@ -350,30 +386,47 @@ fn skill_dir(
                     native_key: name,
                 },
                 revision: Revision::default(),
-                contents: vec![contents],
+                contents: vec![],
                 deployments: vec![],
                 configured_enabled: None,
                 loaded: None,
                 baseline: None,
             },
         });
-        if let (Some(harness), Data::Capability { deployments, .. }) = (harness, &mut record.data) {
-            let deployment = Deployment {
-                harness: harness.into(),
-                scope: scope.into(),
-                project: project.map(Path::to_path_buf),
-                path: logical,
-            };
-            if !deployments
-                .iter()
-                .any(|d| d.harness == harness && d.path == deployment.path && d.scope == scope)
-            {
-                deployments.push(deployment);
-            }
-        }
+        let deployment = harness.map(|harness| Deployment {
+            harness: harness.into(),
+            scope: scope.into(),
+            project: project.map(Path::to_path_buf),
+            path: logical,
+        });
+        attach_skill_site(&mut record.data, contents, deployment);
         report.count += 1;
     }
     Ok(())
+}
+
+fn attach_skill_site(data: &mut Data, observed: Content, deployment: Option<Deployment>) {
+    if let Data::Capability {
+        contents,
+        deployments,
+        ..
+    } = data
+    {
+        if (deployment.is_none() || contents.is_empty())
+            && !contents.iter().any(|site| site.path == observed.path)
+        {
+            contents.push(observed);
+        }
+        if let Some(deployment) = deployment
+            && !deployments.iter().any(|d| {
+                d.harness == deployment.harness
+                    && d.path == deployment.path
+                    && d.scope == deployment.scope
+            })
+        {
+            deployments.push(deployment);
+        }
+    }
 }
 
 fn plugins(

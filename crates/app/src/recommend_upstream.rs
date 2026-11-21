@@ -35,6 +35,137 @@ fn repository_id(value: &str) -> Result<&str> {
     }
 }
 
+pub(crate) fn repository_subject(value: &str) -> Option<&str> {
+    let value = value.strip_prefix("https://github.com/").unwrap_or(value);
+    let value = value.trim_end_matches('/');
+    repository_id(value.strip_suffix(".git").unwrap_or(value)).ok()
+}
+
+struct RepositoryEvidence {
+    repository: String,
+    commit: crate::policy::source_git::ObjectId,
+    documents: Vec<Document>,
+}
+
+struct Document {
+    path: String,
+    content: String,
+}
+
+fn document(value: &Value, expected_path: Option<&str>) -> Option<Document> {
+    let path = value["path"].as_str()?;
+    if value["type"] != "file"
+        || value["encoding"] != "base64"
+        || path == "."
+        || expected_path.is_some_and(|expected| expected != path)
+        || crate::policy::source_git::RelativePath::parse(path).is_err()
+        || !path
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"/-._".contains(&b))
+    {
+        return None;
+    }
+    let encoded = value["content"].as_str()?.replace('\n', "");
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .ok()?;
+    if bytes.len() > 64 * 1024 {
+        return None;
+    }
+    Some(Document {
+        path: path.into(),
+        content: String::from_utf8(bytes).ok()?,
+    })
+}
+
+fn repository_evidence(
+    repo: &str,
+    mut fetch: impl FnMut(&str) -> Result<Value>,
+) -> Result<RepositoryEvidence> {
+    let repo = repository_id(repo)?;
+    let metadata = fetch(&format!("https://api.github.com/repos/{repo}"))?;
+    let repository = metadata["full_name"].as_str().ok_or_else(unavailable)?;
+    if metadata["private"] != false || !repository.eq_ignore_ascii_case(repo) {
+        return Err(unavailable());
+    }
+    let base = format!("https://api.github.com/repos/{repository}");
+    let latest = fetch(&format!("{base}/commits?per_page=1"))?;
+    let commit = crate::policy::source_git::ObjectId::parse(
+        latest[0]["sha"].as_str().ok_or_else(unavailable)?,
+    )
+    .map_err(|_| unavailable())?;
+    let reference = commit.as_str();
+    let readme = fetch(&format!("{base}/readme?ref={reference}"))
+        .ok()
+        .and_then(|result| document(&result, None));
+    let install = fetch(&format!("{base}/contents/INSTALL.md?ref={reference}"))
+        .ok()
+        .and_then(|result| document(&result, Some("INSTALL.md")));
+    Ok(RepositoryEvidence {
+        repository: repository.into(),
+        commit,
+        documents: readme.into_iter().chain(install).collect(),
+    })
+}
+
+pub(crate) fn show_repository(
+    ctx: &Context,
+    repo: &str,
+    dry_run: bool,
+    interactive: bool,
+) -> Result<Value> {
+    if dry_run {
+        return show(ctx, repo, repo, true);
+    }
+    let deadline = Instant::now() + Duration::from_secs(ctx.timeout_secs.min(15));
+    Ok(repository_review(ctx, repo, interactive, |url| {
+        crate::recommend_model::fetch_public(url, deadline)
+    }))
+}
+
+fn repository_review(
+    ctx: &Context,
+    repo: &str,
+    interactive: bool,
+    fetch: impl FnMut(&str) -> Result<Value>,
+) -> Value {
+    match repository_evidence(repo, fetch) {
+        Ok(evidence) => {
+            let model = match interactive
+                .then(|| crate::recommend_setup::read(ctx))
+                .transpose()
+            {
+                Ok(Some(Some(profile))) if profile.enabled => {
+                    let documents: Vec<_> = evidence
+                        .documents
+                        .iter()
+                        .map(|doc| (doc.path.as_str(), doc.content.as_str()))
+                        .collect();
+                    crate::recommend_model::suggest(ctx, &profile, &evidence.repository, &documents)
+                }
+                Ok(_) => json!({"status":"local-only","candidates":[]}),
+                Err(_) => json!({"status":"profile-unavailable","candidates":[]}),
+            };
+            let commit = evidence.commit.as_str();
+            let documents: Vec<_> = evidence.documents.iter().map(|doc| json!({
+                "path": doc.path,
+                "url": format!("https://github.com/{}/blob/{commit}/{}", evidence.repository, doc.path),
+                "sha256": format!("{:x}", Sha256::digest(doc.content.as_bytes())),
+            })).collect();
+            json!({
+                "query":repo,"repository":evidence.repository,"commit":commit,
+                "documents":documents,"model":model,
+                "evidenceStatus":if documents.is_empty() {"documents-unavailable"} else {"public-commit"},
+                "canExecute":false,"persistentWrites":false
+            })
+        }
+        Err(error) => json!({
+            "query":repo,"repository":repo,"evidenceStatus":"source-unavailable",
+            "reason":error.code,"canExecute":false,"persistentWrites":false
+        }),
+    }
+}
+
 pub fn show(ctx: &Context, query: &str, repo: &str, dry_run: bool) -> Result<Value> {
     let repo = repository_id(repo)?;
     if dry_run {

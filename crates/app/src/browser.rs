@@ -16,6 +16,7 @@ use std::{
 pub(crate) enum Kind {
     Config,
     Skills,
+    Capabilities,
     Apps,
     Agents,
 }
@@ -25,10 +26,13 @@ impl Kind {
         match self {
             Self::Config => "配置",
             Self::Skills => "技能",
+            Self::Capabilities => "能力",
             Self::Apps => "软件",
             Self::Agents => "Agent 档案",
         }
     }
+
+    pub(crate) const TABS: [Self; 4] = [Self::Apps, Self::Capabilities, Self::Agents, Self::Config];
 }
 
 #[derive(Debug, Serialize)]
@@ -37,6 +41,8 @@ pub(crate) struct Item {
     pub name: String,
     pub summary: String,
     pub managed: bool,
+    #[serde(skip)]
+    pub management: crate::resource::Management,
     pub directory: bool,
     pub path: Option<PathBuf>,
     pub source: Option<PathBuf>,
@@ -59,6 +65,7 @@ pub(crate) struct View {
 pub(crate) enum Session {
     Config(Box<ConfigBrowser>),
     Skills,
+    Capabilities,
     Apps,
     Agents,
 }
@@ -71,7 +78,8 @@ impl Session {
                 let view = browser.view();
                 Ok((Self::Config(Box::new(browser)), view))
             }
-            Kind::Skills => Ok((Self::Skills, crate::capabilities::browse(ctx)?)),
+            Kind::Skills => Ok((Self::Skills, crate::capabilities::browse(ctx, false)?)),
+            Kind::Capabilities => Ok((Self::Capabilities, crate::capabilities::browse(ctx, true)?)),
             Kind::Apps => Ok((Self::Apps, resource_view(ctx, "applications")?)),
             Kind::Agents => Ok((Self::Agents, resource_view(ctx, "agents")?)),
         }
@@ -83,7 +91,8 @@ impl Session {
                 browser.refresh(ctx)?;
                 Ok(browser.view())
             }
-            Self::Skills => crate::capabilities::browse(ctx),
+            Self::Skills => crate::capabilities::browse(ctx, false),
+            Self::Capabilities => crate::capabilities::browse(ctx, true),
             Self::Apps => resource_view(ctx, "applications"),
             Self::Agents => resource_view(ctx, "agents"),
         }
@@ -96,7 +105,7 @@ impl Session {
     ) -> Result<crate::chezmoi_native::ViewerFile> {
         match self {
             Self::Config(browser) => browser.select_file(id, source),
-            Self::Skills | Self::Apps | Self::Agents => Err(Error::attention(
+            Self::Skills | Self::Capabilities | Self::Apps | Self::Agents => Err(Error::attention(
                 "file_unavailable",
                 "此入口提供技能管理详情",
             )),
@@ -104,21 +113,33 @@ impl Session {
     }
 }
 
+pub(crate) fn interactive_terminal() -> bool {
+    std::io::stdin().is_terminal()
+        && std::io::stdout().is_terminal()
+        && std::env::var("TERM").is_ok_and(|term| !term.is_empty() && term != "dumb")
+}
+
 pub(crate) fn entry(cli: &Cli) -> Option<ExitCode> {
+    let interactive = !cli.json && !cli.dry_run && interactive_terminal();
+    let unified = interactive
+        && !cli.yes
+        && matches!(
+            cli.command,
+            Command::List {
+                kind: None,
+                project: None
+            }
+        );
     let kind = match &cli.command {
+        Command::List { .. } if unified => Kind::Apps,
         Command::Config { command: None } => Kind::Config,
         Command::Skills { command: None } => Kind::Skills,
         Command::Apps => Kind::Apps,
         Command::Agents => Kind::Agents,
         _ => return None,
     };
-    let interactive = !cli.json
-        && !cli.dry_run
-        && std::io::stdin().is_terminal()
-        && std::io::stdout().is_terminal()
-        && std::env::var("TERM").is_ok_and(|term| !term.is_empty() && term != "dumb");
     let mut warnings = Vec::new();
-    let result = execute(cli, kind, &mut warnings, interactive);
+    let result = execute(cli, kind, &mut warnings, interactive, unified);
     if !cli.json {
         for warning in &warnings {
             eprintln!("macops: {warning}");
@@ -160,7 +181,13 @@ pub(crate) fn entry(cli: &Cli) -> Option<ExitCode> {
     Some(ExitCode::from(code))
 }
 
-fn execute(cli: &Cli, kind: Kind, warnings: &mut Vec<String>, interactive: bool) -> Result<View> {
+fn execute(
+    cli: &Cli,
+    kind: Kind,
+    warnings: &mut Vec<String>,
+    interactive: bool,
+    unified: bool,
+) -> Result<View> {
     crate::policy::cli::config_scope(
         &cli.command,
         cli.chezmoi_source.is_some()
@@ -170,7 +197,7 @@ fn execute(cli: &Cli, kind: Kind, warnings: &mut Vec<String>, interactive: bool)
     let ctx = Context::from_cli(cli, warnings)?;
     let (mut session, view) = Session::load(&ctx, kind)?;
     if interactive {
-        crate::terminal::browse(&ctx, kind, &mut session, view)
+        crate::terminal::browse(&ctx, kind, &mut session, view, unified)
     } else {
         Ok(view)
     }
@@ -291,6 +318,7 @@ fn resource_item(resource: crate::resource::Resource) -> Option<Item> {
         name: resource.name,
         summary,
         managed: resource.management != Management::Untracked,
+        management: resource.management,
         directory: false,
         path,
         source: None,

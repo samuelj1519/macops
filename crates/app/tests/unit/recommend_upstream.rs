@@ -10,6 +10,165 @@ fn readme(excerpt: &[u8]) -> Value {
 }
 
 #[test]
+fn repository_documents_share_one_verified_commit() -> TestResult {
+    let commit = "a".repeat(40);
+    let mut requests = Vec::new();
+    let result = repository_evidence("Owner/Example", |url| {
+        requests.push(url.to_owned());
+        if url.ends_with("/Owner/Example") {
+            return Ok(json!({"full_name":"owner/example","private":false}));
+        }
+        if url.ends_with("/commits?per_page=1") {
+            return Ok(json!([{"sha":commit}]));
+        }
+        assert!(url.ends_with(&format!("?ref={commit}")), "{url}");
+        let path = if url.contains("/readme?") {
+            "README.md"
+        } else {
+            "INSTALL.md"
+        };
+        Ok(json!({"path":path,"type":"file","encoding":"base64",
+            "content":base64::engine::general_purpose::STANDARD.encode("官方安装说明")}))
+    })?;
+    assert_eq!(result.commit.as_str(), commit);
+    assert_eq!(result.repository, "owner/example");
+    assert_eq!(requests.len(), 4);
+    assert_eq!(
+        result
+            .documents
+            .iter()
+            .map(|d| d.path.as_str())
+            .collect::<Vec<_>>(),
+        ["README.md", "INSTALL.md"]
+    );
+    assert_eq!(result.documents[1].content, "官方安装说明");
+    assert!(
+        document(
+            &json!({"path":"another.md","type":"file","encoding":"base64","content":"dGVzdA=="}),
+            Some("INSTALL.md")
+        )
+        .is_none()
+    );
+    assert!(
+        document(
+            &json!({"path":"../README.md","type":"file","encoding":"base64","content":"dGVzdA=="}),
+            None
+        )
+        .is_none()
+    );
+    assert!(
+        document(
+            &json!({"path":"README.md","type":"symlink","encoding":"base64","content":"dGVzdA=="}),
+            None
+        )
+        .is_none()
+    );
+    Ok(())
+}
+
+#[test]
+fn repository_report_keeps_pinned_sources_when_the_model_profile_is_unavailable() -> TestResult {
+    use clap::Parser;
+    let home = tempfile::tempdir_in("/private/tmp")?;
+    let args = crate::cli::Cli::try_parse_from([
+        "macops",
+        "--home",
+        home.path().to_str().ok_or("synthetic home")?,
+        "recommend",
+        "owner/repo",
+    ])?;
+    let ctx = crate::context::Context::from_cli(&args, &mut vec![])?;
+    let commit = "b".repeat(40);
+    let fetch = |url: &str| {
+        if url.ends_with("/owner/repo") {
+            Ok(json!({"full_name":"owner/repo","private":false}))
+        } else if url.ends_with("/commits?per_page=1") {
+            Ok(json!([{"sha":commit}]))
+        } else if url.contains("/contents/INSTALL.md?") {
+            Ok(json!({"path":"INSTALL.md","type":"file","encoding":"base64","content":"dGVzdA=="}))
+        } else {
+            Err(unavailable())
+        }
+    };
+    let data = repository_review(&ctx, "owner/repo", false, fetch);
+    assert_eq!(data["evidenceStatus"], "public-commit");
+    assert_eq!(
+        data["documents"][0]["url"],
+        format!("https://github.com/owner/repo/blob/{commit}/INSTALL.md")
+    );
+    assert_eq!(data["canExecute"], false);
+    assert_eq!(data["model"]["status"], "local-only");
+    let config = crate::native_skills_files::private(&ctx.config)?;
+    let profile = config.path.join("recommend-model.json");
+    std::fs::write(&profile, b"broken")?;
+    assert_eq!(
+        repository_review(&ctx, "owner/repo", true, fetch)["model"]["status"],
+        "profile-unavailable"
+    );
+    std::fs::write(
+        &profile,
+        serde_json::to_vec(&json!({
+            "schemaVersion":1,"enabled":true,"endpoint":"https://models.example.test/chat/completions",
+            "model":"example","account":format!("setup-{}", "a".repeat(64))
+        }))?,
+    )?;
+    assert_eq!(
+        repository_review(&ctx, "owner/repo", true, fetch)["model"]["status"],
+        "local-only"
+    );
+    let absent = repository_review(&ctx, "owner/repo", true, |_| Err(unavailable()));
+    assert_eq!(absent["evidenceStatus"], "source-unavailable");
+    assert_eq!(absent["persistentWrites"], false);
+    Ok(())
+}
+
+#[test]
+fn repository_report_refuses_missing_revisions_and_uninspectable_documents() -> TestResult {
+    use clap::Parser;
+    let home = tempfile::tempdir_in("/private/tmp")?;
+    let args = crate::cli::Cli::try_parse_from([
+        "macops",
+        "--home",
+        home.path().to_str().ok_or("home")?,
+        "recommend",
+        "owner/repo",
+    ])?;
+    let ctx = Context::from_cli(&args, &mut vec![])?;
+    for head in [json!([]), json!([{"sha":"not-a-git-commit"}])] {
+        let result = repository_review(&ctx, "owner/repo", false, |url| {
+            if url.ends_with("/owner/repo") {
+                Ok(json!({"full_name":"owner/repo","private":false}))
+            } else {
+                Ok(head.clone())
+            }
+        });
+        assert_eq!(result["evidenceStatus"], "source-unavailable");
+    }
+    let result = repository_review(&ctx, "owner/repo", false, |url| {
+        if url.ends_with("/owner/repo") {
+            Ok(json!({"full_name":"owner/repo","private":false}))
+        } else if url.ends_with("/commits?per_page=1") {
+            Ok(json!([{"sha":"c".repeat(40)}]))
+        } else {
+            Err(unavailable())
+        }
+    });
+    assert_eq!(result["evidenceStatus"], "documents-unavailable");
+    assert_eq!(result["documents"], json!([]));
+    for payload in [
+        json!({"path":".","type":"file","encoding":"base64","content":"dGVzdA=="}),
+        json!({"path":"INSTALL.md","type":"file","encoding":"binary","content":"dGVzdA=="}),
+        json!({"path":"INSTALL.md","type":"file","encoding":"base64","content":"?"}),
+        json!({"path":"INSTALL.md","type":"file","encoding":"base64","content":"/w=="}),
+        json!({"path":"INSTALL.md","type":"file","encoding":"base64",
+            "content":base64::engine::general_purpose::STANDARD.encode(vec![b'a'; 64 * 1024 + 1])}),
+    ] {
+        assert!(document(&payload, None).is_none());
+    }
+    Ok(())
+}
+
+#[test]
 fn published_readme_is_bound_to_the_selected_public_repository() -> TestResult {
     let mut urls = Vec::new();
     let answer = inspect("Project", "Example/Project", |url| {

@@ -5,9 +5,13 @@ use crate::{
     error::{Error, Result},
     governance::Governance,
     policy::governance::Dataset,
-    resource::{CoverageState, Data, Resource, State},
+    resource::{Content, CoverageState, Data, Deployment, Resource, State},
 };
 use serde_json::{Value, json};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::Path,
+};
 
 pub fn query(ctx: &Context, command: &Command) -> Result<Option<Value>> {
     let Command::Skills {
@@ -41,7 +45,7 @@ fn inventory(
     details: bool,
 ) -> Result<Value> {
     crate::governance::read(ctx, |authority| {
-        let (mut resources, coverage, _) = observed_inventory(ctx, authority)?;
+        let (mut resources, coverage, _) = observed_inventory(ctx, authority, false)?;
         let maintenance = match crate::native_skills::catalog_summary(ctx) {
             Ok(summary) => summary,
             Err(error) => {
@@ -99,47 +103,70 @@ fn inventory(
 fn observed_inventory(
     ctx: &Context,
     authority: &Governance,
+    for_browser: bool,
 ) -> Result<(Vec<Resource>, Vec<crate::resource::Coverage>, Vec<Resource>)> {
     let profiles = crate::resource_agents::profile_roots(ctx)?;
-    let (mut resources, coverage) = crate::resource_capabilities::collect(ctx, &profiles, None)?;
+    let (mut resources, coverage) =
+        crate::resource_capabilities::collect_observed(ctx, &profiles, None, for_browser)?;
     add_source_aliases(ctx, authority, &mut resources)?;
     Ok((resources, coverage, profiles))
 }
 
-pub(crate) fn browse(ctx: &Context) -> Result<crate::browser::View> {
+pub(crate) fn browse(
+    ctx: &Context,
+    include_other_capabilities: bool,
+) -> Result<crate::browser::View> {
     use crate::browser::View;
-    use std::collections::BTreeMap;
     crate::governance::read(ctx, |authority| {
-        let (resources, coverage, profiles) = observed_inventory(ctx, authority)?;
+        let (resources, coverage, profiles) = observed_inventory(ctx, authority, true)?;
         let profiles: BTreeMap<_, _> = profiles
             .into_iter()
             .map(|profile| (profile.id, profile.name))
             .collect();
         let recipes = crate::native_skills::catalog_summary(ctx).ok();
         let mut incomplete = coverage.iter().any(|row| {
-            (row.source.starts_with("skills-lock") || row.source == "skill-deployments")
+            (row.source.starts_with("skills-lock")
+                || matches!(
+                    row.source.as_str(),
+                    "skill-deployments" | "cursor-standalone-skills"
+                )
+                || (include_other_capabilities && row.source.starts_with("cursor-plugins:")))
                 && !matches!(row.state, CoverageState::Complete | CoverageState::Absent)
         });
         let mut items = Vec::new();
         for resource in resources {
-            if let Some((item, attention)) = skill_item(resource, &profiles, recipes.as_ref()) {
+            if let Some((item, attention)) = skill_item(
+                resource,
+                &ctx.home,
+                &profiles,
+                recipes.as_ref(),
+                include_other_capabilities,
+            ) {
                 items.push(item);
                 incomplete |= attention;
             }
         }
         items.sort_by(|a, b| a.name.cmp(&b.name).then(a.id.cmp(&b.id)));
+        let note = if incomplete {
+            "能力盘点不完整，显示已取得的记录"
+        } else if include_other_capabilities {
+            "本机能力清单"
+        } else {
+            "技能清单"
+        };
         Ok(View {
             scope: "global".into(),
             items,
             coverage: if incomplete { "partial" } else { "observed" },
             difference_coverage: "not_applicable",
             observed_at: Some(crate::store::now()),
-            note: if incomplete {
-                "技能盘点不完整，显示已取得的记录"
+            note: if include_other_capabilities
+                && profiles.values().any(|name| name == "cursor:default")
+            {
+                format!("{note} · Cursor 插件启用状态未核验")
             } else {
-                "技能清单"
-            }
-            .into(),
+                note.into()
+            },
             incomplete,
         })
     })
@@ -147,12 +174,12 @@ pub(crate) fn browse(ctx: &Context) -> Result<crate::browser::View> {
 
 fn skill_item(
     resource: Resource,
-    profiles: &std::collections::BTreeMap<String, String>,
+    home: &Path,
+    profiles: &BTreeMap<String, String>,
     recipes: Option<&Value>,
+    include_other_capabilities: bool,
 ) -> Option<(crate::browser::Item, bool)> {
     use crate::{browser::Item, resource::Management};
-    use std::collections::BTreeSet;
-    let agent_name = |id: &str| profiles.get(id).map_or("未知档案", String::as_str);
     let Data::Capability {
         delivery_kind,
         origin,
@@ -167,17 +194,11 @@ fn skill_item(
     else {
         return None;
     };
-    if delivery_kind != "skill" {
+    if delivery_kind != "skill" && !include_other_capabilities {
         return None;
     }
     let incomplete = matches!(resource.status, State::Unknown | State::Missing)
         || baseline.is_some_and(|b| b.comparison != crate::resource::Comparison::Same);
-    let agents: Vec<_> = deployments
-        .iter()
-        .map(|d| agent_name(&d.harness).to_owned())
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect();
     let version = revision.recorded.or(revision.declared).or(revision.source);
     let manual = recipes
         .and_then(|summary| summary["sources"].as_array())
@@ -190,37 +211,60 @@ fn skill_item(
         format!("管理器 {}", origin.manager),
         format!("来源 {}", origin.label.as_deref().unwrap_or("待核对")),
         format!("版本 {}", version.as_deref().unwrap_or("未知")),
-        format!("安装状态 {:?}", resource.status),
-        format!("配置启用 {}", label_bool(configured_enabled)),
+        format!("安装状态 {}", state_label(&resource.status)),
         format!("会话载入 {}", label_bool(loaded)),
-        format!("仅手动触发 {}", label_bool(manual)),
     ];
-    details.extend(
-        contents
-            .iter()
-            .map(|item| format!("载荷 {}", item.path.display())),
-    );
-    details.extend(deployments.iter().map(|d| {
-        format!(
-            "投放 {} · {} · {}",
-            agent_name(&d.harness),
-            d.scope,
-            d.path.display()
+    if include_other_capabilities {
+        details.insert(0, format!("类型 {delivery_kind}"));
+    }
+    let plugin_enabled = match configured_enabled {
+        Some(true) => "已启用",
+        Some(false) => "已停用",
+        None => "未知",
+    };
+    let agents = if delivery_kind == "skill" {
+        details.push(format!("仅手动触发 {}", label_bool(manual)));
+        add_skill_details(home, profiles, &contents, &deployments, &mut details)
+    } else {
+        let plugin = delivery_kind == "plugin";
+        if plugin {
+            details.push(format!("安装记录 {}", origin.record.display()));
+            if deployments.is_empty() {
+                details.push(format!("插件配置 {plugin_enabled}"));
+            }
+        } else {
+            details.push(format!("配置启用 {}", label_bool(configured_enabled)));
+        }
+        add_native_details(
+            profiles,
+            &contents,
+            &deployments,
+            plugin.then_some(plugin_enabled),
+            &mut details,
         )
-    }));
+    };
     let display_version: String = version
         .as_deref()
         .unwrap_or("未知")
         .chars()
         .take(12)
         .collect();
-    let summary = format!("{display_version} · {}", agents.join(", "));
+    let agents: Vec<_> = agents.into_iter().collect();
+    let profiles = agents.join(", ");
+    let summary = match delivery_kind.as_str() {
+        "skill" if agents.is_empty() => format!("{display_version} · 未观察到可发现档案"),
+        "skill" => format!("{display_version} · 可发现 {profiles}"),
+        "plugin" if agents.is_empty() => format!("{display_version} · 插件配置 {plugin_enabled}"),
+        "plugin" => format!("{display_version} · {profiles} · {plugin_enabled}"),
+        _ => format!("{display_version} · {profiles}"),
+    };
     Some((
         Item {
             id: resource.id,
             name: resource.name,
             summary,
             managed: resource.management != Management::Untracked,
+            management: resource.management,
             directory: false,
             path: contents.into_iter().next().map(|item| item.path),
             source: None,
@@ -230,6 +274,127 @@ fn skill_item(
         },
         incomplete,
     ))
+}
+
+fn profile_name<'a>(profiles: &'a BTreeMap<String, String>, id: &str) -> &'a str {
+    profiles.get(id).map_or("未知档案", String::as_str)
+}
+
+fn add_native_details(
+    profiles: &BTreeMap<String, String>,
+    contents: &[Content],
+    deployments: &[Deployment],
+    plugin_enabled: Option<&str>,
+    details: &mut Vec<String>,
+) -> BTreeSet<String> {
+    details.extend(contents.iter().map(|item| {
+        format!(
+            "载荷 {} · {}",
+            state_label(&item.status),
+            item.path.display()
+        )
+    }));
+    let mut agents = BTreeSet::new();
+    for d in deployments {
+        let name = profile_name(profiles, &d.harness);
+        agents.insert(name.to_owned());
+        if let Some(enabled) = plugin_enabled {
+            details.push(format!("插件配置 {name} · {enabled} · {}", d.scope));
+        } else {
+            details.push(format!(
+                "配置位置 {name} · {} · {}",
+                d.scope,
+                d.path.display()
+            ));
+        }
+    }
+    agents
+}
+
+fn add_skill_details(
+    home: &Path,
+    profiles: &BTreeMap<String, String>,
+    contents: &[Content],
+    deployments: &[Deployment],
+    details: &mut Vec<String>,
+) -> BTreeSet<String> {
+    let locations = skill_locations(contents, deployments);
+    details.extend(
+        locations
+            .iter()
+            .map(|(path, status)| format!("载荷 {} · {}", state_label(status), path.display())),
+    );
+    let visibility = skill_visibility(home, profiles, deployments, &locations);
+    if visibility.is_empty() {
+        details.push("可发现档案 未观察到".into());
+    }
+    let mut agents = BTreeSet::new();
+    for (profile, path, route) in visibility {
+        agents.insert(profile.to_owned());
+        details.push(format!("可发现 {profile} · {route} · {}", path.display()));
+    }
+    agents
+}
+
+fn skill_locations<'a>(
+    contents: &'a [Content],
+    deployments: &'a [Deployment],
+) -> BTreeMap<&'a Path, &'a State> {
+    let mut locations: BTreeMap<_, _> = contents
+        .iter()
+        .map(|item| (item.path.as_path(), &item.status))
+        .collect();
+    for deployment in deployments {
+        locations.insert(deployment.path.as_path(), &State::Present);
+    }
+    locations
+}
+
+fn skill_visibility<'a>(
+    home: &Path,
+    profiles: &'a BTreeMap<String, String>,
+    deployments: &'a [Deployment],
+    locations: &BTreeMap<&'a Path, &'a State>,
+) -> BTreeSet<(&'a str, &'a Path, &'static str)> {
+    let shared = home.join(".agents/skills");
+    let mut visibility = BTreeSet::new();
+    for d in deployments {
+        let route = if d.path.parent() == Some(shared.as_path()) {
+            "共享目录"
+        } else if d.scope == "system" {
+            "系统目录"
+        } else {
+            "档案目录"
+        };
+        visibility.insert((profile_name(profiles, &d.harness), d.path.as_path(), route));
+    }
+    if let Some(cursor) = profiles.values().find(|name| *name == "cursor:default") {
+        // These are directory imports, independent of Cursor's plugin registry.
+        let claude = home.join(".claude/skills");
+        let codex = home.join(".codex/skills");
+        for (&path, &state) in locations {
+            if *state != State::Present {
+                continue;
+            }
+            if path.parent() == Some(shared.as_path()) {
+                visibility.insert((cursor.as_str(), path, "共享目录"));
+            } else if path.parent() == Some(claude.as_path())
+                || path.parent() == Some(codex.as_path())
+            {
+                visibility.insert((cursor.as_str(), path, "兼容目录"));
+            }
+        }
+    }
+    visibility
+}
+
+fn state_label(state: &State) -> &'static str {
+    match state {
+        State::Present => "在磁盘上",
+        State::Declared => "已登记",
+        State::Missing => "缺失",
+        State::Unknown => "未知",
+    }
 }
 
 fn label_bool(value: Option<bool>) -> &'static str {

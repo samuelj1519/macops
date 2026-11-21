@@ -400,6 +400,7 @@ fn config_item(id: &str, entry: &Managed, summary: &str, kind: &str, directory: 
         name: id.into(),
         summary: summary.into(),
         managed: true,
+        management: crate::resource::Management::Native,
         directory,
         path: Some(entry.absolute.clone()),
         source: Some(entry.source_absolute.clone()),

@@ -86,6 +86,16 @@ pub enum Command {
         #[arg(long, requires = "model")]
         keychain_account: Option<String>,
     },
+    #[command(about = "设置推荐模型与连接")]
+    Setup,
+    #[command(about = "查看 Codex、Claude Code 和 Cursor 插件市场")]
+    Plugins {
+        /// 筛选 codex、claude、cursor 或具体档案，如 claude:mi
+        profile: Option<String>,
+        /// 由 Cursor CLI 查询当前账户可见的市场
+        #[arg(long, requires = "profile")]
+        online: bool,
+    },
     #[command(about = "通过原生管理器发现安装；不自动接管")]
     Discover { manager: Option<String> },
     #[command(about = "检查本地安装，损坏输入报告 unknown")]

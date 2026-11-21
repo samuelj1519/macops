@@ -2,6 +2,23 @@ use super::*;
 use crate::test_support::TestResult;
 
 #[test]
+fn recommendation_source_labels_omit_embedded_and_query_credentials() {
+    assert_eq!(
+        source_label(concat!(
+            "https://reader:",
+            "fixture-private",
+            "@",
+            "github.com/owner/repo"
+        )),
+        "待核对"
+    );
+    assert_eq!(
+        source_label("https://github.com/owner/repo?key=fixture-private#fragment"),
+        "https://github.com/owner/repo"
+    );
+}
+
+#[test]
 fn public_brew_evidence_does_not_select_another_tap_with_the_same_formula_name() -> TestResult {
     let mut package = crate::test_support::package();
     let mut query = crate::test_support::brew::query()?;
