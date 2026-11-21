@@ -8,7 +8,7 @@ bash tools/check.sh
 
 完整检查包含格式、严格 Clippy、所有 target 测试、独立 doc tests、覆盖率校验器的负向测试、拼写、TOML、依赖及许可证、覆盖率和 Release 构建。CI 在 Apple Silicon macOS 上运行。提交使用仓库的 `.githooks/pre-commit`。需要时设置 `git config core.hooksPath .githooks`。
 
-CI 常规测试串行运行库、二进制、示例和基准测试目标。集成测试由 Cargo 枚举，每个测试进程最多使用 4 个测试线程。单测保持串行，以避免派生子进程继承其他测试持有的文件锁。
+CI 的常规检查和覆盖率检查都通过 `tools/run_ci_tests.sh` 并行运行两组 Cargo 测试。库、二进制、示例和基准目标的测试进程内使用 1 个线程，集成测试进程内使用 4 个线程。单测保持串行，以避免派生子进程继承其他测试持有的文件锁。两组都结束后才判断结果。
 
 公开源码检查读取 Git 跟踪的文件，检查常见凭据模式、本机账号路径、个人邮件地址和敏感文件类型。结果只显示文件、行号及类别。版本标签在 CI 检查通过后打包 Apple Silicon 产物，内含 MIT 许可证和 SHA-256 校验值。
 
