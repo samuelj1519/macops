@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify the additive Source Upgrade file-pair model; preserve the r3 checker."""
+"""Verify the Source Upgrade file-pair ledger model."""
 import os
 import argparse,json,subprocess,tempfile
 from pathlib import Path

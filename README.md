@@ -21,7 +21,7 @@ ln -s ../libexec/macops "$HOME/.local/bin/mo"
 mo --version
 ```
 
-Add `$HOME/.local/bin` to `PATH` if needed. See the [migration guide](docs/migration.md) before switching from the legacy tool.
+Add `$HOME/.local/bin` to `PATH` if needed.
 
 To build from source, use the Rust version pinned in `rust-toolchain.toml` and run `cargo build --release --locked`. The build produces `target/release/macops`.
 

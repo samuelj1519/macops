@@ -1,4 +1,4 @@
-"""Run UV-RO r2 baseline, actual history witnesses and valid guard-only mutants."""
+"""Check the uv observation model, reachability, and guard regressions."""
 import os
 import pathlib
 import subprocess
@@ -6,15 +6,15 @@ import tempfile
 
 BASE = pathlib.Path(__file__).resolve().parent.parent
 MODEL = BASE / 'docs/models/uv_observed'
-ART = BASE / 'artifacts/uv-readonly/model-r2'
-JAR = str(Path(os.environ.get("TLA2TOOLS_JAR", "tla2tools.jar")).resolve())
+ART = BASE / 'artifacts/uv-readonly/model-checks'
+JAR = str(pathlib.Path(os.environ.get("TLA2TOOLS_JAR", "tla2tools.jar")).resolve())
 ART.mkdir(parents=True, exist_ok=True)
 source = (MODEL / 'UvObserved.tla').read_text()
 config = (MODEL / 'UvObserved.cfg').read_text()
 
 
 def run(name, text, cfg, expected=None):
-    with tempfile.TemporaryDirectory(prefix='uv-r2-model-', dir='/private/tmp') as temp:
+    with tempfile.TemporaryDirectory(prefix='uv-model-', dir='/private/tmp') as temp:
         path = pathlib.Path(temp)
         (path / 'UvObserved.tla').write_text(text)
         (path / 'check.cfg').write_text(cfg)

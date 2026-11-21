@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compile guard mutations in independent source/build trees; never run Brew."""
+"""Check Brew policy guard regressions with isolated Rust tests."""
 from pathlib import Path
 import argparse
 import hashlib

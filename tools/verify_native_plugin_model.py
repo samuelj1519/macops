@@ -1,4 +1,4 @@
-"""Exhaustive finite model of the initial Codex local re-add adapter."""
+"""Exhaustively check local Codex plugin re-add and recovery."""
 
 import sys
 from collections import deque
@@ -96,7 +96,7 @@ def explore(admission, mutation):
     return len(seen), transitions
 
 
-def replay_review_witness(mutation):
+def replay_recovery_witness(mutation):
     admitted = Admission(True, True, True, True, True, True)
     state = State()
     path = [
@@ -129,7 +129,7 @@ def main():
         ("--bypass-recovery-evidence",): "evidence",
         ("--bypass-current-projection",): "current",
     }.get(tuple(sys.argv[1:]))
-    replay_review_witness(mutation)
+    replay_recovery_witness(mutation)
     answers = [explore(Admission(*flags), mutation) for flags in product((False, True), repeat=6)]
     print(
         f"PASS {len(answers)} admissions, {sum(a for a, _ in answers)} states, "

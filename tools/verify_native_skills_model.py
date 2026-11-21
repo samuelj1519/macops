@@ -10,7 +10,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 MODEL = ROOT / "docs/models/native_skills"
 ART = ROOT / "artifacts/native-skills/model-checks"
 JAVA = os.environ.get("JAVA", "java")
-JAR = str(Path(os.environ.get("TLA2TOOLS_JAR", "tla2tools.jar")).resolve())
+JAR = str(pathlib.Path(os.environ.get("TLA2TOOLS_JAR", "tla2tools.jar")).resolve())
 ART.mkdir(parents=True, exist_ok=True)
 SOURCE = (MODEL / "NativeSkills.tla").read_text()
 CONFIG = (MODEL / "NativeSkills.cfg").read_text()

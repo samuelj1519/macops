@@ -8,6 +8,8 @@ bash tools/check.sh
 
 完整检查包含格式、严格 Clippy、所有 target 测试、独立 doc tests、覆盖率校验器的负向测试、拼写、TOML、依赖及许可证、覆盖率和 Release 构建。CI 在 Apple Silicon macOS 上运行。提交使用仓库的 `.githooks/pre-commit`。需要时设置 `git config core.hooksPath .githooks`。
 
+CI 常规测试串行运行库、二进制、示例和基准测试目标。集成测试由 Cargo 枚举，每个测试进程最多使用 4 个测试线程。单测保持串行，以避免派生子进程继承其他测试持有的文件锁。
+
 公开源码检查读取 Git 跟踪的文件，检查常见凭据模式、本机账号路径、个人邮件地址和敏感文件类型。结果只显示文件、行号及类别。版本标签在 CI 检查通过后打包 Apple Silicon 产物，内含 MIT 许可证和 SHA-256 校验值。
 
 TLA+ 验证器可用 `TLA2TOOLS_JAR` 指定本地 JAR，默认读当前目录的 `tla2tools.jar`。带 `--jar` 的验证器也接受显式路径。
@@ -24,8 +26,9 @@ TLA+ 验证器可用 `TLA2TOOLS_JAR` 指定本地 JAR，默认读当前目录的
 | 工具 | 用途 |
 | --- | --- |
 | `tools/check.sh`、`tools/check_coverage.py` | 完整工程门禁与覆盖率校验 |
-| `tools/verify_models.py` 和对应专题验证器 | TLA+ 基线、可达状态及错误逻辑检查，需要本地 Java 和 TLC |
-| `tools/verify_migration_release.py` | 用提供的 Release 二进制执行合成转换验收 |
+| `tools/verify_models.py` | 已登记的 TLA+ 基线与可达状态检查 |
+| `tools/verify_uv_model.py`、`tools/verify_native_skills_model.py` 等专题验证器 | 对应功能的模型与错误逻辑验证 |
+| `tools/verify_native_plugin_model.py` | 使用 Python 检查 Codex 插件的有限状态模型 |
 | `tools/verify_chezmoi_release.py`、`tools/verify_chezmoi_native_owner.py` | 在隔离范围验证给定的 macops 与 chezmoi 二进制 |
 | `tools/verify_*_mutants.py`、`tools/verify_protections.py` | 检查关键断言能识别指定错误实现 |
 

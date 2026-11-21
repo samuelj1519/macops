@@ -47,7 +47,7 @@ binDir 依次取 `UV_TOOL_BIN_DIR`、`XDG_BIN_HOME`、`XDG_DATA_HOME` 的父目�
 
 旧未绑定 uv 操作的普通 `recover` 只读返回 `legacy_uv_query_unbound`，不执行旧查询，也不把旧操作收口为成功。人工 `resolve-failed` 保留原有确认合同。
 
-uv 原生生命周期、共享入口写入、下载凭据隔离和最后工具清理仍为 blocked-review，不属于本片已交付能力。
+uv 集成目前支持本地观察和采纳。原生生命周期、共享入口写入、下载凭据隔离及最后一个工具的清理均未开放。
 
 ## 合成验收
 

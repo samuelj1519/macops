@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify all TLA+ models and non-vacuity reachability witnesses via TLC."""
+"""Verify the registered TLA+ baselines and their reachability witnesses."""
 import os
 import argparse
 import json
@@ -12,7 +12,7 @@ TLA_JAR = Path(os.environ.get("TLA2TOOLS_JAR", "tla2tools.jar")).resolve()
 
 MODELS = [
     {
-        "name": "uv_observed_r2",
+        "name": "uv_observed",
         "tla": "docs/models/uv_observed/UvObserved.tla",
         "cfg": "docs/models/uv_observed/UvObserved.cfg",
         "witness_cfg_from_baseline": True,

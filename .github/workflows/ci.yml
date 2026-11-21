@@ -36,8 +36,12 @@ jobs:
         run: cargo fmt --all --check
       - name: Clippy
         run: cargo clippy --workspace --all-targets --all-features --locked --offline -- -D warnings
-      - name: All target tests
-        run: cargo test --workspace --all-targets --all-features --locked --offline
+      - name: Unit, example, and benchmark tests
+        run: cargo test --workspace --lib --bins --examples --benches --all-features --locked --offline
+      - name: Integration tests
+        env:
+          RUST_TEST_THREADS: "4"
+        run: cargo test --workspace --test '*' --all-features --locked --offline
       - name: Documentation tests
         run: cargo test --workspace --doc --all-features --locked --offline
 
