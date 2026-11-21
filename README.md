@@ -8,7 +8,7 @@ Download the Apple Silicon archive and `SHA256SUMS` from the [GitHub releases](h
 
 ```sh
 shasum -a 256 -c SHA256SUMS
-tar -xzf macops-v0.2.0-darwin-arm64.tar.gz
+tar -xzf macops-v0.2.1-darwin-arm64.tar.gz
 ```
 
 For a new installation, place the binary in your user directory and create both command names.
@@ -153,7 +153,7 @@ XDG settings and explicit CLI options can override these paths. Use `mo dirs --r
 
 ## Development
 
-macops uses the locked Rust workspace and runs CI on macOS and Linux. Version tags trigger a macOS ARM64 release after the checks pass. See the [architecture](docs/architecture.md), [verification guide](docs/verification.md), and [state models](docs/models/README.md).
+macops uses the locked Rust workspace and runs CI on Apple Silicon macOS. Version tags trigger an Apple Silicon release after the checks pass. See the [architecture](docs/architecture.md), [verification guide](docs/verification.md), and [state models](docs/models/README.md).
 
 ```sh
 git config core.hooksPath .githooks

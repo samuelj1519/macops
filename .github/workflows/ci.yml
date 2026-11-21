@@ -2,6 +2,8 @@ name: Rust checks
 
 on:
   push:
+    branches: ['**']
+    tags: ['v*']
   pull_request:
 
 permissions:
@@ -16,13 +18,11 @@ concurrency:
 
 jobs:
   checks:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
+    runs-on: macos-latest
     timeout-minutes: 20
     steps:
+      - name: Verify Apple Silicon runner
+        run: test "$(uname -m)" = arm64
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -31,9 +31,6 @@ jobs:
           toolchain: 1.100.0
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - name: Prepare Linux fixture directory
-        if: runner.os == 'Linux'
-        run: test -d /private/tmp || sudo -n install -d -m 1777 /private/tmp
       - run: cargo fetch --locked
       - name: Formatting
         run: cargo fmt --all --check
@@ -48,6 +45,8 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 20
     steps:
+      - name: Verify Apple Silicon runner
+        run: test "$(uname -m)" = arm64
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false

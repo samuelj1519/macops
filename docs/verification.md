@@ -6,10 +6,9 @@
 bash tools/check.sh
 ```
 
-完整检查包含格式、严格 Clippy、所有 target 测试、独立 doc tests、覆盖率校验器的负向测试、拼写、TOML、依赖及许可证、覆盖率和 Release 构建。CI 同时配置 macOS 和 Linux 的可移植检查。提交使用仓库的 `.githooks/pre-commit`。需要时设置 `git config core.hooksPath .githooks`。
+完整检查包含格式、严格 Clippy、所有 target 测试、独立 doc tests、覆盖率校验器的负向测试、拼写、TOML、依赖及许可证、覆盖率和 Release 构建。CI 在 Apple Silicon macOS 上运行。提交使用仓库的 `.githooks/pre-commit`。需要时设置 `git config core.hooksPath .githooks`。
 
-
-公开源码检查读取 Git 跟踪的文件，检查常见凭据模式、本机账号路径、个人邮件地址和敏感文件类型。结果只显示文件、行号及类别。版本标签在 macOS 与 Linux 检查通过后打包 Apple Silicon 产物，内含 MIT 许可证和 SHA-256 校验值。
+公开源码检查读取 Git 跟踪的文件，检查常见凭据模式、本机账号路径、个人邮件地址和敏感文件类型。结果只显示文件、行号及类别。版本标签在 CI 检查通过后打包 Apple Silicon 产物，内含 MIT 许可证和 SHA-256 校验值。
 
 TLA+ 验证器可用 `TLA2TOOLS_JAR` 指定本地 JAR，默认读当前目录的 `tla2tools.jar`。带 `--jar` 的验证器也接受显式路径。
 
