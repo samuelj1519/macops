@@ -1,6 +1,18 @@
 use crate::{cli, domain, error};
 use serde_json::Value;
 
+pub(crate) fn adopt_target(command: &cli::Command) -> Option<cli::AdoptTarget<'_>> {
+    let cli::Command::Adopt { target, id, .. } = command else {
+        return None;
+    };
+    id.as_deref()
+        .or(target.as_deref())
+        .map(|key| cli::AdoptTarget {
+            key,
+            exact: id.is_some(),
+        })
+}
+
 pub fn selected<'a>(
     catalog: &'a domain::Catalog,
     id: Option<&str>,
@@ -102,6 +114,7 @@ mod tests;
 
 pub fn config_scope(command: &cli::Command, requested: bool) -> error::Result<()> {
     if requested
+        && !matches!(command, cli::Command::Upgrade { id, .. } if crate::policy::ai::upgrade_target(id).is_some())
         && !matches!(
             command,
             cli::Command::List { .. }

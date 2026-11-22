@@ -8,7 +8,11 @@ use crate::{
 };
 use std::{collections::BTreeSet, path::Path};
 
-pub fn collect(ctx: &Context, project: Option<&Path>) -> Result<(Vec<Resource>, Vec<Coverage>)> {
+pub fn collect(
+    ctx: &Context,
+    project: Option<&Path>,
+    discover_brew: bool,
+) -> Result<(Vec<Resource>, Vec<Coverage>)> {
     let catalog = inventory::load(ctx)?;
     let receipts = crate::target::receipts(ctx)?;
     let adopted = receipts.installations.keys().cloned().collect();
@@ -29,9 +33,11 @@ pub fn collect(ctx: &Context, project: Option<&Path>) -> Result<(Vec<Resource>, 
     let (mut mise, report) = mise(ctx, project)?;
     resources.append(&mut mise);
     reports.push(report);
-    let (mut items, report) = brew(ctx)?;
-    resources.append(&mut items);
-    reports.push(report);
+    if discover_brew {
+        let (mut items, report) = brew(ctx)?;
+        resources.append(&mut items);
+        reports.push(report);
+    }
     let (mut items, report) = npm(ctx)?;
     resources.append(&mut items);
     reports.push(report);
@@ -882,7 +888,10 @@ fn declaration_aliases(ctx: &Context, package: &crate::domain::Package) -> Resul
     let mut aliases = vec![package.id.clone()];
     let original = match &package.provider {
         Provider::Mise { package } => Some(("mise", package)),
-        Provider::BrewFormula { .. } => Some(("declared-recipe", &package.id)),
+        Provider::BrewFormula { query, .. } => {
+            aliases.extend([query.selection.name.clone(), query.key.full_name.clone()]);
+            Some(("declared-recipe", &package.id))
+        }
         _ => None,
     };
     if let Some((manager, name)) = original {

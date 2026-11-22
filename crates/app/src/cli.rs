@@ -100,11 +100,15 @@ pub enum Command {
     Discover { manager: Option<String> },
     #[command(about = "检查本地安装，损坏输入报告 unknown")]
     Doctor { id: Option<String> },
-    #[command(about = "采纳当前安装基线，不重新安装")]
+    #[command(about = "按名称或 ID 纳管，省略目标可交互选择")]
     Adopt {
-        id: String,
+        #[arg(value_name = "NAME_OR_ID", group = "adopt_target")]
+        target: Option<String>,
+        /// 精确匹配完整 ID
+        #[arg(long, value_name = "ID", group = "adopt_target")]
+        id: Option<String>,
         /// 将已采纳的 npm 实例绑定到显式声明的原生配方
-        #[arg(long)]
+        #[arg(long, requires = "adopt_target")]
         bind_recipe: bool,
     },
     #[command(about = "按官方渠道安装一个对象")]
@@ -118,6 +122,8 @@ pub enum Command {
         id: String,
         #[arg(long)]
         version: Option<String>,
+        #[arg(long, help = "仅对 ai:工具名生效，只更新本机版本")]
+        force_live: bool,
     },
     #[command(about = "卸载明确对象，保留配置与用户数据")]
     Uninstall { id: String },
@@ -205,6 +211,12 @@ pub enum Command {
     Worker { journal: PathBuf },
     #[command(name = "__native_worker", hide = true)]
     NativeWorker { journal: PathBuf },
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct AdoptTarget<'a> {
+    pub key: &'a str,
+    pub exact: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -315,6 +327,7 @@ pub enum Policy {
 pub enum Ai {
     #[command(alias = "ls")]
     List,
+    #[command(hide = true)]
     Upgrade {
         #[arg(value_parser=["mimo","codex","claude","cursor","kimi","dsh","codegraph"])]
         tool: String,
@@ -322,6 +335,7 @@ pub enum Ai {
         #[arg(long)]
         force_live: bool,
     },
+    #[command(hide = true)]
     Reconcile {
         #[arg(value_parser=["mimo","codex","claude","cursor","kimi","dsh","codegraph"])]
         tool: Option<String>,
@@ -372,7 +386,7 @@ pub enum Config {
         operation_id: String,
     },
     Reconcile {
-        id: String,
+        id: Option<String>,
     },
 }
 #[derive(Debug, Subcommand)]
@@ -385,6 +399,7 @@ pub enum App {
     Check {
         name: Option<String>,
     },
+    #[command(hide = true)]
     Upgrade {
         #[arg(value_parser=["mimo","codex","claude","cursor","kimi","dsh","codegraph"])]
         tool: String,

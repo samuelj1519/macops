@@ -30,18 +30,78 @@ pub fn run(ctx: &Context, command: &Command, dry_run: bool) -> Result<Option<Val
                     version,
                     force_live,
                 },
-        } => {
-            let upgrade = prepare(ctx, tool, version.as_deref(), *force_live)?;
-            let plan = plan(ctx, &upgrade)?;
-            if dry_run {
-                return Ok(Some(
-                    json!({"backend":"rust", "mode":"dry-run", "plan":plan, "persistentWrites":false, "installerInvoked":false}),
-                ));
-            }
-            crate::ai_tx::execute(ctx, &upgrade, plan).map(Some)
-        }
+        } => execute(ctx, tool, version.as_deref(), *force_live, dry_run, || {
+            Ok(())
+        })
+        .map(Some),
         _ => Ok(None),
     }
+}
+
+pub fn unified_upgrade(
+    ctx: &Context,
+    command: &Command,
+    dry_run: bool,
+    explicit_config: bool,
+) -> Result<Option<Value>> {
+    let Command::Upgrade {
+        id,
+        version,
+        force_live,
+    } = command
+    else {
+        return Ok(None);
+    };
+    if let Some(tool) = policy::upgrade_target(id) {
+        let package = crate::target::resolve(ctx, id)?;
+        if matches!(&package.provider, Provider::Legacy { category, selector }
+            if category == "ai" && selector == tool)
+        {
+            let selected = fingerprint(&package)?;
+            return execute(ctx, tool, version.as_deref(), *force_live, dry_run, || {
+                let current = crate::target::refresh(ctx, &package)?;
+                if fingerprint(&current)? != selected {
+                    return Err(Error::attention(
+                        "plan_stale",
+                        "AI 升级对象的配方在准备期间改变",
+                    ));
+                }
+                Ok(())
+            })
+            .map(Some);
+        }
+        if explicit_config {
+            return Err(Error::new(
+                "config_scope_unsupported",
+                "此对象由其他软件配方管理，不能使用 AI 对账范围",
+            ));
+        }
+    }
+    if *force_live {
+        return Err(Error::new(
+            "force_live_target_unsupported",
+            "--force-live 仅适用于内置 AI 升级对象",
+        ));
+    }
+    Ok(None)
+}
+
+fn execute(
+    ctx: &Context,
+    tool: &str,
+    version: Option<&str>,
+    force_live: bool,
+    dry_run: bool,
+    check: impl FnOnce() -> Result<()>,
+) -> Result<Value> {
+    let upgrade = prepare(ctx, tool, version, force_live)?;
+    let plan = plan(ctx, &upgrade)?;
+    if dry_run {
+        return Ok(
+            json!({"backend":"rust", "mode":"dry-run", "plan":plan, "persistentWrites":false, "installerInvoked":false}),
+        );
+    }
+    crate::ai_tx::execute(ctx, &upgrade, plan, check)
 }
 
 fn list(ctx: &Context) -> Result<Value> {

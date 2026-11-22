@@ -2,13 +2,20 @@ use crate::{context::Context, error::Result, policy::resources::Filter, resource
 use std::path::Path;
 
 pub fn snapshot(ctx: &Context, kind: Option<&str>, project: Option<&Path>) -> Result<Snapshot> {
-    crate::governance::read(ctx, |_| snapshot_with_authority(ctx, kind, project))
+    crate::governance::read(ctx, |_| snapshot_with_authority(ctx, kind, project, true))
+}
+
+pub(crate) fn applications(ctx: &Context, discover_brew: bool) -> Result<Snapshot> {
+    crate::governance::read(ctx, |_| {
+        snapshot_with_authority(ctx, Some("applications"), None, discover_brew)
+    })
 }
 
 fn snapshot_with_authority(
     ctx: &Context,
     kind: Option<&str>,
     project: Option<&Path>,
+    discover_brew: bool,
 ) -> Result<Snapshot> {
     let filter = Filter::parse(kind)?;
     if let Some(project) = project {
@@ -29,7 +36,8 @@ fn snapshot_with_authority(
         incomplete: false,
     };
     if filter.includes(Filter::Applications) {
-        let (mut resources, mut coverage) = crate::resource_software::collect(ctx, project)?;
+        let (mut resources, mut coverage) =
+            crate::resource_software::collect(ctx, project, discover_brew)?;
         snapshot.resources.append(&mut resources);
         snapshot.coverage.append(&mut coverage);
     }

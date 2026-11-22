@@ -46,9 +46,9 @@ fn anchored_skill_and_plugin_observations_ignore_leases_and_reject_unsafe_payloa
         }))?,
     )?;
     let ctx = test_context(&home)?;
-    let pkg = resolve_package(&ctx, "skill:demo", false)?.ok_or("skill resolved")?;
-    assert!(resolve_package(&ctx, "skill:demo", true).is_err());
-    assert!(resolve_package(&ctx, "other:key", false)?.is_none());
+    let pkg = resolve_package(&ctx, "skill:demo", false, false)?.ok_or("skill resolved")?;
+    assert!(resolve_package(&ctx, "skill:demo", true, false).is_err());
+    assert!(resolve_package(&ctx, "other:key", false, false)?.is_none());
     let query = capture(&pkg)?;
     let obs1 = observe_default(&pkg.id, &query)?;
     assert!(!serde_json::to_string(&obs1)?.contains("SYNTHETIC_SECRET"));
@@ -116,7 +116,7 @@ fn anchored_skill_and_plugin_observations_ignore_leases_and_reject_unsafe_payloa
     fs::create_dir_all(&untracked)?;
     fs::write(untracked.join("SKILL.md"), "# local\n")?;
     assert_eq!(
-        resolve_package(&ctx, "skill:local-only", false)
+        resolve_package(&ctx, "skill:local-only", false, false)
             .err()
             .ok_or("untracked")?
             .code,
@@ -160,7 +160,7 @@ fn multi_profile_claude_plugins_require_disambiguation_and_detect_settings_drift
     }
     let ctx = test_context(&home)?;
     assert_eq!(
-        resolve_package(&ctx, "plugin:review@official", false)
+        resolve_package(&ctx, "plugin:review@official", false, false)
             .err()
             .ok_or("ambiguous across profiles")?
             .code,
@@ -175,7 +175,7 @@ fn multi_profile_claude_plugins_require_disambiguation_and_detect_settings_drift
                 if origin.record.starts_with(home.join(".claude-mi")))
         })
         .ok_or("mi plugin")?;
-    let pkg = resolve_package(&ctx, &mi_cap.id, false)?.ok_or("resolved mi plugin")?;
+    let pkg = resolve_package(&ctx, &mi_cap.id, false, false)?.ok_or("resolved mi plugin")?;
     assert_eq!(refresh_package(&ctx, &pkg)?.id, pkg.id);
     let plan = crate::operations::plan(&ctx, &pkg, crate::domain::Action::Adopt, None, false)?;
     crate::operations::execute(&ctx, plan, false, true)?;
@@ -231,7 +231,7 @@ fn deleted_and_rebound_adopted_plugins_stay_visible_with_truthful_diagnostics() 
         }))?,
     )?;
     let ctx = test_context(&home)?;
-    let pkg = resolve_package(&ctx, "plugin:review@official", false)?.ok_or("plugin")?;
+    let pkg = resolve_package(&ctx, "plugin:review@official", false, false)?.ok_or("plugin")?;
     let plan = crate::operations::plan(&ctx, &pkg, crate::domain::Action::Adopt, None, false)?;
     crate::operations::execute(&ctx, plan, false, true)?;
     let profiles = crate::resource_agents::profile_roots(&ctx)?;
@@ -245,7 +245,7 @@ fn deleted_and_rebound_adopted_plugins_stay_visible_with_truthful_diagnostics() 
         .ok_or("retained")?;
     assert_eq!(retained.status, State::Missing);
     assert_eq!(
-        resolve_package(&ctx, &pkg.id, false)?
+        resolve_package(&ctx, &pkg.id, false, false)?
             .ok_or("by receipt")?
             .id,
         pkg.id
@@ -274,7 +274,7 @@ fn empty_payload_files_consume_no_bytes_even_when_the_remaining_byte_budget_is_z
     fs::write(home.join(".agents/skills/demo/SKILL.md"), b"")?;
     fs::write(home.join(".agents/.skill-lock.json"),br#"{"version":3,"skills":{"demo":{"source":"owner/repo","sourceType":"github","skillFolderHash":"tree"}}}"#)?;
     let ctx = test_context(&home)?;
-    let package = resolve_package(&ctx, "skill:demo", false)?.ok_or("package")?;
+    let package = resolve_package(&ctx, "skill:demo", false, false)?.ok_or("package")?;
     let query = capture(&package)?;
     let mut bytes = 0;
     let snapshot = snapshot_payload(CapabilityKind::SkillsCli, &query.payload, &mut bytes)?

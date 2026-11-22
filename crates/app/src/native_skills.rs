@@ -1794,8 +1794,14 @@ pub fn run(ctx: &Context, command: &Command, dry: bool, yes: bool) -> Result<Opt
         Command::Skills {
             command: Some(Skills::Outdated { name, only }),
         } => outdated(ctx, name.as_deref(), only)?,
-        Command::Adopt { id, .. } | Command::Upgrade { id, .. } | Command::Uninstall { id } => {
-            let native = crate::capability_local::resolve_package(ctx, id, false)?;
+        Command::Adopt {
+            target: Some(id), ..
+        }
+        | Command::Adopt { id: Some(id), .. }
+        | Command::Upgrade { id, .. }
+        | Command::Uninstall { id } => {
+            let exact = matches!(command, Command::Adopt { id: Some(_), .. });
+            let native = crate::capability_local::resolve_package(ctx, id, false, exact)?;
             if !native.as_ref().is_some_and(|p| {
                 matches!(
                     p.provider,
@@ -1857,7 +1863,7 @@ pub fn catalog_summary(ctx: &Context) -> Result<Value> {
     )
 }
 fn native_info(ctx: &Context, key: &str) -> Result<Option<Value>> {
-    let Some(package) = crate::capability_local::resolve_package(ctx, key, false)? else {
+    let Some(package) = crate::capability_local::resolve_package(ctx, key, false, false)? else {
         return Ok(None);
     };
     if !matches!(

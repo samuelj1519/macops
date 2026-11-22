@@ -3,6 +3,14 @@ use super::*;
 use crate::{cli::Cli, test_support::TestResult};
 use clap::Parser;
 use std::{fs, os::unix::fs::PermissionsExt};
+fn adopt(ctx: &Context, key: &str, dry_run: bool, yes: bool) -> Result<Option<Value>> {
+    super::adopt(
+        ctx,
+        crate::cli::AdoptTarget { key, exact: false },
+        dry_run,
+        yes,
+    )
+}
 fn context(home: &std::path::Path) -> Result<Context> {
     let cli = Cli::try_parse_from([
         "macops",
@@ -33,6 +41,7 @@ fn declared_adoption_is_atomic_metadata_only_and_dry_run_is_read_only() -> TestR
         &ctx,
         &crate::governance::capture(&ctx)?,
         "asset:alpha",
+        false,
     )?
     .ok_or("assessment")?
     .baseline
@@ -79,8 +88,9 @@ fn native_fixture() -> std::result::Result<(tempfile::TempDir, Context), Box<dyn
 }
 fn prepared(ctx: &Context) -> Result<(Store, Batch, Journal)> {
     let authority = crate::governance::capture(ctx)?;
-    let assessment = crate::source_inventory::assess_adoption(ctx, &authority, "skill:demo")?
-        .ok_or_else(invalid)?;
+    let assessment =
+        crate::source_inventory::assess_adoption(ctx, &authority, "skill:demo", false)?
+            .ok_or_else(invalid)?;
     let store = Store::lock(ctx)?;
     let authority = crate::governance::capture(ctx)?;
     let (mut batch, mut journal) = initialize(ctx, &authority, &assessment, &store)?;
@@ -230,7 +240,7 @@ fn initial_journal_before_marker_gap_can_recover_exact_before_without_retrying_a
 -> TestResult {
     let (_temp, ctx) = native_fixture()?;
     let initial = crate::governance::capture(&ctx)?;
-    let assessment = crate::source_inventory::assess_adoption(&ctx, &initial, "skill:demo")?
+    let assessment = crate::source_inventory::assess_adoption(&ctx, &initial, "skill:demo", false)?
         .ok_or("assessment")?;
     let store = Store::lock(&ctx)?;
     let authority = crate::governance::capture(&ctx)?;
@@ -270,8 +280,26 @@ fn ambiguous_declared_and_native_alias_refuses_before_state_creation_but_explici
         "ambiguous"
     );
     assert!(!ctx.state.exists());
-    let package = crate::capability_local::resolve_package(&ctx, "skill:demo", false)?
+    let package = crate::capability_local::resolve_package(&ctx, "skill:demo", false, false)?
         .ok_or("native package")?;
+    let exact_alias = crate::cli::AdoptTarget {
+        key: "skill:demo",
+        exact: true,
+    };
+    assert!(super::adopt(&ctx, exact_alias, false, true)?.is_none());
+    assert!(!ctx.state.exists());
+    let exact_id = crate::cli::AdoptTarget {
+        key: &package.id,
+        exact: true,
+    };
+    assert!(super::adopt(&ctx, exact_id, true, true)?.is_some());
+    assert!(crate::capability_local::resolve_package(&ctx, "skill:demo", false, true)?.is_none());
+    assert_eq!(
+        crate::capability_local::resolve_package(&ctx, &package.id, false, true)?
+            .ok_or("exact ID")?
+            .id,
+        package.id
+    );
     assert_eq!(
         adopt(&ctx, &package.id, false, true)?.ok_or("adopt")?["status"],
         "succeeded"
@@ -335,7 +363,7 @@ fn native_expected_rejects_unknown_fields_arrays_null_and_wrong_observation_vari
 {
     let (_temp, ctx) = native_fixture()?;
     let authority = crate::governance::capture(&ctx)?;
-    let spec = crate::source_inventory::assess_adoption(&ctx, &authority, "skill:demo")?
+    let spec = crate::source_inventory::assess_adoption(&ctx, &authority, "skill:demo", false)?
         .ok_or("assessment")?
         .native
         .ok_or("native")?;
@@ -682,6 +710,7 @@ fn source_scope_overlap_is_rejected_before_lock_preparation_can_write_inside_the
             &ctx,
             &crate::governance::capture(&ctx)?,
             "skill:demo",
+            false,
         )?
         .ok_or("assessment")?
         .baseline
@@ -752,6 +781,7 @@ fn known_candidate_receipt_matches_native_observation_after_exchange_without_lea
         &ctx,
         &crate::governance::capture(&ctx)?,
         "skill:demo",
+        false,
     )?
     .ok_or("assessment")?;
     let spec = assessment.native.as_ref().ok_or("spec")?;
@@ -880,7 +910,7 @@ fn a_replaced_state_root_cannot_be_learned_between_lock_and_source_journal_initi
 -> TestResult {
     let (_temp, ctx) = native_fixture()?;
     let initial = crate::governance::capture(&ctx)?;
-    let assessment = crate::source_inventory::assess_adoption(&ctx, &initial, "skill:demo")?
+    let assessment = crate::source_inventory::assess_adoption(&ctx, &initial, "skill:demo", false)?
         .ok_or("assessment")?;
     let store = Store::lock(&ctx)?;
     let authority = crate::governance::capture(&ctx)?;

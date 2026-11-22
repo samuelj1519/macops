@@ -176,6 +176,10 @@ pub struct Snapshot {
 }
 
 impl Resource {
+    pub(crate) fn matches_name(&self, key: &str) -> bool {
+        self.name == key || self.aliases.iter().any(|alias| alias == key)
+    }
+
     pub fn category(&self) -> &'static str {
         match self.data {
             Data::Application { .. } => "applications",
@@ -200,14 +204,19 @@ impl Snapshot {
         if let Some(resource) = self.resources.iter().find(|r| r.id == key) {
             return Ok(resource);
         }
+        self.by_name(key)?
+            .ok_or_else(|| Error::attention("not_found", "没有发现对应对象"))
+    }
+
+    pub(crate) fn by_name(&self, key: &str) -> Result<Option<&Resource>> {
         let matches: Vec<_> = self
             .resources
             .iter()
-            .filter(|r| r.name == key || r.aliases.iter().any(|a| a == key))
+            .filter(|r| r.matches_name(key))
             .collect();
         match matches.as_slice() {
-            [resource] => Ok(resource),
-            [] => Err(Error::attention("not_found", "没有发现对应对象")),
+            [resource] => Ok(Some(*resource)),
+            [] => Ok(None),
             _ => Err(Error::attention(
                 "ambiguous",
                 format!(

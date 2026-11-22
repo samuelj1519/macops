@@ -79,6 +79,51 @@ try:
         assert b"fixture-model-key" not in capture[offset:]
         offset = type_key(b"n\r")
         expect("cancelled", offset)
+    elif scenario in ("setup-key-escape", "setup-key-interrupt", "setup-new-isolated"):
+        expect("推荐模型")
+        type_key(b"1\r")
+        expect("API key")
+        if scenario == "setup-new-isolated":
+            offset = type_key(b"fixture-model-key\r")
+            expect("发送最小测试请求", offset)
+            assert b"fixture-model-key" not in capture[offset:]
+            offset = type_key(b"y\r")
+            expect("model_keychain_unavailable", offset)
+        else:
+            end = b"\x1b" if scenario == "setup-key-escape" else b"\x03"
+            offset = type_key(b"fixture-model-key" + end)
+            expect("cancelled", offset)
+            assert b"fixture-model-key" not in capture[offset:]
+    elif scenario == "setup-pause-saved":
+        expect("当前模式")
+        offset = type_key(b"3\r")
+        expect("local", offset)
+    elif scenario == "setup-recover-clean":
+        expect("核对待完成的钥匙串操作")
+        offset = type_key(b"c\r")
+        expect("local", offset)
+    elif scenario == "setup-saved-isolated":
+        expect("测试已保存密钥")
+        type_key(b"t\r")
+        expect("发送最小测试请求")
+        offset = type_key(b"y\r")
+        expect("model_keychain_unavailable", offset)
+    elif scenario == "setup-external-isolated":
+        expect("绑定已有钥匙串条目")
+        type_key(b"b\r")
+        expect("HTTPS Base URL")
+        type_key(b"https://models.example.test/v1\r")
+        expect("模型名")
+        type_key(b"fixture\r")
+        expect("已有钥匙串文件的绝对路径")
+        type_key(target.encode() + b"\r")
+        expect("钥匙串服务名")
+        type_key(b"fixture-service\r")
+        expect("钥匙串账户名")
+        type_key(b"fixture-account\r")
+        expect("发送最小测试请求")
+        offset = type_key(b"y\r")
+        expect("model_keychain_unavailable", offset)
     elif scenario == "recommend-advice-only":
         expect("当前没有可执行的已核验安装计划")
     elif scenario in ("recommend-install", "recommend-cancel", "recommend-mise"):
@@ -90,6 +135,33 @@ try:
         expect("用户级配置" if scenario == "recommend-mise" else "安装范围")
         offset = type_key(b"no\r" if scenario == "recommend-cancel" else b"yes\r")
         expect("cancelled" if scenario == "recommend-cancel" else "succeeded", offset)
+    elif scenario == "adopt-picker-confirmation-cancel":
+        expect("Enter 选择")
+        expect("picker-left")
+        assert b"picker-right" not in capture
+        offset = type_key(b"\r")
+        expect("输入 yes", offset)
+        expect(str(target), offset)
+        offset = type_key(b"no\r")
+        expect("cancelled", offset)
+    elif scenario in ("adopt-picker-cancel", "adopt-picker-select"):
+        expect("Enter 选择")
+        expect("npm ·")
+        expect("picker-left")
+        expect("picker-right")
+        assert b"picker-missing" not in capture
+        offset = type_key(b"/")
+        expect("搜索", offset)
+        type_key(Path(target).name.encode() + b"\r")
+        if scenario == "adopt-picker-cancel":
+            offset = type_key(b"\x1b")
+            expect("cancelled", offset)
+        else:
+            offset = type_key(b"\r")
+            expect("输入 yes", offset)
+            expect(str(target), offset)
+            offset = type_key(b"yes\r")
+            expect("succeeded", offset)
     elif scenario == "inventory-reject-scope":
         expect("Tab 切换")
         type_key(b"/" + target.encode() + b"\r")
@@ -393,7 +465,7 @@ try:
             offset = type_key(b"s")
             expect("synthetic-source-content", offset)
         type_key(b"q")
-    if scenario not in ("setup-cancel", "setup-hide-key") and not scenario.startswith("recommend-"):
+    if not scenario.startswith(("setup-", "recommend-")):
         expect("\x1b[?1049l")
     actual_exit = process.wait(timeout=8)
     assert actual_exit == int(exit_code), (scenario, actual_exit, exit_code)

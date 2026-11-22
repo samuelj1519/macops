@@ -98,8 +98,9 @@ fn adopted_plugin_receipts_project_settings_before_mutation_and_match_the_final_
             &json!({"version":2,"plugins":{"review@official":[{"scope":"user","installPath":payload,"version":"1.0.0"}]}}),
         )?,
     )?;
-    let package = crate::capability_local::resolve_package(&ctx, "plugin:review@official", false)?
-        .ok_or("package")?;
+    let package =
+        crate::capability_local::resolve_package(&ctx, "plugin:review@official", false, false)?
+            .ok_or("package")?;
     let plan = crate::operations::plan(&ctx, &package, Action::Adopt, None, false)?;
     crate::operations::execute(&ctx, plan, false, true)?;
     let old = fs::read(ctx.state.join("receipts.json"))?;

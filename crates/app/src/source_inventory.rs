@@ -95,12 +95,13 @@ fn native_identity(
     reader: &mut Reader,
     authority: &Governance,
     key: &str,
+    exact_id: bool,
 ) -> Result<Option<(Identity, NativeSpec)>> {
     if key.starts_with("plugin:") {
         return Ok(None);
     }
     if !key.starts_with("skill:") && !key.starts_with("capability:") {
-        if alias_collision(ctx, reader, authority, key)? {
+        if !exact_id && alias_collision(ctx, reader, authority, key)? {
             return Err(Error::attention(
                 "ambiguous",
                 "同名来源有多个登记；请使用明确 capability: 或 asset: ID",
@@ -137,7 +138,10 @@ fn native_identity(
         let logical = crate::policy::native_skills::installation_id(&crate::paths::read_path(
             &ctx.home.join(".agents/skills").join(name),
         )?)?;
-        if key == format!("skill:{name}") || exact.as_deref() == Some(key) || key == logical {
+        if (!exact_id && key == format!("skill:{name}"))
+            || exact.as_deref() == Some(key)
+            || key == logical
+        {
             if kind != Some("github") {
                 return Ok(None);
             }
@@ -236,6 +240,7 @@ pub fn assess_adoption(
     ctx: &Context,
     authority: &Governance,
     key: &str,
+    exact_id: bool,
 ) -> Result<Option<Adoption>> {
     authority.ensure_settled()?;
     let mut reader = Reader::new();
@@ -264,7 +269,9 @@ pub fn assess_adoption(
             }
         }
         (identity, None)
-    } else if let Some((identity, spec)) = native_identity(ctx, &mut reader, authority, key)? {
+    } else if let Some((identity, spec)) =
+        native_identity(ctx, &mut reader, authority, key, exact_id)?
+    {
         (identity, Some(spec))
     } else {
         return Ok(None);

@@ -99,8 +99,8 @@ fn legacy_root(
     key: &str,
 ) -> std::result::Result<(UpgradedRoot, Vec<Edit>), Box<dyn std::error::Error>> {
     let mut edits = vec![];
-    let current =
-        crate::source_inventory::assess_adoption(ctx, authority, key)?.ok_or("legacy source")?;
+    let current = crate::source_inventory::assess_adoption(ctx, authority, key, false)?
+        .ok_or("legacy source")?;
     let mut payload = legacy_payload(&current.baseline.source.canonical_name);
     let base_sha256 = payload.shape(0, 0o700).digest()?;
     let base_shape = payload.shape(current.tree.uid, current.tree.mode);

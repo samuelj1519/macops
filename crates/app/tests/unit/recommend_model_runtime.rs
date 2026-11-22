@@ -89,7 +89,9 @@ printf '%s\n200' '{"choices":[{"finish_reason":"stop","message":{"role":"assista
     )?;
     let result = repository_proposals(
         &Clients {
-            security: &security,
+            credentials: &|service, account, deadline| {
+                credentials(&security, service, account, deadline)
+            },
             curl: &http,
         },
         &profile,
@@ -180,7 +182,9 @@ printf '%s\n200' '{"choices":[{"finish_reason":"stop","message":{"role":"assista
 "#,
     )?;
     let clients = Clients {
-        security: &security,
+        credentials: &|service, account, deadline| {
+            credentials(&security, service, account, deadline)
+        },
         curl: &curl,
     };
     let started = Instant::now();
@@ -213,7 +217,9 @@ fn model_runtime_recovers_from_missing_or_excessive_subprocess_data() -> TestRes
     ] {
         let security = script(f.path(), case, body)?;
         let clients = Clients {
-            security: &security,
+            credentials: &|service, account, deadline| {
+                credentials(&security, service, account, deadline)
+            },
             curl: &curl,
         };
         let end = Instant::now() + Duration::from_secs(3);
@@ -225,7 +231,9 @@ fn model_runtime_recovers_from_missing_or_excessive_subprocess_data() -> TestRes
     let security = script(f.path(), "key", "printf 'synthetic-token-do-not-log\\n'")?;
     let curl = script(f.path(), "long-output", "/usr/bin/head -c 200000 /dev/zero")?;
     let clients = Clients {
-        security: &security,
+        credentials: &|service, account, deadline| {
+            credentials(&security, service, account, deadline)
+        },
         curl: &curl,
     };
     let end = Instant::now() + Duration::from_secs(3);
@@ -257,7 +265,9 @@ fn model_runtime_enforces_one_deadline_and_reaps_its_own_processes() -> TestResu
             if waiting == "http" { &wait } else { "exit 9" },
         )?;
         let clients = Clients {
-            security: &security,
+            credentials: &|service, account, deadline| {
+                credentials(&security, service, account, deadline)
+            },
             curl: &curl,
         };
         let started = Instant::now();
@@ -412,5 +422,154 @@ printf '{{"name":"example"}}\n200'"#
         let body = fetch_public_with(&runner, url, Instant::now() + Duration::from_secs(2))?;
         assert_eq!(body["name"], "example");
     }
+    Ok(())
+}
+
+fn credentials(
+    path: &Path,
+    service: &str,
+    account: &str,
+    deadline: Instant,
+) -> Result<Vec<u8>, Failure> {
+    let mut command = Command::new(path);
+    command
+        .args(["find-generic-password", "-s", service, "-a", account, "-w"])
+        .stdin(Stdio::null());
+    run(&mut command, deadline, 513).map_err(|error| {
+        if error == Failure::Transport {
+            Failure::Keychain
+        } else {
+            error
+        }
+    })
+}
+
+#[test]
+fn late_native_keychain_result_cannot_start_an_http_request() -> TestResult {
+    let dir = tempfile::tempdir_in("/private/tmp")?;
+    let marker = dir.path().join("http-started");
+    let curl = script(
+        dir.path(),
+        "must-not-start",
+        &format!("touch '{}'", marker.display()),
+    )?;
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let permit = std::cell::RefCell::new(Some((release_rx, done_tx)));
+    let clients = Clients {
+        credentials: &|_, _, deadline| {
+            let (receive, done) = permit.borrow_mut().take().ok_or(Failure::Keychain)?;
+            keychain::bounded(deadline, move || {
+                receive.recv().map_err(|_| keychain::unavailable())?;
+                done.send(()).map_err(|_| keychain::unavailable())?;
+                Ok(FIXTURE_TOKEN.as_bytes().to_vec())
+            })
+            .map_err(keychain_failure)
+        },
+        curl: &curl,
+    };
+    let response = compare(
+        &clients,
+        brief()?.facts(),
+        "synthetic",
+        Instant::now() + Duration::from_millis(300),
+    );
+    assert_eq!(response.err(), Some(Failure::Deadline));
+    release_tx.send(())?;
+    done_rx.recv_timeout(Duration::from_secs(2))?;
+    assert!(!marker.exists());
+    Ok(())
+}
+
+#[test]
+fn public_model_status_reports_only_redacted_outcomes_without_host_authentication() -> TestResult {
+    use clap::Parser as _;
+    let dir = tempfile::tempdir_in("/private/tmp")?;
+    let cli = crate::cli::Cli::try_parse_from([
+        "macops",
+        "--home",
+        dir.path().to_str().ok_or("home")?,
+        "setup",
+    ])?;
+    let ctx = Context::from_cli(&cli, &mut vec![])?;
+    let profile = serde_json::from_value::<crate::recommend_setup::Profile>(json!({
+        "schemaVersion": 1, "enabled": true, "endpoint": "https://example.test/chat/completions",
+        "model": "fixture", "account": "fixture-account"
+    }))?;
+    assert_eq!(
+        annotate(&ctx, &brief()?, "synthetic")["status"],
+        "keychain-unavailable"
+    );
+    assert_eq!(
+        suggest(
+            &ctx,
+            &profile,
+            "example/fixture",
+            &[("README.md", "fixture")]
+        )["status"],
+        "local-only"
+    );
+    assert_eq!(
+        annotation(Ok(Notes { notes: vec![] }))["status"],
+        "annotated"
+    );
+    assert_eq!(annotation(Err(Failure::Deadline))["status"], "deadline");
+    assert_eq!(suggestion(Ok(vec![]))["status"], "suggested");
+    assert_eq!(
+        suggestion(Err(Failure::Keychain))["status"],
+        "keychain-unavailable"
+    );
+    let error = test_profile(&profile, FIXTURE_TOKEN, Instant::now())
+        .err()
+        .ok_or("expected timeout")?;
+    assert_eq!(error.code, "model_connection_test_failed");
+    assert!(!error.to_string().contains(FIXTURE_TOKEN));
+    Ok(())
+}
+
+#[test]
+fn expired_legacy_authentication_is_not_dispatched_to_the_keychain() -> TestResult {
+    let expired = Instant::now()
+        .checked_sub(Duration::from_secs(1))
+        .ok_or("fixture time")?;
+    assert_eq!(
+        native_legacy_credentials("synthetic-service", "synthetic", expired).err(),
+        Some(Failure::Deadline)
+    );
+    Ok(())
+}
+
+#[test]
+fn exhausted_public_model_budget_exits_before_any_native_or_remote_read() -> TestResult {
+    use clap::Parser as _;
+    let dir = tempfile::tempdir_in("/private/tmp")?;
+    let cli = crate::cli::Cli::try_parse_from([
+        "macops",
+        "--home",
+        dir.path().to_str().ok_or("home")?,
+        "setup",
+    ])?;
+    let mut ctx = Context::from_cli(&cli, &mut vec![])?;
+    // Simulate an already exhausted runtime budget, independent of argument parsing.
+    ctx.isolated = false;
+    ctx.timeout_secs = 0;
+    let profile = serde_json::from_value::<crate::recommend_setup::Profile>(json!({
+        "schemaVersion": 1, "enabled": true, "endpoint": "https://example.test/chat/completions",
+        "model": "fixture", "account": "fixture-account"
+    }))?;
+    assert_eq!(annotate(&ctx, &brief()?, "synthetic")["status"], "deadline");
+    assert_eq!(
+        suggest(&ctx, &profile, "fixture/repo", &[])["status"],
+        "local-only"
+    );
+    assert_eq!(
+        suggest(
+            &ctx,
+            &profile,
+            "fixture/repo",
+            &[("README.md", "public fixture")]
+        )["status"],
+        "deadline"
+    );
     Ok(())
 }

@@ -77,7 +77,8 @@ mo dirs --roots
 
 ## Operations and recovery
 
-- `install`, `upgrade`, `uninstall`, and `adopt` operate on a unique target. Use the inventory ID when names overlap. Each provider checks its own source, scope, and installation state.
+- `install`, `upgrade`, `uninstall`, and `adopt` operate on a unique target. Each provider checks its source, scope, and installation state.
+- Run `mo adopt` in a terminal to search installed software that can be adopted. Run `mo adopt jq` to look up a name directly. When several software entries match, the terminal shows their sources and installation scopes so you can choose. Use `mo adopt --id ID` for an exact match, including in scripts. The selected target goes through the provider's existing confirmation.
 - Write commands execute by default. Use `--dry-run` to preview without starting an installer or writing operation records. The preview reports an unresolved version when local evidence is insufficient.
 - `update` refreshes version indexes. `outdated` reads the existing index. Where the provider requires a specific version, use `--version`.
 - `--yes` skips the confirmation prompt and retains the same validation. For AI CLI upgrades, `--force-live` limits the change to the live installation.
@@ -87,7 +88,7 @@ Use `mo history` to find an operation ID. `mo recover ID` checks the original op
 
 ## Software and installation sources
 
-Homebrew, mise, npm, Bun, Cargo, and explicit command recipes use their native maintenance interfaces within the supported scopes. [uv discovery and adoption](docs/uv-readonly.md) are read-only. Use `mo ai upgrade` for supported AI CLI installations. Service operations such as `mo service start postgresql` require a declared service in a verified user scope.
+Homebrew, mise, npm, Bun, Cargo, and explicit command recipes use their native maintenance interfaces within the supported scopes. [uv discovery and adoption](docs/uv-readonly.md) are read-only. Use `mo upgrade ai:codex --version VERSION` for the built-in AI upgrade adapter. Use `--force-live` with an eligible `ai:TOOL` to update the local version while retaining its source declaration. Existing `ai upgrade` and `app upgrade` scripts can use their current arguments during the transition. Service operations such as `mo service start postgresql` require a declared service in a verified user scope.
 
 A version 1 catalog can be selected with `--catalog /absolute/path/catalog.json`. The default is `~/.config/macops/catalog.json` unless a different configuration root is selected. Treat command recipes as executable configuration. Command providers pass program and argument vectors directly. Query commands return an object with `status: "present"` and `version`, `status: "missing"`, or `status: "unknown"` and `reason`.
 
@@ -109,6 +110,10 @@ Recommendations can use bundled evidence, a selected public GitHub repository, o
 GitHub lookup checks a selected README and compares up to six npm or Homebrew core suggestions with publication metadata. Requested exact npm versions are checked individually. Suggestions without a version use the current release. Repository links in publisher metadata are evidence for the comparison. A matching registered recipe is shown with its ID for a native preview.
 
 For a repository name or GitHub repository URL, macops pins a public commit and links to its README and `INSTALL.md` when available. Run `mo setup` in a terminal to configure a DeepSeek or custom HTTPS OpenAI-compatible endpoint. The wizard confirms a connection test and saves the key in Keychain. Repository recommendations use that profile when enabled and interactive. The model receives public document excerpts and tool names. Its structured proposals are advisory.
+
+Open `mo setup` again to test or re-enable the saved credential, change the model for the same endpoint, or replace the key. Changing the endpoint requires a new confirmed binding. Replacements keep the previous profile available until the new one is saved. macops can retire its own verified superseded Keychain entries. Legacy entries with no ownership marker are retained. If the new binding is unavailable during cleanup, choose `c` to retry, or explicitly retain the previous item with `k` before reconfiguring.
+
+For an existing generic password item, choose `b` and supply the absolute Keychain file path, service, and account. macops stores a reference bound to the selected endpoint. Rebind after changing the external item, and manage that item's lifetime in Keychain Access.
 
 When an interactive short-name lookup has no registered install candidate, macops can search public GitHub repositories by that name. Select a source to review its pinned installation evidence.
 
@@ -139,6 +144,7 @@ Use `mo config enroll` to register a chezmoi owner. The `--chezmoi-source`, `--c
 | `mo config verify TARGET...` | Verify selected targets |
 | `mo config adopt /absolute/path` | Register one regular file with an enrolled static source |
 | `mo config forget ID` | Remove one registered source entry and preserve the destination file |
+| `mo config reconcile [TOOL]` | Report mise version drift across supported AI tools, or reconcile the source for a selected tool |
 
 Source adoption and removal support chezmoi 2.73.3 with a complete inventory, an existing source parent, and the default macops state directory for the system account. Review the dry run before adopting. Adoption creates a plaintext source file.
 

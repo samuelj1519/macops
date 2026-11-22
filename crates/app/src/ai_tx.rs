@@ -77,10 +77,16 @@ fn verify_inputs(ctx: &Context, upgrade: &Upgrade) -> Result<()> {
     Ok(())
 }
 
-pub fn execute(ctx: &Context, upgrade: &Upgrade, plan: Plan) -> Result<Value> {
+pub fn execute(
+    ctx: &Context,
+    upgrade: &Upgrade,
+    plan: Plan,
+    check: impl FnOnce() -> Result<()>,
+) -> Result<Value> {
     let store = Store::lock(ctx)?;
     store.check_pending()?;
     verify_inputs(ctx, upgrade)?;
+    check()?;
     let mut journal = operations::new_journal(ctx, plan)?;
     ai_state::save(&store, &journal, upgrade)?;
     ai_state::step(&store, &journal, Step::Inspect)?;

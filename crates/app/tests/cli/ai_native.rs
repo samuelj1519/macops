@@ -79,7 +79,11 @@ elif a[0]=='use':
  if (h/'change-source').exists():
   source=h/'.local/share/chezmoi/dot_config/mise/private_config.toml'; source.write_text(source.read_text()+'# external\n')
  if (h/'installer-fail').exists(): sys.exit(9)
-elif a[0]=='where': print(h/'payload'/a[1].rsplit('@',1)[-1])
+elif a[0]=='where':
+ marker=h/'replace-upgrade-recipe'
+ if marker.exists():
+  catalog=h.parent/'catalog.json'; catalog.write_bytes(marker.read_bytes()); marker.unlink()
+ print(h/'payload'/a[1].rsplit('@',1)[-1])
 elif a[0]=='which':
  if a[2].endswith('@2.0.0') and (h/'outside-binary').exists(): print(h/'bin/host')
  else: print(h/'payload'/a[2].rsplit('@',1)[-1]/'bin'/a[3])
@@ -344,6 +348,88 @@ fn ai_native_codex_reconciles_under_original_operation_and_recovers_source_commi
     assert_code(&out, 0);
     assert_eq!(recovered["data"]["journal"]["phase"], "succeeded");
     assert_eq!(calls(&f)?.iter().filter(|v| v[0][0] == "use").count(), 1);
+    Ok(())
+}
+
+#[test]
+fn unified_ai_upgrade_freezes_the_legacy_plan_and_uses_the_same_recovery() -> TestResult {
+    let f = setup("codex", "1.0.0")?;
+    let (old_out, old) = f.run(&["ai", "upgrade", "codex", "2.0.0", "--dry-run"])?;
+    let (new_out, new) = f.run(&["upgrade", "ai:codex", "--version", "2.0.0", "--dry-run"])?;
+    assert_code(&old_out, 0);
+    assert_code(&new_out, 0);
+    assert_eq!(new, old);
+    assert!(!f.file("state").exists());
+    assert_eq!(pin(&f, false)?, config("codex", "1.0.0"));
+    let (out, completed) = f.run(&["upgrade", "ai:codex", "--version", "2.0.0"])?;
+    assert_code(&out, 0);
+    let id = completed["data"]["journal"]["id"].as_str().ok_or("id")?;
+    assert_eq!(completed["data"]["journal"]["phase"], "succeeded");
+    assert_eq!(pin(&f, false)?, pin(&f, true)?);
+    assert_eq!(pin(&f, true)?, config("codex", "2.0.0"));
+    interrupt_terminal(&f, &completed)?;
+    let (out, recovered) = f.run(&["recover", id])?;
+    assert_code(&out, 0);
+    assert_eq!(recovered["data"]["journal"]["id"], id);
+    assert_eq!(recovered["data"]["journal"]["phase"], "succeeded");
+    assert_eq!(calls(&f)?.iter().filter(|v| v[0][0] == "use").count(), 1);
+    Ok(())
+}
+
+#[test]
+fn unified_ai_flags_do_not_switch_a_declared_recipe_to_another_adapter() -> TestResult {
+    let f = setup("codex", "1.0.0")?;
+    let mut catalog = f.read_json("catalog.json")?;
+    catalog["packages"][0]["id"] = json!("ai:codex");
+    write_json(&f.catalog, &catalog)?;
+    let (out, refusal) = f.run(&["upgrade", "ai:codex", "--version", "2.0.0", "--force-live"])?;
+    assert_code(&out, 1);
+    assert_eq!(refusal["error"]["code"], "force_live_target_unsupported");
+    let (out, refusal) = f.run(&[
+        "--chezmoi-source",
+        f.home.to_str().ok_or("home")?,
+        "upgrade",
+        "ai:codex",
+        "--version",
+        "2.0.0",
+    ])?;
+    assert_code(&out, 1);
+    assert_eq!(refusal["error"]["code"], "config_scope_unsupported");
+    assert!(!f.file("state").exists());
+    assert!(!f.file("calls").exists());
+
+    assert_code(&f.run(&["install", "ai:codex", "--version", "1.0.0"])?.0, 0);
+    assert_code(&f.run(&["upgrade", "ai:codex", "--version", "2.0.0"])?.0, 0);
+    assert_eq!(fs::read(f.file("version"))?, b"2.0.0");
+    assert_eq!(pin(&f, false)?, config("codex", "1.0.0"));
+    Ok(())
+}
+
+#[test]
+fn unified_ai_upgrade_refuses_recipe_replacement_during_native_plan_probe() -> TestResult {
+    let f = setup("codex", "1.0.0")?;
+    let mut catalog = f.read_json("catalog.json")?;
+    catalog["packages"][0]["id"] = json!("ai:codex");
+    write_json(&f.home.join("replace-upgrade-recipe"), &catalog)?;
+    let (out, refused) = f.run(&["upgrade", "ai:codex", "--version", "2.0.0"])?;
+    assert_code(&out, 3);
+    assert_eq!(refused["error"]["code"], "plan_stale");
+    assert_eq!(f.read_json("catalog.json")?, catalog);
+    assert_eq!(pin(&f, false)?, config("codex", "1.0.0"));
+    assert_eq!(pin(&f, true)?, config("codex", "1.0.0"));
+    assert!(!calls(&f)?.iter().any(|call| call[0][0] == "use"));
+    assert!(!f.file("state/active.json").exists());
+    Ok(())
+}
+
+#[test]
+fn config_reconcile_lists_drift_without_the_legacy_ai_entry() -> TestResult {
+    let f = setup("codex", "2.0.0")?;
+    let (legacy, old) = f.run(&["ai", "reconcile"])?;
+    let (current, new) = f.run(&["config", "reconcile"])?;
+    assert_eq!(legacy.status.code(), current.status.code());
+    assert_eq!(new, old);
+    assert!(!f.file("state").exists());
     Ok(())
 }
 

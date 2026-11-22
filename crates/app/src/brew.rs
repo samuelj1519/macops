@@ -213,8 +213,10 @@ fn targeted(command: &crate::cli::Command) -> Option<(&str, bool)> {
         Command::Update { id: Some(id) }
         | Command::Upgrade { id, .. }
         | Command::Install { id, .. }
-        | Command::Uninstall { id }
-        | Command::Adopt { id, .. } => Some((id, false)),
+        | Command::Uninstall { id } => Some((id, false)),
+        Command::Adopt { .. } => {
+            crate::policy::cli::adopt_target(command).map(|target| (target.key, false))
+        }
         _ => None,
     }
 }
@@ -541,24 +543,34 @@ pub fn public_command(ctx: &Context, cli: &crate::cli::Cli) -> Result<Option<ser
     route_command(ctx, &cli.command, cli.dry_run, cli.yes, None)
 }
 
-pub(crate) fn execute_confirmed(
+pub(crate) fn execute_selected(
     ctx: &Context,
     selected: &crate::domain::Package,
     action: crate::domain::Action,
+    dry_run: bool,
+    yes: bool,
 ) -> Result<serde_json::Value> {
     use crate::{cli::Command, domain::Action};
+    if let Some(value) = unbound_formula(dry_run, selected)? {
+        return Ok(value);
+    }
     let id = selected.id.clone();
     let command = match action {
         Action::Install => Command::Install { id, version: None },
-        Action::Upgrade => Command::Upgrade { id, version: None },
+        Action::Upgrade => Command::Upgrade {
+            id,
+            version: None,
+            force_live: false,
+        },
         Action::Uninstall => Command::Uninstall { id },
         Action::Adopt => Command::Adopt {
-            id,
+            target: Some(id),
+            id: None,
             bind_recipe: false,
         },
         _ => return Err(native_invalid()),
     };
-    route_command(ctx, &command, false, false, Some(selected))?.ok_or_else(native_invalid)
+    route_command(ctx, &command, dry_run, yes, Some(selected))?.ok_or_else(native_invalid)
 }
 
 fn selected_recipe(

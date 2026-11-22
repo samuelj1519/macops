@@ -56,6 +56,7 @@ mod process;
 mod profile_inventory;
 mod providers;
 mod recommend;
+mod recommend_keychain;
 mod recommend_model;
 mod recommend_setup;
 mod recommend_upstream;
@@ -181,6 +182,9 @@ fn run_scoped_entry(
     ctx: &context::Context,
     chezmoi_requested: bool,
 ) -> error::Result<Option<Value>> {
+    if let Some(value) = ai::unified_upgrade(ctx, &cli.command, cli.dry_run, chezmoi_requested)? {
+        return Ok(Some(value));
+    }
     if matches!(cli.command, cli::Command::Setup) {
         return recommend_setup::run(ctx, cli.json, cli.dry_run).map(Some);
     }
@@ -246,10 +250,13 @@ fn run_scoped_entry(
     if let cli::Command::Manifest { command } = &cli.command {
         return manifest::run(ctx, command, cli.dry_run, cli.yes).map(Some);
     }
-    if let cli::Command::Adopt {
-        id,
-        bind_recipe: true,
-    } = &cli.command
+    if matches!(
+        cli.command,
+        cli::Command::Adopt {
+            bind_recipe: true,
+            ..
+        }
+    ) && let Some(target) = policy::cli::adopt_target(&cli.command)
     {
         if chezmoi_requested {
             return Err(error::Error::new(
@@ -257,7 +264,10 @@ fn run_scoped_entry(
                 "chezmoi 目录参数不能用于 npm 配方",
             ));
         }
-        return npm_adoption::run(ctx, id, cli.dry_run, cli.yes).map(Some);
+        return npm_adoption::run(ctx, target.key, cli.dry_run, cli.yes).map(Some);
+    }
+    if matches!(cli.command, cli::Command::Adopt { .. }) {
+        return Ok(None);
     }
     brew::public_command(ctx, cli)
 }
@@ -338,10 +348,10 @@ fn native_callbacks(journal: &domain::Journal) -> error::Result<(NativeGuard, Na
 }
 
 fn run_source_adoption(cli: &cli::Cli, ctx: &context::Context) -> error::Result<Option<Value>> {
-    let cli::Command::Adopt { id, .. } = &cli.command else {
+    let Some(target) = policy::cli::adopt_target(&cli.command) else {
         return Ok(None);
     };
-    let Some(preview) = source_tx::adopt(ctx, id, true, cli.yes)? else {
+    let Some(preview) = source_tx::adopt(ctx, target, true, cli.yes)? else {
         return Ok(None);
     };
     if cli.chezmoi_source.is_some()
@@ -356,7 +366,7 @@ fn run_source_adoption(cli: &cli::Cli, ctx: &context::Context) -> error::Result<
     if cli.dry_run {
         return Ok(Some(preview));
     }
-    source_tx::adopt(ctx, id, false, cli.yes)?
+    source_tx::adopt(ctx, target, false, cli.yes)?
         .map(Some)
         .ok_or_else(|| error::Error::new("source_selection_changed", "来源选择在采纳前改变"))
 }
@@ -378,7 +388,7 @@ fn run_config_or_reconcile(cli: &cli::Cli, ctx: &context::Context) -> error::Res
         } => config_tx::restore(ctx, operation_id, cli.dry_run, cli.yes).map(Some),
         cli::Command::Config {
             command: Some(cli::Config::Reconcile { id }),
-        } => config_tx::reconcile(ctx, Some(id.as_str()), cli.dry_run, cli.yes).map(Some),
+        } => config_tx::reconcile(ctx, id.as_deref(), cli.dry_run, cli.yes).map(Some),
         cli::Command::Ai {
             command: cli::Ai::Reconcile { tool },
         } => config_tx::reconcile(ctx, tool.as_deref(), cli.dry_run, cli.yes).map(Some),
@@ -499,7 +509,7 @@ pub fn main_entry() -> ExitCode {
     if raw.len() == 1
         || matches!(&raw[1..], [arg] if arg == "--help" || arg == "-h" || arg == "help")
     {
-        let help = "本机软件、能力与配置\n\n  mo                      浏览本机清单\n  mo recommend <目标>     查找官方渠道\n  mo plugins              查看插件市场\n  mo setup                设置推荐模型\n  mo help advanced        脚本、维护与恢复\n";
+        let help = "本机软件、能力与配置\n\n  mo                      浏览本机清单\n  mo adopt [名称]         纳管现有软件\n  mo recommend <目标>     查找官方渠道\n  mo plugins              查看插件市场\n  mo setup                设置推荐模型\n  mo help advanced        脚本、维护与恢复\n";
         return if std::io::stdout().lock().write_all(help.as_bytes()).is_ok() {
             ExitCode::SUCCESS
         } else {
@@ -575,6 +585,73 @@ pub fn main_entry() -> ExitCode {
     }
 }
 
+fn choose_adoption(
+    ctx: &context::Context,
+    cli: &cli::Cli,
+    chezmoi_requested: bool,
+) -> error::Result<Option<domain::Package>> {
+    let interactive = !chezmoi_requested
+        && !cli.json
+        && !cli.dry_run
+        && !cli.yes
+        && browser::interactive_terminal();
+    let name = if let Some(target) = policy::cli::adopt_target(&cli.command) {
+        match target::resolve_adoption(ctx, target, cli.dry_run) {
+            Ok(package) => return Ok(Some(package)),
+            Err(mut error) if error.code == "ambiguous" && !target.exact => {
+                if !interactive {
+                    error
+                        .message
+                        .push_str("。请用 mo adopt --id <ID> 指定，或在 mo apps 中选中目标");
+                    return Err(error);
+                }
+                Some(target.key)
+            }
+            Err(error) => return Err(error),
+        }
+    } else if interactive {
+        None
+    } else {
+        return Err(error::Error::attention(
+            "adopt_target_required",
+            "请指定软件名称或使用 mo adopt --id <ID>；在终端运行 mo adopt 可选择软件",
+        ));
+    };
+    let view = browser::adoption_view(ctx, name)?;
+    if name.is_some() && view.items.is_empty() {
+        return Err(error::Error::attention(
+            "ambiguous",
+            "同名候选已变化或不在软件清单中，请确认目标后使用 mo adopt --id <ID>",
+        ));
+    }
+    let Some(id) = terminal::pick_adoption(view)? else {
+        return Ok(None);
+    };
+    target::resolve_adoption_resource(ctx, &id).map(Some)
+}
+
+fn run_adoption(cli: &cli::Cli, ctx: &context::Context) -> error::Result<Value> {
+    let chezmoi_requested = cli.chezmoi_source.is_some()
+        || cli.chezmoi_destination.is_some()
+        || cli.chezmoi_config.is_some();
+    let Some(package) = choose_adoption(ctx, cli, chezmoi_requested)? else {
+        return Ok(json!({"status":"cancelled","persistentWrites":false}));
+    };
+    require_config_target(chezmoi_requested, &[&package])?;
+    if matches!(
+        package.provider,
+        domain::Provider::BrewFormula { .. } | domain::Provider::Brew { cask: false, .. }
+    ) {
+        return brew::execute_selected(ctx, &package, domain::Action::Adopt, cli.dry_run, cli.yes);
+    }
+    operations::execute(
+        ctx,
+        operations::plan(ctx, &package, domain::Action::Adopt, None, cli.dry_run)?,
+        cli.dry_run,
+        cli.yes,
+    )
+}
+
 fn run_operation(
     cli: &cli::Cli,
     ctx: &context::Context,
@@ -593,7 +670,7 @@ fn run_operation(
             cli.dry_run,
             cli.yes,
         ),
-        cli::Command::Upgrade { id, version } => operations::execute(
+        cli::Command::Upgrade { id, version, .. } => operations::execute(
             ctx,
             operations::plan(
                 ctx,
@@ -617,21 +694,7 @@ fn run_operation(
             cli.dry_run,
             cli.yes,
         ),
-        cli::Command::Adopt { id, .. } => {
-            let resolved = target::resolve(ctx, id)?;
-            require_config_target(
-                cli.chezmoi_source.is_some()
-                    || cli.chezmoi_destination.is_some()
-                    || cli.chezmoi_config.is_some(),
-                &[&resolved],
-            )?;
-            operations::execute(
-                ctx,
-                operations::plan(ctx, &resolved, domain::Action::Adopt, None, cli.dry_run)?,
-                cli.dry_run,
-                cli.yes,
-            )
-        }
+        cli::Command::Adopt { .. } => run_adoption(cli, ctx),
         cli::Command::Update { id } => {
             if let Some(key) = id
                 && key.starts_with("application:")

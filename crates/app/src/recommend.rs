@@ -418,10 +418,12 @@ fn install_selected(ctx: &Context, package: &Package) -> Result<Value> {
     use crate::{browser::sanitize, domain::Action, operations};
     use std::io;
     if matches!(package.provider, Provider::BrewFormula { .. }) {
-        return Ok(report_install(crate::brew::execute_confirmed(
+        return Ok(report_install(crate::brew::execute_selected(
             ctx,
             package,
             Action::Install,
+            false,
+            false,
         )?));
     }
     let version =

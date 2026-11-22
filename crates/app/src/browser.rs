@@ -333,15 +333,59 @@ fn plain(view: &View, kind: Kind) -> String {
 }
 
 fn resource_view(ctx: &Context, filter: &str) -> Result<View> {
-    let snapshot = crate::resource_inventory::snapshot(ctx, Some(filter), None)?;
+    Ok(view_from_snapshot(
+        crate::resource_inventory::snapshot(ctx, Some(filter), None)?,
+        false,
+    ))
+}
+
+pub(crate) fn adoption_view(ctx: &Context, name: Option<&str>) -> Result<View> {
+    use crate::resource::{Data, Management, State};
+    let mut snapshot = crate::resource_inventory::applications(ctx, true)?;
+    snapshot.resources.retain(|resource| {
+        let Data::Application {
+            manager,
+            recipe_ref,
+            ..
+        } = &resource.data
+        else {
+            return false;
+        };
+        let native_adapter = match manager.as_str() {
+            "brew" | "mise" => recipe_ref.is_some(),
+            "npm" | "uv" => true,
+            _ => false,
+        };
+        let observed = resource.status == State::Present && native_adapter;
+        if let Some(name) = name {
+            let declared_command = manager == "declared-recipe"
+                && recipe_ref.is_some()
+                && resource.status == State::Declared;
+            return resource.matches_name(name) && (observed || declared_command);
+        }
+        observed && resource.management != Management::Adopted
+    });
+    let mut view = view_from_snapshot(snapshot, true);
+    view.note = match (name, view.items.is_empty(), view.incomplete) {
+        (Some(_), _, _) => "选择可纳管的同名安装项",
+        (None, true, true) => "暂无已核验的纳管候选，盘点覆盖不完整",
+        (None, true, false) => "暂无可纳管的软件",
+        (None, false, true) => "选择要纳管的软件，盘点覆盖不完整",
+        (None, false, false) => "选择要纳管的软件",
+    }
+    .into();
+    Ok(view)
+}
+
+fn view_from_snapshot(snapshot: crate::resource::Snapshot, show_scope: bool) -> View {
     let incomplete = snapshot.incomplete;
     let mut items = snapshot
         .resources
         .into_iter()
-        .filter_map(resource_item)
+        .filter_map(|resource| resource_item(resource, show_scope))
         .collect::<Vec<_>>();
     items.sort_by(|a, b| a.name.cmp(&b.name).then(a.id.cmp(&b.id)));
-    Ok(View {
+    View {
         scope: "global".into(),
         items,
         coverage: if incomplete { "partial" } else { "observed" },
@@ -354,10 +398,10 @@ fn resource_view(ctx: &Context, filter: &str) -> Result<View> {
         }
         .into(),
         incomplete,
-    })
+    }
 }
 
-fn resource_item(resource: crate::resource::Resource) -> Option<Item> {
+fn resource_item(resource: crate::resource::Resource, show_scope: bool) -> Option<Item> {
     use crate::resource::{Data, Management};
     let (summary, path, agents, details) = match resource.data {
         Data::Application {
@@ -388,7 +432,11 @@ fn resource_item(resource: crate::resource::Resource) -> Option<Item> {
                 )
             }));
             details.extend(issues);
-            let summary = format!("{manager} · {} 个版本", releases.len());
+            let summary = if show_scope {
+                format!("{manager} · {scope}")
+            } else {
+                format!("{manager} · {} 个版本", releases.len())
+            };
             let path = releases.into_iter().find_map(|release| release.path);
             (summary, path, vec![], details)
         }

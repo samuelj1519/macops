@@ -7,7 +7,43 @@ use crate::{
 };
 use std::{collections::BTreeMap, path::Path};
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Lookup {
+    Legacy,
+    AdoptName,
+    ExactId,
+}
+
 pub fn resolve(ctx: &Context, key: &str) -> Result<Package> {
+    resolve_with(ctx, key, true, Lookup::Legacy)
+}
+
+pub fn resolve_adoption(
+    ctx: &Context,
+    target: crate::cli::AdoptTarget<'_>,
+    dry_run: bool,
+) -> Result<Package> {
+    let lookup = if target.exact {
+        Lookup::ExactId
+    } else {
+        Lookup::AdoptName
+    };
+    resolve_with(ctx, target.key, !dry_run, lookup)
+}
+
+pub(crate) fn resolve_adoption_resource(ctx: &Context, id: &str) -> Result<Package> {
+    let catalog = inventory::load(ctx)?;
+    let snapshot = crate::resource_inventory::applications(ctx, true)?;
+    let row = snapshot
+        .resources
+        .iter()
+        .find(|resource| resource.id == id)
+        .ok_or_else(|| Error::attention("plan_stale", "所选安装项已不在清单中"))?;
+    from_resource(ctx, &catalog, row)
+}
+
+fn resolve_with(ctx: &Context, key: &str, discover_brew: bool, lookup: Lookup) -> Result<Package> {
+    let exact = lookup == Lookup::ExactId;
     let catalog = inventory::load(ctx)?;
     let has_legacy_skill = catalog.packages.iter().any(|p| {
         p.id == key
@@ -17,32 +53,37 @@ pub fn resolve(ctx: &Context, key: &str) -> Result<Package> {
             )
     });
     if key.starts_with("capability:") || key.starts_with("plugin:") {
-        return crate::capability_local::resolve_package(ctx, key, false)?
+        return crate::capability_local::resolve_package(ctx, key, false, exact)?
             .ok_or_else(|| Error::attention("not_found", "没有发现对应对象"));
     }
     if key.starts_with("skill:")
-        && let Some(pkg) = crate::capability_local::resolve_package(ctx, key, has_legacy_skill)?
+        && let Some(pkg) =
+            crate::capability_local::resolve_package(ctx, key, has_legacy_skill, exact)?
     {
         return Ok(pkg);
     }
-    if let Some(p) = catalog.packages.iter().find(|p| {
+    let declared = catalog.packages.iter().find(|p| {
         p.id == key
             && !matches!(
                 p.provider,
                 Provider::ConfigObserved { .. } | Provider::CapabilityObserved { .. }
             )
-    }) {
-        if crate::policy::uv_local::is_uv(&p.provider) {
-            return crate::uv_ownership::declared(ctx, p);
-        }
-        return Ok(p.clone());
+    });
+    let check_resource_id = exact && key.starts_with("application:");
+    let prefer_name = lookup == Lookup::AdoptName && !key.contains(':');
+    if let Some(package) = declared
+        && !check_resource_id
+        && !prefer_name
+    {
+        return from_declaration(ctx, package);
     }
     if key.starts_with("config:") {
         return crate::chezmoi_native::public_package(ctx, key)?
             .ok_or_else(|| Error::attention("not_found", "没有发现对应对象"));
     }
     let raw_path = Path::new(key);
-    if raw_path.is_absolute()
+    if !exact
+        && raw_path.is_absolute()
         && !raw_path
             .extension()
             .is_some_and(|ext| ext.eq_ignore_ascii_case("app"))
@@ -54,8 +95,46 @@ pub fn resolve(ctx: &Context, key: &str) -> Result<Package> {
             Err(error) => return Err(error),
         }
     }
-    let snapshot = crate::resource_inventory::snapshot(ctx, Some("applications"), None)?;
-    let resource = snapshot.select(key)?;
+    let snapshot = crate::resource_inventory::applications(ctx, discover_brew)?;
+    if prefer_name && let Some(row) = snapshot.by_name(key)? {
+        return from_resource(ctx, &catalog, row);
+    }
+    if exact {
+        if let Some(row) = snapshot.resources.iter().find(|item| item.id == key) {
+            let selected = from_resource(ctx, &catalog, row)?;
+            if let Some(package) = declared
+                && crate::domain::fingerprint(package)? != crate::domain::fingerprint(&selected)?
+            {
+                return Err(Error::attention(
+                    "adopt_id_collision",
+                    "此 ID 同时指向不同清单条目和配方。运行 mo adopt 按安装范围选择，或修正 catalog ID",
+                ));
+            }
+            return Ok(selected);
+        }
+        return declared.map_or_else(
+            || Err(Error::attention("not_found", "没有发现该 ID")),
+            |package| from_declaration(ctx, package),
+        );
+    }
+    if let Some(package) = declared {
+        return from_declaration(ctx, package);
+    }
+    from_resource(ctx, &catalog, snapshot.select(key)?)
+}
+
+fn from_declaration(ctx: &Context, package: &Package) -> Result<Package> {
+    if crate::policy::uv_local::is_uv(&package.provider) {
+        return crate::uv_ownership::declared(ctx, package);
+    }
+    Ok(package.clone())
+}
+
+fn from_resource(
+    ctx: &Context,
+    catalog: &crate::domain::Catalog,
+    resource: &crate::resource::Resource,
+) -> Result<Package> {
     let crate::resource::Data::Application {
         manager,
         native_id,
@@ -81,7 +160,12 @@ pub fn resolve(ctx: &Context, key: &str) -> Result<Package> {
         });
     }
     if let Some(recipe) = recipe_ref {
-        return Ok(catalog.select(recipe)?.clone());
+        return catalog
+            .packages
+            .iter()
+            .find(|package| &package.id == recipe)
+            .cloned()
+            .ok_or_else(|| Error::attention("plan_stale", "所选实例的配方已变化"));
     }
     if manager != "npm" {
         return Err(Error::new(

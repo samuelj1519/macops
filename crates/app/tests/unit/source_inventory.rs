@@ -22,7 +22,8 @@ fn declared_adoption_prepares_full_metadata_without_changing_payload_or_state() 
     fs::create_dir_all(&payload)?;
     fs::write(payload.join("SKILL.md"), b"body")?;
     let authority = crate::governance::capture(&ctx)?;
-    let assessment = assess_adoption(&ctx, &authority, "asset:alpha")?.ok_or("assessment")?;
+    let assessment =
+        assess_adoption(&ctx, &authority, "asset:alpha", false)?.ok_or("assessment")?;
     assert_eq!(assessment.baseline.source.repository, "owner/repo");
     assert!(assessment.native.is_none());
     assert_eq!(fs::read(payload.join("SKILL.md"))?, b"body");
@@ -60,10 +61,15 @@ fn declared_adoption_cannot_infer_no_conflict_from_an_unknown_native_registry() 
             serde_json::to_vec(&document)?,
         )?;
         assert_eq!(
-            assess_adoption(&ctx, &crate::governance::capture(&ctx)?, "asset:alpha")
-                .err()
-                .ok_or("registry")?
-                .code,
+            assess_adoption(
+                &ctx,
+                &crate::governance::capture(&ctx)?,
+                "asset:alpha",
+                false
+            )
+            .err()
+            .ok_or("registry")?
+            .code,
             "unsupported_native_source_registry"
         );
         assert!(!ctx.state.exists());

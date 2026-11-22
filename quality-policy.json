@@ -99,6 +99,7 @@
     "recommend.rs",
     "recommend_model.rs",
     "recommend_setup.rs",
+    "recommend_keychain.rs",
     "recommend_upstream.rs",
     "resource_agents.rs",
     "resource_inventory.rs",

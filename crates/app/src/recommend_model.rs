@@ -4,6 +4,7 @@ use crate::{
         recommend::{Analysis, PublicAnalysis},
         recommend_model::{self as policy, Notes},
     },
+    recommend_keychain::{self as keychain, ReadFailure},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -43,18 +44,24 @@ pub fn annotate(ctx: &Context, analysis: &PublicAnalysis, account: &str) -> Valu
         return json!({"status":"keychain-unavailable"});
     }
     let clients = Clients {
-        security: Path::new("/usr/bin/security"),
+        credentials: &native_legacy_credentials,
         curl: Path::new("/usr/bin/curl"),
     };
     let deadline = Instant::now() + Duration::from_secs(ctx.timeout_secs.min(15));
-    match compare(&clients, analysis.facts(), account, deadline) {
+    annotation(compare(&clients, analysis.facts(), account, deadline))
+}
+
+fn annotation(result: Result<Notes, Failure>) -> Value {
+    match result {
         Ok(result) => json!({"status":"annotated","model":policy::MODEL,"result":result}),
         Err(error) => json!({"status":error.label(),"model":policy::MODEL}),
     }
 }
 
+type Credentials<'a> = dyn Fn(&str, &str, Instant) -> Result<Vec<u8>, Failure> + 'a;
+
 struct Clients<'a> {
-    security: &'a Path,
+    credentials: &'a Credentials<'a>,
     curl: &'a Path,
 }
 
@@ -65,35 +72,29 @@ fn compare(
     deadline: Instant,
 ) -> Result<Notes, Failure> {
     let account = policy::account(account).map_err(|_| Failure::Keychain)?;
-    let bytes = credentials(
-        clients.security,
-        policy::KEYCHAIN_SERVICE,
-        account,
-        deadline,
-    )?;
+    let bytes = (clients.credentials)(policy::KEYCHAIN_SERVICE, account, deadline)?;
     let token = policy::api_token(&bytes).map_err(|_| Failure::Keychain)?;
     let body = policy::request(analysis);
     let output = send(clients.curl, policy::ENDPOINT, token, &body, deadline)?;
     parse_annotation(&output, token, analysis.findings.len())
 }
 
-fn credentials(
-    path: &Path,
+fn keychain_failure(failure: ReadFailure) -> Failure {
+    match failure {
+        ReadFailure::Deadline => Failure::Deadline,
+        ReadFailure::Keychain => Failure::Keychain,
+    }
+}
+
+fn native_legacy_credentials(
     service: &str,
     account: &str,
     deadline: Instant,
 ) -> Result<Vec<u8>, Failure> {
-    let mut command = Command::new(path);
-    command
-        .args(["find-generic-password", "-s", service, "-a", account, "-w"])
-        .stdin(Stdio::null());
-    run(&mut command, deadline, 513).map_err(|error| {
-        if error == Failure::Transport {
-            Failure::Keychain
-        } else {
-            error
-        }
-    })
+    let service = service.to_owned();
+    let account = account.to_owned();
+    keychain::bounded(deadline, move || keychain::load_legacy(&service, &account))
+        .map_err(keychain_failure)
 }
 
 #[derive(Deserialize, Serialize)]
@@ -223,18 +224,25 @@ pub(crate) fn suggest(
         return json!({"status":"local-only","candidates":[]});
     }
     let deadline = Instant::now() + Duration::from_secs(ctx.timeout_secs.min(15));
+    let lookup = |_: &str, _: &str, deadline| {
+        keychain::load_until(profile, &ctx.config, deadline).map_err(keychain_failure)
+    };
     let clients = Clients {
-        security: Path::new("/usr/bin/security"),
+        credentials: &lookup,
         curl: Path::new("/usr/bin/curl"),
     };
-    match repository_proposals(
+    suggestion(repository_proposals(
         &clients,
         profile,
         &ctx.config,
         repository,
         documents,
         deadline,
-    ) {
+    ))
+}
+
+fn suggestion(result: Result<Vec<Proposal>, Failure>) -> Value {
+    match result {
         Ok(candidates) => json!({"status":"suggested","candidates":candidates}),
         Err(error) => json!({"status":error.label(),"candidates":[]}),
     }
@@ -248,12 +256,7 @@ fn repository_proposals(
     documents: &[(&str, &str)],
     deadline: Instant,
 ) -> Result<Vec<Proposal>, Failure> {
-    let bytes = credentials(
-        clients.security,
-        &profile.service(config),
-        profile.account(),
-        deadline,
-    )?;
+    let bytes = (clients.credentials)(&profile.service(config), profile.account(), deadline)?;
     let token = policy::api_token(&bytes).map_err(|_| Failure::Keychain)?;
     let evidence: Vec<_> = documents.iter().enumerate().map(|(index, (path, text))| {
         json!({"document":index,"path":path,"text": &text[..text.floor_char_boundary(12 * 1024)]})
@@ -338,11 +341,10 @@ fn send(
 }
 
 pub(crate) fn test_profile(
-    ctx: &Context,
     profile: &crate::recommend_setup::Profile,
     token: &str,
+    deadline: Instant,
 ) -> crate::error::Result<()> {
-    let deadline = Instant::now() + Duration::from_secs(ctx.timeout_secs.min(15));
     test_connection(Path::new("/usr/bin/curl"), profile, token, deadline).map_err(|failure| {
         crate::error::Error::attention(
             "model_connection_test_failed",

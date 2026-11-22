@@ -692,9 +692,16 @@ fn persist(
     store.save(&journal)?;
     Ok((batch, journal))
 }
-pub fn adopt(ctx: &Context, key: &str, dry_run: bool, yes: bool) -> Result<Option<Value>> {
+pub fn adopt(
+    ctx: &Context,
+    target: crate::cli::AdoptTarget<'_>,
+    dry_run: bool,
+    yes: bool,
+) -> Result<Option<Value>> {
     let initial = crate::governance::capture(ctx)?;
-    let Some(assessment) = crate::source_inventory::assess_adoption(ctx, &initial, key)? else {
+    let Some(assessment) =
+        crate::source_inventory::assess_adoption(ctx, &initial, target.key, target.exact)?
+    else {
         return Ok(None);
     };
     if dry_run {

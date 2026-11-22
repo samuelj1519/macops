@@ -341,7 +341,13 @@ fn lifecycle_run(
         .env("SYNTHETIC_AUTH", "private-fixture-token")
         .args(args)
         .output()?;
-    let data: Value = serde_json::from_slice(&output.stdout)?;
+    let data: Value = serde_json::from_slice(&output.stdout).map_err(|error| {
+        format!(
+            "invalid CLI JSON for {args:?} ({}): {error}\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        )
+    })?;
     if data["data"]["nativeOutcome"]["reason"] == "native_completion_missing" {
         let state = f.root.path().join("state");
         for item in fs::read_dir(&state)? {
@@ -1092,6 +1098,77 @@ fn independent_read_queries_do_not_authorize_a_first_writer() -> TestResult {
         all_blocked,
         "read-only scope confirmation cannot authorize a first writer"
     );
+    Ok(())
+}
+
+#[test]
+fn adopt_brew_by_the_name_shown_in_apps() -> TestResult {
+    let f = Fixture::new()?;
+    let (id, actual) = lifecycle_fixture(&f)?;
+    let mut catalog = f.read_json("catalog.json")?;
+    catalog["packages"][0]["name"] = json!("Formula Display Label");
+    write_json(&f.catalog, &catalog)?;
+    let refreshed = lifecycle_run(&f, &actual, &["update", &id])?;
+    assert_eq!(refreshed["status"], "ok", "{refreshed}");
+    let events = fs::read(f.home.join("events"))?;
+    let preview = lifecycle_run(&f, &actual, &["adopt", "foo", "--dry-run"])?;
+    assert_eq!(preview["data"]["id"], id, "{preview}");
+    assert_eq!(preview["data"]["nativeRuns"], 0, "{preview}");
+    assert_eq!(fs::read(f.home.join("events"))?, events);
+    assert!(!f.file("state/receipts.json").exists());
+    let listed = lifecycle_run(&f, &actual, &["list", "--kind", "apps"])?;
+    assert!(
+        listed["data"]["resources"]
+            .as_array()
+            .ok_or("apps")?
+            .iter()
+            .any(|item| item["name"] == "foo" && item["id"] == id && item["manager"] == "brew")
+    );
+    let adopted = lifecycle_run(&f, &actual, &["adopt", "foo", "--yes"])?;
+    assert_eq!(adopted["data"]["phase"], "succeeded", "{adopted}");
+    let receipts = f.read_json("state/receipts.json")?;
+    assert_eq!(receipts["installations"][&id]["package"]["id"], id);
+    assert!(!f.home.join("mutated").exists());
+    assert!(!writer_scope_confirmed(&f)?);
+    Ok(())
+}
+
+#[test]
+fn adopt_brew_name_collision_refuses_but_explicit_id_still_works() -> TestResult {
+    let f = Fixture::new()?;
+    let (id, actual) = lifecycle_fixture(&f)?;
+    let program = f.script("same-name", "exit 92")?;
+    let mut catalog = f.read_json("catalog.json")?;
+    catalog["packages"]
+        .as_array_mut()
+        .ok_or("catalog")?
+        .push(json!({
+            "id": "other-foo", "name": "foo", "kind": "cli",
+            "official_url": "https://example.test/foo",
+            "provider": {"type":"command","query":{"program":program,"args":[]}},
+            "paths": [], "exact_version_required": false
+        }));
+    write_json(&f.catalog, &catalog)?;
+    for args in [["adopt", "foo", "--yes"], ["adopt", "foo", "--dry-run"]] {
+        let ambiguous = lifecycle_run(&f, &actual, &args)?;
+        assert_eq!(ambiguous["error"]["code"], "ambiguous", "{ambiguous}");
+        assert!(
+            ambiguous["error"]["message"]
+                .as_str()
+                .ok_or("message")?
+                .contains("mo apps")
+        );
+        assert!(!f.file("state/receipts.json").exists());
+        assert!(!f.home.join("events").exists());
+    }
+    let adopted = lifecycle_run(&f, &actual, &["adopt", &id, "--yes"])?;
+    assert_eq!(adopted["data"]["phase"], "succeeded", "{adopted}");
+    assert!(
+        f.read_json("state/receipts.json")?["installations"]
+            .get(&id)
+            .is_some()
+    );
+    assert!(!f.home.join("mutated").exists());
     Ok(())
 }
 

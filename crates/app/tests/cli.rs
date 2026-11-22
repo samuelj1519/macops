@@ -338,6 +338,166 @@ esac"#,
 }
 
 #[test]
+fn adopt_picker_selects_one_installation_and_exact_id_never_uses_names() -> TestResult {
+    let f = Fixture::new()?;
+    let left = f.home.join("picker-left");
+    let right = f.home.join("picker-right");
+    npm_manifest(&left, "@scope/demo", "1.2.3")?;
+    npm_manifest(&right, "@scope/demo", "2.0.0")?;
+    write_authorized_npm_catalog(&f, &left, true, false)?;
+    let mut catalog = f.read_json("catalog.json")?;
+    for (id, prefix) in [
+        ("npm:other-scope", &right),
+        ("npm:missing", &f.home.join("picker-missing")),
+    ] {
+        let mut package = catalog["packages"][0].clone();
+        package["id"] = json!(id);
+        package["provider"]["prefix"] = json!(prefix);
+        catalog["packages"]
+            .as_array_mut()
+            .ok_or("packages")?
+            .push(package);
+    }
+    write_json(&f.catalog, &catalog)?;
+    f.script(
+        "npm",
+        r#"case "$1" in
+prefix) printf '%s' "$MACOPS_TEST_HOME/picker-left" ;;
+*) printf 'unexpected' >> "$MACOPS_TEST_HOME/native-called"; exit 8 ;;
+esac"#,
+    )?;
+    for (args, code, error) in [
+        (vec!["adopt"], 3, "adopt_target_required"),
+        (vec!["adopt", "--yes"], 3, "adopt_target_required"),
+        (vec!["adopt", "--dry-run", "@scope/demo"], 3, "ambiguous"),
+        (
+            vec!["adopt", "--dry-run", "--id", "scoped-demo"],
+            3,
+            "not_found",
+        ),
+        (
+            vec!["adopt", "@scope/demo", "--id", "npm:other-scope"],
+            2,
+            "usage",
+        ),
+        (vec!["adopt", "--bind-recipe"], 2, "usage"),
+    ] {
+        let (out, value) = f.run(&args)?;
+        assert_code(&out, code);
+        assert_eq!(value["error"]["code"], error, "{value}");
+        assert!(!f.file("state/receipts.json").exists());
+    }
+    let (out, value) = f.run(&["adopt", "--dry-run", "--id", "npm:other-scope"])?;
+    assert_code(&out, 0);
+    assert_eq!(value["data"]["plan"]["package"]["id"], "npm:other-scope");
+    assert_eq!(value["data"]["persistentWrites"], false);
+    let (_, listed) = f.run(&["list", "--kind", "apps"])?;
+    let id = listed["data"]["resources"]
+        .as_array()
+        .ok_or("apps")?
+        .iter()
+        .find(|item| item["recipe_ref"] == "npm:other-scope")
+        .and_then(|item| item["id"].as_str())
+        .ok_or("visible id")?;
+    let (out, value) = f.run(&["adopt", "--dry-run", "--id", id])?;
+    assert_code(&out, 0);
+    assert_eq!(value["data"]["plan"]["package"]["id"], "npm:other-scope");
+    chezmoi_native::run_browser_pty(&f, &["adopt"], "adopt-picker-cancel", &right, "110", "0")?;
+    assert!(!f.file("state/receipts.json").exists());
+    chezmoi_native::run_browser_pty(
+        &f,
+        &["adopt", "scoped-demo"],
+        "adopt-picker-select",
+        &right,
+        "110",
+        "0",
+    )?;
+    let receipts = f.read_json("state/receipts.json")?;
+    let installed = receipts["installations"]
+        .as_object()
+        .ok_or("installations")?;
+    assert_eq!(installed.len(), 1);
+    assert!(installed.contains_key("npm:other-scope"));
+    assert!(!f.home.join("native-called").exists());
+    assert!(
+        left.join("lib/node_modules/@scope/demo/package.json")
+            .is_file()
+    );
+    assert!(
+        right
+            .join("lib/node_modules/@scope/demo/package.json")
+            .is_file()
+    );
+    chezmoi_native::run_browser_pty(
+        &f,
+        &["adopt"],
+        "adopt-picker-confirmation-cancel",
+        &left,
+        "100",
+        "3",
+    )?;
+    assert_eq!(f.read_json("state/receipts.json")?, receipts);
+    Ok(())
+}
+
+#[test]
+fn adopt_picker_keeps_the_selected_inventory_identity_when_a_catalog_id_collides() -> TestResult {
+    let f = Fixture::new()?;
+    let left = f.home.join("picker-left");
+    let right = f.home.join("picker-right");
+    npm_manifest(&left, "@scope/demo", "1.2.3")?;
+    npm_manifest(&right, "@scope/demo", "2.0.0")?;
+    write_authorized_npm_catalog(&f, &left, true, false)?;
+    f.script("npm", "printf '%s' \"$MACOPS_TEST_HOME/picker-left\"")?;
+    let (_, listed) = f.run(&["list", "--kind", "apps"])?;
+    let left_id = listed["data"]["resources"]
+        .as_array()
+        .ok_or("apps")?
+        .iter()
+        .find(|item| item["recipe_ref"] == "npm:scoped-demo")
+        .and_then(|item| item["id"].as_str())
+        .ok_or("left inventory ID")?;
+    let mut catalog = f.read_json("catalog.json")?;
+    catalog["packages"][0]["id"] = json!("scoped-demo");
+    let mut other = catalog["packages"][0].clone();
+    other["id"] = json!(left_id);
+    other["provider"]["prefix"] = json!(right);
+    catalog["packages"]
+        .as_array_mut()
+        .ok_or("packages")?
+        .push(other);
+    write_json(&f.catalog, &catalog)?;
+    for (args, error) in [
+        (
+            vec!["adopt", "--dry-run", "--id", left_id],
+            "adopt_id_collision",
+        ),
+        (vec!["adopt", "--dry-run", "scoped-demo"], "ambiguous"),
+    ] {
+        let (out, value) = f.run(&args)?;
+        assert_code(&out, 3);
+        assert_eq!(value["error"]["code"], error, "{value}");
+        assert!(!f.file("state/receipts.json").exists());
+    }
+    chezmoi_native::run_browser_pty(
+        &f,
+        &["adopt", "scoped-demo"],
+        "adopt-picker-select",
+        &left,
+        "110",
+        "0",
+    )?;
+    let receipts = f.read_json("state/receipts.json")?;
+    let installs = receipts["installations"].as_object().ok_or("receipts")?;
+    assert_eq!(installs.len(), 1);
+    assert_eq!(
+        installs["scoped-demo"]["package"]["provider"]["prefix"],
+        json!(left)
+    );
+    Ok(())
+}
+
+#[test]
 fn root_help_prioritizes_daily_tasks_and_advanced_help_keeps_recovery() -> TestResult {
     let command = env!("CARGO_BIN_EXE_macops");
     for args in [vec![], vec!["--help"], vec!["-h"], vec!["help"]] {
@@ -394,6 +554,99 @@ fn setup_reports_local_mode_and_cancels_without_creating_state() -> TestResult {
     chezmoi_native::run_browser_pty(&f, &["setup"], "setup-hide-key", &f.home, "100", "0")?;
     assert!(!f.file("state").exists());
     assert!(!f.home.join(".config/macops/recommend-model.json").exists());
+    Ok(())
+}
+
+#[test]
+fn setup_metadata_and_pty_actions_use_only_the_isolated_credential_scope() -> TestResult {
+    let f = Fixture::new()?;
+    let config = f.home.join(".config/macops");
+    std::fs::create_dir_all(&config)?;
+    let profile_file = config.join("recommend-model.json");
+    let mut profile = json!({
+        "schemaVersion":1,
+        "enabled":true,
+        "endpoint":"https://models.example.test/v1/chat/completions",
+        "model":"fixture",
+        "account":format!("setup-{}", "a".repeat(64))
+    });
+    write_json(&profile_file, &profile)?;
+    let (out, response) = f.run(&["setup"])?;
+    assert_code(&out, 0);
+    assert_eq!(
+        response["data"],
+        json!({"mode":"remote","endpoint":profile["endpoint"],"model":"fixture"})
+    );
+    chezmoi_native::run_browser_pty(&f, &["setup"], "setup-saved-isolated", &f.home, "100", "3")?;
+    let external = f.file("external-fixture.keychain-db");
+    std::fs::write(&external, b"fixture")?;
+    chezmoi_native::run_browser_pty(
+        &f,
+        &["setup"],
+        "setup-external-isolated",
+        &external,
+        "100",
+        "3",
+    )?;
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&std::fs::read(&profile_file)?)?,
+        profile
+    );
+    profile["enabled"] = json!(false);
+    write_json(&profile_file, &profile)?;
+    let (out, paused) = f.run(&["--dry-run", "setup"])?;
+    assert_code(&out, 0);
+    assert_eq!(paused["data"]["mode"], "local");
+    assert_eq!(paused["data"]["model"], "fixture");
+    assert!(!f.file("state").exists());
+    assert!(!config.join("recommend-model-pending.json").exists());
+    Ok(())
+}
+
+#[test]
+fn setup_masked_input_can_cancel_or_reject_isolated_network_before_publishing() -> TestResult {
+    let f = Fixture::new()?;
+    for (scenario, status) in [
+        ("setup-key-escape", "0"),
+        ("setup-key-interrupt", "0"),
+        ("setup-new-isolated", "3"),
+    ] {
+        chezmoi_native::run_browser_pty(&f, &["setup"], scenario, &f.home, "100", status)?;
+        assert!(!f.file("state").exists());
+        assert!(!f.home.join(".config/macops").exists());
+    }
+    Ok(())
+}
+
+#[test]
+fn setup_pauses_saved_profile_and_recovery_keeps_its_identity() -> TestResult {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let f = Fixture::new()?;
+    let config = f.home.join(".config/macops");
+    std::fs::create_dir_all(&config)?;
+    std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o700))?;
+    let profile_file = config.join("recommend-model.json");
+    let mut profile = json!({
+        "schemaVersion":1,
+        "enabled":true,
+        "endpoint":"https://models.example.test/v1/chat/completions",
+        "model":"fixture",
+        "account":format!("setup-{}", "b".repeat(64))
+    });
+    write_json(&profile_file, &profile)?;
+    chezmoi_native::run_browser_pty(&f, &["setup"], "setup-pause-saved", &f.home, "100", "0")?;
+    profile["enabled"] = json!(false);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&std::fs::read(&profile_file)?)?,
+        profile
+    );
+    chezmoi_native::run_browser_pty(&f, &["setup"], "setup-recover-clean", &f.home, "100", "0")?;
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&std::fs::read(&profile_file)?)?,
+        profile
+    );
+    assert!(!config.join("recommend-model-pending.json").exists());
     Ok(())
 }
 

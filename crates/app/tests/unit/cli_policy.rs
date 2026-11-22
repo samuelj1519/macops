@@ -191,7 +191,8 @@ fn candidate_scope_flags_cannot_be_silently_ignored_by_write_routes() -> TestRes
     config_scope(
         &Command::Adopt {
             bind_recipe: false,
-            id: "config:demo".into(),
+            target: Some("config:demo".into()),
+            id: None,
         },
         true,
     )?;
@@ -204,7 +205,9 @@ fn candidate_scope_flags_cannot_be_silently_ignored_by_write_routes() -> TestRes
     assert!(config_scope(&Command::Doctor { id: None }, true).is_err());
     config_scope(
         &Command::Config {
-            command: Some(Config::Reconcile { id: "codex".into() }),
+            command: Some(Config::Reconcile {
+                id: Some("codex".into()),
+            }),
         },
         true,
     )?;
@@ -252,6 +255,14 @@ fn candidate_scope_flags_cannot_be_silently_ignored_by_write_routes() -> TestRes
 
 #[test]
 fn ai_native_upgrade_and_compatibility_alias_honor_explicit_chezmoi_scope() -> TestResult {
+    for (id, accepted) in [("ai:codex", true), ("ai:unknown", false), ("codex", false)] {
+        let command = Command::Upgrade {
+            id: id.into(),
+            version: Some("2.0.0".into()),
+            force_live: false,
+        };
+        assert_eq!(config_scope(&command, true).is_ok(), accepted);
+    }
     config_scope(
         &Command::Ai {
             command: Ai::Upgrade {

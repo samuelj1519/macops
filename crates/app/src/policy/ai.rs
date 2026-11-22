@@ -14,6 +14,10 @@ pub const TOOLS: [&str; 7] = [
     "codegraph",
 ];
 
+pub fn upgrade_target(id: &str) -> Option<&str> {
+    id.strip_prefix("ai:").filter(|name| TOOLS.contains(name))
+}
+
 pub fn binary(tool: &str) -> Result<&str> {
     if !TOOLS.contains(&tool) {
         return Err(Error::new("unsupported_ai_tool", tool));

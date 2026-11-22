@@ -581,6 +581,7 @@ pub fn resolve_package(
     ctx: &Context,
     key: &str,
     has_legacy_skill_decl: bool,
+    exact: bool,
 ) -> Result<Option<Package>> {
     if !key.starts_with("capability:") && !key.starts_with("skill:") && !key.starts_with("plugin:")
     {
@@ -589,7 +590,7 @@ pub fn resolve_package(
     let profiles = crate::resource_agents::profile_roots(ctx)?;
     let (raw_map, coverages) = crate::resource_capabilities::collect_raw(ctx, &profiles, None)?;
     let list: Vec<Resource> = raw_map.into_values().collect();
-    let Some(resource) = select_capability(&list, key)? else {
+    let Some(resource) = select_capability(&list, key, exact)? else {
         let receipts = crate::target::receipts(ctx)?;
         if let Some(receipt) = receipts.installations.get(key)
             && matches!(
@@ -657,9 +658,16 @@ pub fn refresh_package(ctx: &Context, planned: &Package) -> Result<Package> {
     Ok(refreshed)
 }
 
-fn select_capability<'a>(items: &'a [Resource], key: &str) -> Result<Option<&'a Resource>> {
+fn select_capability<'a>(
+    items: &'a [Resource],
+    key: &str,
+    exact: bool,
+) -> Result<Option<&'a Resource>> {
     if let Some(exact) = items.iter().find(|r| r.id == key) {
         return Ok(Some(exact));
+    }
+    if exact {
+        return Ok(None);
     }
     let matches: Vec<_> = items
         .iter()

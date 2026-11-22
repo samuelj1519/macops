@@ -330,7 +330,7 @@ impl Browser {
     fn run_native(&mut self, ctx: &Context, session: &mut Session, action: NativeAction) {
         let result = match action {
             NativeAction::Brew { action, package } => {
-                let result = crate::brew::execute_confirmed(ctx, &package, action);
+                let result = crate::brew::execute_selected(ctx, &package, action, false, false);
                 self.operation_result(ctx, session, action, result);
                 return;
             }
@@ -545,6 +545,34 @@ impl Browser {
         self.offset = offset;
     }
 
+    fn draw_adoption(&self, frame: &mut Frame) {
+        let [header, list, selection, footer] = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(6),
+            Constraint::Length(1),
+        ])
+        .areas(frame.area());
+        let visible = self.visible();
+        let search = if self.typing { " · 搜索 " } else { " " };
+        let title = format!(
+            "纳管 · {} / {} · {}{search}{}",
+            visible.len(),
+            self.view.items.len(),
+            self.view.note,
+            sanitize(&self.search, false)
+        );
+        frame.render_widget(Paragraph::new(title), header);
+        self.list(frame, list, &visible);
+        if let Some(item) = visible.get(self.row) {
+            detail(frame, selection, "所选安装项", &details(item), &mut 0);
+        }
+        frame.render_widget(
+            Paragraph::new("j/k 滚动  / 搜索  Enter 选择  Esc 取消"),
+            footer,
+        );
+    }
+
     fn list(&self, frame: &mut Frame, area: Rect, visible: &[&Item]) {
         let items: Vec<_> = visible
             .iter()
@@ -671,6 +699,39 @@ fn switch_tab(ctx: &Context, session: &mut Session, kind: Kind, forward: bool) -
     let (loaded, view) = Session::load(ctx, next)?;
     *session = loaded;
     Ok(Browser::new(view, next))
+}
+
+pub(crate) fn pick_adoption(view: View) -> Result<Option<String>> {
+    let mut browser = Browser::new(view, Kind::Apps);
+    let (mut terminal, _restore) = screen()?;
+    loop {
+        terminal.draw(|frame| browser.draw_adoption(frame))?;
+        let Event::Key(event) = event::read()? else {
+            continue;
+        };
+        if event.kind == KeyEventKind::Release {
+            continue;
+        }
+        if control(&event, 'c') {
+            return Ok(None);
+        }
+        if browser.typing {
+            browser.type_key(event.code);
+            continue;
+        }
+        match event.code {
+            KeyCode::Esc | KeyCode::Char('q') => return Ok(None),
+            KeyCode::Enter => {
+                if let Some(id) = browser.selected() {
+                    return Ok(Some(id));
+                }
+            }
+            KeyCode::Char('/') => browser.typing = true,
+            KeyCode::Char('j') | KeyCode::Down => browser.move_by(1),
+            KeyCode::Char('k') | KeyCode::Up => browser.move_by(-1),
+            _ => {}
+        }
+    }
 }
 
 pub(crate) fn browse(

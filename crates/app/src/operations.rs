@@ -294,6 +294,12 @@ fn confirmation(ctx: &Context, plan: &Plan) -> String {
             crate::browser::sanitize(&plan.package.name, false),
             crate::recommend::plan_scope(ctx, plan)
         )
+    } else if plan.action == Action::Adopt {
+        format!(
+            "纳管 {}\n{}",
+            crate::browser::sanitize(&plan.package.name, false),
+            crate::recommend::plan_scope(ctx, plan)
+        )
     } else {
         format!("{:?} {}", plan.action, plan.package.id)
     }
