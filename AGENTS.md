@@ -9,3 +9,5 @@ Workspace members inherit the lint policy. Apply the task's authorization to dep
 Use synthetic fixtures and independent source/build directories. Verify the actual compiled and executed artifact. Wait for explicit asynchronous completion and query an unknown operation result before retrying it.
 
 Use a new, independent reviewer session for nontrivial changes. Record decisions, verification, failures, and remaining checks in the task or review record. Store runtime logs and build output in artifact directories excluded from Git. Keep guides focused on current usage and constraints.
+
+Clean up after each task: remove related stale files from the system temporary directory (`/private/tmp` on macOS), stale `*-build` and `*-target` subdirectories, and compilation leftovers; retain `artifacts/` only during review.
