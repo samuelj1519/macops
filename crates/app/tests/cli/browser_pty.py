@@ -162,6 +162,45 @@ try:
             expect(str(target), offset)
             offset = type_key(b"yes\r")
             expect("succeeded", offset)
+    elif scenario == "market-json":
+        expect('"kind": "plugin-marketplaces"')
+        limit = time.monotonic() + 8
+        while time.monotonic() < limit:
+            if select.select([reader], [], [], 0.1)[0]:
+                before = len(capture)
+                receive()
+                if len(capture) == before:
+                    break
+            elif process.poll() is not None:
+                break
+        assert json.loads(capture)["data"]["kind"] == "plugin-marketplaces"
+    elif scenario in ("market-browser", "market-entry", "market-online", "market-partial"):
+        if scenario == "market-online":
+            expect("正在查询 Cursor 账户市场")
+        expect("插件市场")
+        expect("Enter 详情")
+        if scenario == "market-browser":
+            expect("fixture-codex")
+            offset = type_key(b"/")
+            expect("搜索", offset)
+            type_key(b"two\r")
+            member = "two"
+        elif scenario == "market-entry":
+            expect("cursor:default")
+            member = "mo plugins cursor --online"
+        elif scenario == "market-partial":
+            expect("部分市场无法核验")
+            member = "市场状态未知"
+        else:
+            expect("team")
+            member = "https://github.com/vendor/cursor"
+            type_key(b"r")
+        offset = type_key(b"\r")
+        expect(member, offset)
+        if scenario == "market-browser":
+            offset = type_key(b"\x1b")
+            expect("Enter 详情", offset)
+        type_key(b"q")
     elif scenario == "inventory-reject-scope":
         expect("Tab 切换")
         type_key(b"/" + target.encode() + b"\r")
@@ -465,7 +504,7 @@ try:
             offset = type_key(b"s")
             expect("synthetic-source-content", offset)
         type_key(b"q")
-    if not scenario.startswith(("setup-", "recommend-")):
+    if scenario != "market-json" and not scenario.startswith(("setup-", "recommend-")):
         expect("\x1b[?1049l")
     actual_exit = process.wait(timeout=8)
     assert actual_exit == int(exit_code), (scenario, actual_exit, exit_code)

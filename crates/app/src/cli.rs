@@ -4,6 +4,7 @@ use std::path::PathBuf;
 #[derive(Debug, Parser)]
 #[command(
     name = "macops",
+    bin_name = "mo",
     version,
     about = "本机软件、Agent 资产与目录的统一维护入口",
     long_about = "查询来源、安装实例与目录；写命令默认执行，使用 --dry-run 预演。未知来源和恢复状态不会自动跳过。"
@@ -54,9 +55,13 @@ pub enum Command {
     },
     #[command(alias = "ls", about = "列出登记的软件与来源，不运行安装器")]
     List {
-        #[arg(long)]
+        #[arg(
+            long,
+            value_name = "CATEGORY",
+            help = "筛选 applications、agents、capabilities、configs 或 all"
+        )]
         kind: Option<String>,
-        #[arg(long)]
+        #[arg(long, value_name = "PATH", help = "查看指定项目的安装、能力和配置")]
         project: Option<PathBuf>,
     },
     #[command(about = "导出本机管理清单或预演已有清单")]
@@ -88,9 +93,13 @@ pub enum Command {
     },
     #[command(about = "设置推荐模型与连接")]
     Setup,
-    #[command(about = "查看 Codex、Claude Code 和 Cursor 插件市场")]
+    #[command(
+        about = "浏览 Codex、Claude Code 和 Cursor 插件市场",
+        after_help = "示例\n  mo plugins claude:mi\n  mo plugins cursor --online\n  mo plugins --json"
+    )]
     Plugins {
         /// 筛选 codex、claude、cursor 或具体档案，如 claude:mi
+        #[arg(value_name = "HARNESS_OR_PROFILE")]
         profile: Option<String>,
         /// 由 Cursor CLI 查询当前账户可见的市场
         #[arg(long, requires = "profile")]

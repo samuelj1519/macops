@@ -29,7 +29,7 @@ To build from source, use the Rust version pinned in `rust-toolchain.toml` and r
 
 ## Browse resources
 
-Run `mo` or `mo list` in a terminal. The inventory has application, capability, agent, configuration, and recent-operation tabs. The capability tab includes skills and native plugins. Use `mo help advanced` for the full command and option reference.
+Run `mo` or `mo list` in a terminal. The inventory has application, capability, agent, configuration, and recent-operation tabs. The capability tab includes skills and native plugins. Run `mo help` for commands and common options, or `mo help COMMAND` for a command's arguments. `mo help advanced` includes all global options.
 
 `mo apps`, `mo agents`, `mo skills`, and `mo config` remain direct entry points.
 
@@ -60,7 +60,7 @@ The direct browser shortcuts return a text list without a terminal. Non-interact
 
 ### Plugin marketplaces
 
-`mo plugins` lists the native marketplace entry points for Codex, Claude Code, and Cursor. It reads locally registered Codex and Claude Code marketplaces and their observed catalog files. Use `mo plugins claude:mi` to select one Claude profile. Catalog entries describe offers. Installed plugins and their configured state appear separately in the capability tab.
+`mo plugins` opens a searchable list of Codex, Claude Code, and Cursor marketplaces in a terminal. Press `/` to search by marketplace, profile, or available plugin name, and `Enter` to show the catalog and native entry point. Use `mo plugins claude:mi` to select one Claude profile. Without a terminal the command prints text, and `--json` returns structured results. Installed plugins and their configured state appear in the capability tab.
 
 `mo plugins cursor --online` delegates the account marketplace query to the installed Cursor CLI. It uses the native login and may update Cursor's own cache. Use the native `/plugins` or `/plugin` entry shown for your Harness to browse online catalogs and install a new plugin. These actions follow the Harness's own scope and confirmation.
 

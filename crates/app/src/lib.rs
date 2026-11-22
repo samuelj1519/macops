@@ -212,7 +212,15 @@ fn run_scoped_entry(
         .map(Some);
     }
     if let cli::Command::Plugins { profile, online } = &cli.command {
-        return plugin_marketplaces::list(ctx, profile.as_deref(), *online, cli.dry_run).map(Some);
+        let interactive = browser::interactive_marketplaces(cli);
+        if interactive && *online && plugin_marketplaces::cursor_profile(profile.as_deref()) {
+            eprintln!("正在查询 Cursor 账户市场…");
+        }
+        let data = plugin_marketplaces::list(ctx, profile.as_deref(), *online, cli.dry_run)?;
+        if interactive {
+            browser::browse_marketplaces(ctx, &data)?;
+        }
+        return Ok(Some(data));
     }
     if let cli::Command::Recommend {
         product,
@@ -494,6 +502,47 @@ fn emit(value: &Value) -> std::io::Result<()> {
     out.write_all(b"\n")
 }
 
+fn root_help() -> String {
+    use std::fmt::Write as _;
+    let mut text = String::from(concat!(
+        "本机软件、能力与配置\n\n",
+        "用法  mo [全局参数] <命令> [参数]\n\n",
+        "常用入口\n",
+        "  mo                      浏览本机清单\n",
+        "  mo adopt [名称]         纳管现有软件\n",
+        "  mo recommend <目标>     查找官方渠道\n",
+        "  mo plugins [档案]       浏览插件市场\n",
+        "  mo setup                设置推荐模型\n\n",
+        "可用命令\n",
+    ));
+    let command = cli::Cli::command();
+    let mut commands: Vec<_> = command
+        .get_subcommands()
+        .filter(|item| !item.is_hide_set())
+        .collect();
+    commands.sort_by_key(|item| item.get_name());
+    for item in commands {
+        let _ = writeln!(
+            text,
+            "  {:<13} {}",
+            item.get_name(),
+            item.get_about()
+                .map_or_else(String::new, ToString::to_string)
+        );
+    }
+    text.push_str(concat!(
+        "\n常用全局参数\n",
+        "  --json                  输出结构化 JSON\n",
+        "  --dry-run               预演操作\n",
+        "  --yes                   跳过交互确认\n",
+        "  -V, --version           查看版本\n",
+        "  -h, --help              查看帮助\n\n",
+        "mo help <命令> 或 mo <命令> --help 查看该命令的参数。\n",
+        "mo help advanced 查看全部全局参数和恢复入口。\n",
+    ));
+    text
+}
+
 pub fn main_entry() -> ExitCode {
     let mut raw: Vec<_> = std::env::args_os().collect();
     if raw.len() == 1 && browser::interactive_terminal() {
@@ -509,8 +558,11 @@ pub fn main_entry() -> ExitCode {
     if raw.len() == 1
         || matches!(&raw[1..], [arg] if arg == "--help" || arg == "-h" || arg == "help")
     {
-        let help = "本机软件、能力与配置\n\n  mo                      浏览本机清单\n  mo adopt [名称]         纳管现有软件\n  mo recommend <目标>     查找官方渠道\n  mo plugins              查看插件市场\n  mo setup                设置推荐模型\n  mo help advanced        脚本、维护与恢复\n";
-        return if std::io::stdout().lock().write_all(help.as_bytes()).is_ok() {
+        return if std::io::stdout()
+            .lock()
+            .write_all(root_help().as_bytes())
+            .is_ok()
+        {
             ExitCode::SUCCESS
         } else {
             ExitCode::FAILURE
@@ -553,7 +605,7 @@ pub fn main_entry() -> ExitCode {
     match result {
         Ok(data) => {
             let code = if attention(&cli.command, &data) { 3 } else { 0 };
-            if recommend::interactive(&cli) {
+            if recommend::interactive(&cli) || browser::interactive_marketplaces(&cli) {
                 return ExitCode::from(code);
             }
             let data = policy::brew::public_value(&data);

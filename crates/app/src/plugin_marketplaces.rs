@@ -1,9 +1,10 @@
 use crate::{
+    browser::{Item, View},
     context::Context,
     error::{Error, Result},
     native_plugins::valid_name,
     native_plugins_files::{Passive, object_file},
-    resource::Data,
+    resource::{Data, Management},
 };
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -96,13 +97,17 @@ fn profile_roots(
     Ok(roots)
 }
 
+pub(crate) fn cursor_profile(selector: Option<&str>) -> bool {
+    matches!(selector, Some("cursor" | "cursor:default"))
+}
+
 pub(crate) fn list(
     ctx: &Context,
     selector: Option<&str>,
     online: bool,
     dry_run: bool,
 ) -> Result<Value> {
-    if online && !matches!(selector, Some("cursor" | "cursor:default")) {
+    if online && !cursor_profile(selector) {
         return Err(Error::new(
             "marketplace_online_unsupported",
             "--online 只用于 Cursor 账户市场",
@@ -348,6 +353,110 @@ fn cursor_markets(ctx: &Context) -> Result<Vec<Market>> {
         .collect()
 }
 
+fn field<'a>(row: &'a Value, name: &str) -> &'a str {
+    row[name].as_str().unwrap_or_default()
+}
+
+fn profile_summary(profile: &Value) -> String {
+    if let Some(reason) = profile["reason"].as_str() {
+        return format!("市场状态未知  {reason}");
+    }
+    match field(profile, "status") {
+        "account_query_available" => "查询账户市场  mo plugins cursor --online",
+        "dry_run" => "预演，未查询账户市场",
+        "account" => "该账户未返回市场",
+        _ => "未发现已登记的市场",
+    }
+    .into()
+}
+
+pub(crate) fn view(data: &Value) -> View {
+    let mut items = Vec::new();
+    for profile in data["profiles"].as_array().into_iter().flatten() {
+        if let Some(markets) = profile["marketplaces"]
+            .as_array()
+            .filter(|rows| !rows.is_empty())
+        {
+            items.extend(
+                markets
+                    .iter()
+                    .enumerate()
+                    .map(|(index, row)| market_item(profile, Some(row), index)),
+            );
+        } else {
+            items.push(market_item(profile, None, 0));
+        }
+    }
+    let incomplete = data["incomplete"] == true;
+    View {
+        scope: "global".into(),
+        items,
+        coverage: if incomplete { "partial" } else { "observed" },
+        difference_coverage: "not_applicable",
+        observed_at: Some(crate::store::now()),
+        note: if incomplete {
+            "部分市场无法核验"
+        } else {
+            "目录条目 · 安装状态见能力清单"
+        }
+        .into(),
+        incomplete,
+    }
+}
+
+fn market_item(profile: &Value, market: Option<&Value>, index: usize) -> Item {
+    let id = field(profile, "profile");
+    let mut details = vec![
+        format!("档案 {id}"),
+        format!("原生命令 {}", field(profile, "nativeEntry")),
+        format!("官方入口 {}", field(profile, "official")),
+    ];
+    let (name, summary) = if let Some(row) = market {
+        details.push(format!(
+            "范围 {} · 来源 {}",
+            field(row, "scope"),
+            field(row, "source_kind")
+        ));
+        if let Some(repository) = row["repository"].as_str() {
+            details.push(format!("仓库 {repository}"));
+        }
+        let status = if let Some(plugins) = row["plugins"].as_array() {
+            format!("{} 个目录插件", plugins.len())
+        } else if row["issue"].is_string() {
+            "目录状态未知".into()
+        } else {
+            "未提供插件明细".into()
+        };
+        details.push(status.clone());
+        details.extend(
+            row["plugins"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(str::to_owned),
+        );
+        (field(row, "name"), format!("{id}  ·  {status}"))
+    } else {
+        let status = profile_summary(profile);
+        details.push(status.clone());
+        (id, status)
+    };
+    Item {
+        id: format!("{id}:{index}"),
+        name: name.into(),
+        summary,
+        managed: false,
+        management: Management::Untracked,
+        directory: false,
+        path: None,
+        source: None,
+        agents: vec![],
+        loaded: None,
+        details,
+    }
+}
+
 pub(crate) fn human(data: &Value) -> String {
     let mut text = String::from("插件市场\n");
     for profile in data["profiles"].as_array().into_iter().flatten() {
@@ -358,11 +467,8 @@ pub(crate) fn human(data: &Value) -> String {
             profile["nativeEntry"].as_str().unwrap_or_default(),
             profile["official"].as_str().unwrap_or_default(),
         );
-        if profile["status"] == "account_query_available" {
-            text.push_str("  查询账户市场  mo plugins cursor --online\n");
-        }
-        if let Some(reason) = profile["reason"].as_str() {
-            let _ = writeln!(text, "  市场状态未知  {reason}");
+        if profile["marketplaces"].as_array().is_none_or(Vec::is_empty) {
+            let _ = writeln!(text, "  {}", profile_summary(profile));
         }
         for row in profile["marketplaces"].as_array().into_iter().flatten() {
             let _ = writeln!(
@@ -380,6 +486,9 @@ pub(crate) fn human(data: &Value) -> String {
             {
                 let names = plugins.iter().filter_map(Value::as_str).collect::<Vec<_>>();
                 let _ = writeln!(text, "    {}", names.join(", "));
+            }
+            if row["issue"].is_string() {
+                text.push_str("    目录状态未知\n");
             }
         }
     }

@@ -20,6 +20,7 @@ pub(crate) enum Kind {
     Apps,
     Agents,
     History,
+    Marketplaces,
 }
 
 impl Kind {
@@ -31,6 +32,7 @@ impl Kind {
             Self::Apps => "软件",
             Self::Agents => "Agent 档案",
             Self::History => "最近操作",
+            Self::Marketplaces => "插件市场",
         }
     }
 
@@ -77,6 +79,7 @@ pub(crate) enum Session {
     Apps,
     Agents,
     History,
+    Marketplaces,
 }
 
 impl Session {
@@ -92,6 +95,10 @@ impl Session {
             Kind::Apps => Ok((Self::Apps, resource_view(ctx, "applications")?)),
             Kind::Agents => Ok((Self::Agents, resource_view(ctx, "agents")?)),
             Kind::History => Ok((Self::History, history_view(ctx)?)),
+            Kind::Marketplaces => {
+                let data = crate::plugin_marketplaces::list(ctx, None, false, false)?;
+                Ok((Self::Marketplaces, crate::plugin_marketplaces::view(&data)))
+            }
         }
     }
 
@@ -106,6 +113,10 @@ impl Session {
             Self::Apps => resource_view(ctx, "applications"),
             Self::Agents => resource_view(ctx, "agents"),
             Self::History => history_view(ctx),
+            Self::Marketplaces => Err(Error::attention(
+                "marketplace_snapshot",
+                "请重新运行 mo plugins 查看最新市场信息",
+            )),
         }
     }
 
@@ -116,9 +127,7 @@ impl Session {
     ) -> Result<crate::chezmoi_native::ViewerFile> {
         match self {
             Self::Config(browser) => browser.select_file(id, source),
-            Self::Skills | Self::Capabilities | Self::Apps | Self::Agents | Self::History => Err(
-                Error::attention("file_unavailable", "此入口提供技能管理详情"),
-            ),
+            _ => Err(Error::attention("file_unavailable", "此入口不提供文件查看")),
         }
     }
 }
@@ -127,6 +136,25 @@ pub(crate) fn interactive_terminal() -> bool {
     std::io::stdin().is_terminal()
         && std::io::stdout().is_terminal()
         && std::env::var("TERM").is_ok_and(|term| !term.is_empty() && term != "dumb")
+}
+
+pub(crate) fn interactive_marketplaces(cli: &Cli) -> bool {
+    matches!(cli.command, Command::Plugins { .. })
+        && !cli.json
+        && !cli.dry_run
+        && !cli.yes
+        && interactive_terminal()
+}
+
+pub(crate) fn browse_marketplaces(ctx: &Context, data: &serde_json::Value) -> Result<()> {
+    crate::terminal::browse(
+        ctx,
+        Kind::Marketplaces,
+        &mut Session::Marketplaces,
+        crate::plugin_marketplaces::view(data),
+        false,
+    )?;
+    Ok(())
 }
 
 pub(crate) fn entry(cli: &Cli) -> Option<ExitCode> {

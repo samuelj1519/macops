@@ -64,6 +64,18 @@ fn marketplace_listing_observes_local_catalogs_per_harness_profile() -> TestResu
     assert!(!f.home.join("codex-called").exists());
     assert!(!f.home.join("claude-called").exists());
     assert!(!f.file("state").exists());
+    super::chezmoi_native::run_browser_pty(&f, &["plugins"], "market-browser", &f.home, "76", "0")?;
+    super::chezmoi_native::run_browser_pty(
+        &f,
+        &["plugins", "--json"],
+        "market-json",
+        &f.home,
+        "76",
+        "0",
+    )?;
+    assert!(!f.home.join("codex-called").exists());
+    assert!(!f.home.join("claude-called").exists());
+    assert!(!f.file("state").exists());
     Ok(())
 }
 
@@ -125,6 +137,27 @@ fn cursor_marketplace_query_requires_an_explicit_online_request() -> TestResult 
     assert!(market["plugins"].is_null());
     assert!(!data.to_string().contains("SYNTHETIC_SECRET"));
     assert_eq!(fs::read_to_string(f.home.join("query-calls"))?, "called\n");
+    super::chezmoi_native::run_browser_pty(
+        &f,
+        &["plugins", "cursor"],
+        "market-entry",
+        &f.home,
+        "76",
+        "0",
+    )?;
+    assert_eq!(fs::read_to_string(f.home.join("query-calls"))?, "called\n");
+    super::chezmoi_native::run_browser_pty(
+        &f,
+        &["plugins", "cursor", "--online"],
+        "market-online",
+        &f.home,
+        "76",
+        "0",
+    )?;
+    assert_eq!(
+        fs::read_to_string(f.home.join("query-calls"))?,
+        "called\ncalled\n"
+    );
     assert!(!f.file("state").exists());
     Ok(())
 }
@@ -231,6 +264,14 @@ fn marketplace_human_output_explains_native_routes_and_partial_results() -> Test
     ] {
         assert!(text.contains(line), "{text}");
     }
+    super::chezmoi_native::run_browser_pty(
+        &f,
+        &["plugins", "claude:mi"],
+        "market-partial",
+        &f.home,
+        "76",
+        "3",
+    )?;
     assert!(!f.file("state").exists());
     Ok(())
 }

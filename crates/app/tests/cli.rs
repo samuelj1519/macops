@@ -508,6 +508,20 @@ fn root_help_prioritizes_daily_tasks_and_advanced_help_keeps_recovery() -> TestR
         assert!(help.contains("mo help advanced"), "{help}");
         assert!(!help.contains("--resolve-failed"), "{help}");
         assert!(!help.contains("--chezmoi-source"), "{help}");
+        for item in [
+            "mo [全局参数] <命令> [参数]",
+            "mo help <命令>",
+            "apps",
+            "config",
+            "skills",
+            "discover",
+            "recover",
+            "--json",
+            "--dry-run",
+            "--yes",
+        ] {
+            assert!(help.contains(item), "{help}");
+        }
     }
     let detailed = std::process::Command::new(command)
         .args(["help", "advanced"])
@@ -518,6 +532,15 @@ fn root_help_prioritizes_daily_tasks_and_advanced_help_keeps_recovery() -> TestR
         help.contains("recover") && help.contains("--chezmoi-source"),
         "{help}"
     );
+    for args in [["help", "plugins"], ["plugins", "--help"]] {
+        let output = std::process::Command::new(command).args(args).output()?;
+        assert_code(&output, 0);
+        let help = String::from_utf8(output.stdout)?;
+        assert!(
+            help.contains("mo plugins") && help.contains("--online") && help.contains("claude:mi"),
+            "{help}"
+        );
+    }
     Ok(())
 }
 

@@ -579,7 +579,7 @@ impl Browser {
             .map(|item| {
                 let name = sanitize(&item.name, false);
                 let summary = sanitize(&item.summary, false);
-                if self.kind == Kind::History {
+                if matches!(self.kind, Kind::History | Kind::Marketplaces) {
                     return ListItem::new(format!("{name}  {summary}"));
                 }
                 let status = match item.management {
@@ -668,6 +668,7 @@ fn keys(kind: Kind, page: &Page, unified: bool) -> &'static str {
         Page::List if kind == Kind::Config => {
             "j/k 滚动  / 搜索  Enter 详情  d 切换目录  r 刷新  q 退出"
         }
+        Page::List if kind == Kind::Marketplaces => "j/k 滚动  / 搜索  Enter 详情  q 退出",
         Page::List => "j/k 滚动  / 搜索  Enter 详情  r 刷新  q 退出",
         Page::Operation(plan) => match plan.action {
             Action::Adopt => "Enter 确认纳管  Esc 返回  q 退出",
@@ -821,7 +822,11 @@ pub(crate) fn browse(
                     browser.show_directories = !browser.show_directories;
                     browser.preserve(id.as_deref());
                 }
-                KeyCode::Char('r') if matches!(browser.page, Page::List) => break None,
+                KeyCode::Char('r')
+                    if kind != Kind::Marketplaces && matches!(browser.page, Page::List) =>
+                {
+                    break None;
+                }
                 _ => {}
             }
         };
