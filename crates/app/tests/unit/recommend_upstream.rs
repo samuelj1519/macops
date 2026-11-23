@@ -220,6 +220,80 @@ fn repository_report_refuses_missing_revisions_and_uninspectable_documents() -> 
 }
 
 #[test]
+fn github_report_attaches_marketplace_distribution_for_plugin_repositories() {
+    use crate::claude_install_source::{MARKET, PLUGIN};
+    let commit = "b".repeat(40);
+    let readme =
+        b"claude plugin marketplace add example/fixture\nclaude plugin install plugin@market\n";
+    let mut urls = Vec::new();
+    let mut report = json!({"evidenceStatus":"published-by-selected-repository"});
+    attach_marketplaces(
+        "example/fixture",
+        &mut |url| {
+            urls.push(url.to_owned());
+            if url.ends_with("/example/fixture") {
+                return Ok(json!({"full_name":"example/fixture","private":false}));
+            }
+            if url.contains("/commits") {
+                return Ok(json!([{"sha":commit}]));
+            }
+            let (path, bytes) = if url.contains("/readme") {
+                ("README.md", readme.as_slice())
+            } else if url.contains("INSTALL.md") {
+                ("INSTALL.md", readme.as_slice())
+            } else if url.contains(MARKET) {
+                (
+                    MARKET,
+                    br#"{"name":"market","plugins":[{"name":"plugin","source":"./"}]}"#.as_slice(),
+                )
+            } else {
+                assert!(url.contains(PLUGIN), "{url}");
+                (PLUGIN, br#"{"name":"plugin","version":"1.0.0"}"#.as_slice())
+            };
+            Ok(json!({"path":path,"type":"file","encoding":"base64",
+                "content":base64::engine::general_purpose::STANDARD.encode(bytes)}))
+        },
+        &mut report,
+    );
+    assert_eq!(report["claudeMarketplace"]["commit"], commit);
+    assert_eq!(report["claudeMarketplace"]["plugin"], "plugin");
+    assert!(report["codexMarketplace"].is_null());
+    assert_eq!(
+        urls,
+        [
+            "https://api.github.com/repos/example/fixture".to_owned(),
+            "https://api.github.com/repos/example/fixture/commits?per_page=1".to_owned(),
+            format!("https://api.github.com/repos/example/fixture/readme?ref={commit}"),
+            format!(
+                "https://api.github.com/repos/example/fixture/contents/INSTALL.md?ref={commit}"
+            ),
+            format!("https://api.github.com/repos/example/fixture/contents/{MARKET}?ref={commit}"),
+            format!("https://api.github.com/repos/example/fixture/contents/{PLUGIN}?ref={commit}"),
+        ]
+    );
+
+    let mut plain = json!({});
+    let mut plain_urls = 0;
+    attach_marketplaces(
+        "example/fixture",
+        &mut |url| {
+            plain_urls += 1;
+            if url.ends_with("/example/fixture") {
+                return Ok(json!({"full_name":"example/fixture","private":false}));
+            }
+            if url.contains("/commits") {
+                return Ok(json!([{"sha":commit}]));
+            }
+            Err(unavailable())
+        },
+        &mut plain,
+    );
+    assert!(plain["claudeMarketplace"].is_null());
+    assert!(plain["codexMarketplace"].is_null());
+    assert_eq!(plain_urls, 4);
+}
+
+#[test]
 fn published_readme_is_bound_to_the_selected_public_repository() -> TestResult {
     let mut urls = Vec::new();
     let answer = inspect("Project", "Example/Project", |url| {

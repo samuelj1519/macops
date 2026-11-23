@@ -13,6 +13,7 @@ use crossterm::{
     execute,
     terminal::{self, EnterAlternateScreen, LeaveAlternateScreen},
 };
+use nix::sys::signal::{SigSet, Signal};
 use ratatui::{
     Frame, Terminal,
     backend::CrosstermBackend,
@@ -21,18 +22,56 @@ use ratatui::{
 };
 use std::io::{self, Stdout};
 
-struct Restore;
+#[derive(Debug)]
+pub(crate) struct SignalHold {
+    suspended: SigSet,
+}
+
+impl SignalHold {
+    pub(crate) fn enter() -> Result<Self> {
+        let mask = |_| Error::new("terminal_signal_mask", "无法挂起全屏会话期间的终止信号");
+        let suspended = SigSet::thread_get_mask().map_err(mask)?;
+        SigSet::from_iter([
+            Signal::SIGINT,
+            Signal::SIGTERM,
+            Signal::SIGHUP,
+            Signal::SIGQUIT,
+        ])
+        .thread_block()
+        .map_err(mask)?;
+        Ok(Self { suspended })
+    }
+}
+
+impl Drop for SignalHold {
+    fn drop(&mut self) {
+        let _ = self.suspended.thread_set_mask();
+    }
+}
+
+#[derive(Debug)]
+struct Restore {
+    _hold: SignalHold,
+    screen: bool,
+}
+
 impl Drop for Restore {
     fn drop(&mut self) {
         let _ = terminal::disable_raw_mode();
-        let _ = execute!(io::stdout(), LeaveAlternateScreen, Show);
+        if self.screen {
+            let _ = execute!(io::stdout(), LeaveAlternateScreen, Show);
+        }
     }
 }
 
 fn screen() -> Result<(Terminal<CrosstermBackend<Stdout>>, Restore)> {
+    let mut restore = Restore {
+        _hold: SignalHold::enter()?,
+        screen: false,
+    };
     terminal::enable_raw_mode()?;
-    let restore = Restore;
     execute!(io::stdout(), EnterAlternateScreen)?;
+    restore.screen = true;
     Ok((Terminal::new(CrosstermBackend::new(io::stdout()))?, restore))
 }
 
@@ -63,6 +102,13 @@ enum NativeAction {
         action: Action,
         id: String,
     },
+}
+
+enum After {
+    Native(NativeAction),
+    FinishOperation,
+    FinishRecovery,
+    Refresh,
 }
 
 struct Browser {
@@ -745,7 +791,7 @@ pub(crate) fn browse(
     let mut browser = Browser::new(view, kind);
     loop {
         let (mut terminal, restore) = screen()?;
-        let native = loop {
+        let after = loop {
             let kind = browser.kind;
             terminal.draw(|frame| browser.draw(ctx, frame, kind, unified))?;
             let Event::Key(event) = event::read()? else {
@@ -774,16 +820,16 @@ pub(crate) fn browse(
                 KeyCode::Esc => browser.back(ctx, kind, session),
                 KeyCode::Char('/') if matches!(browser.page, Page::List) => browser.typing = true,
                 KeyCode::Enter if matches!(browser.page, Page::Operation(_)) => {
-                    browser.finish_operation(ctx, session);
+                    break After::FinishOperation;
                 }
                 KeyCode::Enter if matches!(browser.page, Page::Recovery(_)) => {
-                    browser.finish_recovery(ctx, session);
+                    break After::FinishRecovery;
                 }
                 KeyCode::Enter => browser.enter(ctx, session, kind),
                 KeyCode::Char('c') if kind == Kind::History => browser.preview_recovery(),
                 KeyCode::Char(key @ ('e' | 'l')) if kind == Kind::Agents => {
                     if let Some(action) = browser.agent_action(key) {
-                        break Some(action);
+                        break After::Native(action);
                     }
                 }
                 KeyCode::Char('o') => browser.open(false),
@@ -807,12 +853,12 @@ pub(crate) fn browse(
                         && matches!(browser.page, Page::Detail(_)) =>
                 {
                     if let Some(action) = browser.preview_operation(ctx, Action::Adopt) {
-                        break Some(action);
+                        break After::Native(action);
                     }
                 }
                 KeyCode::Char(key @ ('u' | 'x')) => {
                     if let Some(action) = browser.maintenance_key(ctx, key) {
-                        break Some(action);
+                        break After::Native(action);
                     }
                 }
                 KeyCode::Char('d')
@@ -825,17 +871,18 @@ pub(crate) fn browse(
                 KeyCode::Char('r')
                     if kind != Kind::Marketplaces && matches!(browser.page, Page::List) =>
                 {
-                    break None;
+                    break After::Refresh;
                 }
                 _ => {}
             }
         };
         drop(terminal);
         drop(restore);
-        if let Some(action) = native {
-            browser.run_native(ctx, session, action);
-        } else {
-            browser.refresh(ctx, session);
+        match after {
+            After::Native(action) => browser.run_native(ctx, session, action),
+            After::FinishOperation => browser.finish_operation(ctx, session),
+            After::FinishRecovery => browser.finish_recovery(ctx, session),
+            After::Refresh => browser.refresh(ctx, session),
         }
     }
 }

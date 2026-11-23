@@ -383,6 +383,7 @@ impl Drop for Restore {
 }
 
 fn password() -> Result<String> {
+    let _hold = crate::terminal::SignalHold::enter()?;
     terminal::enable_raw_mode()?;
     let _restore = Restore;
     eprint!("API key（输入不回显，Esc 取消） ");

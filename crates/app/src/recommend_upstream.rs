@@ -409,14 +409,32 @@ pub fn show(ctx: &Context, query: &str, repo: &str, dry_run: bool) -> Result<Val
         }));
     }
     let deadline = Instant::now() + Duration::from_secs(ctx.timeout_secs.min(15));
-    match inspect(query, repo, |url| {
-        crate::recommend_model::fetch_public(url, deadline)
-    }) {
-        Ok(value) => Ok(value),
+    let mut fetch = |url: &str| crate::recommend_model::fetch_public(url, deadline);
+    match inspect(query, repo, &mut fetch) {
+        Ok(mut report) => {
+            attach_marketplaces(repo, &mut fetch, &mut report);
+            Ok(report)
+        }
         Err(error) => Ok(json!({
             "query":query,"repository":repo,"evidenceStatus":"source-unavailable",
             "reason":error.code,"persistentWrites":false,"canExecute":false
         })),
+    }
+}
+
+fn attach_marketplaces(
+    repo: &str,
+    fetch: &mut impl FnMut(&str) -> Result<Value>,
+    report: &mut Value,
+) {
+    let Ok(evidence) = repository_evidence(repo, &mut *fetch) else {
+        return;
+    };
+    if let Some(market) = codex_marketplace(&evidence, &mut *fetch) {
+        report["codexMarketplace"] = market;
+    }
+    if let Some(offer) = claude_marketplace(&evidence, &mut *fetch) {
+        report["claudeMarketplace"] = json!(offer);
     }
 }
 
