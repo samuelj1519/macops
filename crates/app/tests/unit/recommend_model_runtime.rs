@@ -489,7 +489,8 @@ fn public_model_status_reports_only_redacted_outcomes_without_host_authenticatio
         "macops",
         "--home",
         dir.path().to_str().ok_or("home")?,
-        "setup",
+        "recommend",
+        "--setup",
     ])?;
     let ctx = Context::from_cli(&cli, &mut vec![])?;
     let profile = serde_json::from_value::<crate::recommend_setup::Profile>(json!({
@@ -547,7 +548,8 @@ fn exhausted_public_model_budget_exits_before_any_native_or_remote_read() -> Tes
         "macops",
         "--home",
         dir.path().to_str().ok_or("home")?,
-        "setup",
+        "recommend",
+        "--setup",
     ])?;
     let mut ctx = Context::from_cli(&cli, &mut vec![])?;
     // Simulate an already exhausted runtime budget, independent of argument parsing.

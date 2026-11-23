@@ -78,6 +78,36 @@ use clap::{CommandFactory, Parser};
 use serde_json::{Value, json};
 use std::{io::Write, process::ExitCode};
 
+pub(crate) fn scoped_retry<'a>(noun: &str, key: &'a str) -> Option<&'a str> {
+    let (prefix, rest) = key.split_once(':')?;
+    (prefix == noun && matches!(prefix, "app" | "config" | "skill" | "agent") && !rest.is_empty())
+        .then_some(rest)
+}
+
+fn select_scoped<'a>(
+    catalog: &'a domain::Catalog,
+    noun: &str,
+    key: &str,
+) -> error::Result<&'a domain::Package> {
+    match catalog.select(key) {
+        Ok(package) => Ok(package),
+        Err(error) if error.code == "not_found" => {
+            scoped_retry(noun, key).map_or(Err(error), |rest| catalog.select(rest))
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn resolve_scoped(ctx: &context::Context, noun: &str, key: &str) -> error::Result<domain::Package> {
+    match target::resolve(ctx, key) {
+        Ok(package) => Ok(package),
+        Err(error) if error.code == "not_found" => {
+            scoped_retry(noun, key).map_or(Err(error), |rest| target::resolve(ctx, rest))
+        }
+        Err(error) => Err(error),
+    }
+}
+
 fn run(cli: &cli::Cli, warnings: &mut Vec<String>) -> error::Result<Value> {
     if let Some(value) = run_worker(&cli.command)? {
         return Ok(value);
@@ -86,6 +116,7 @@ fn run(cli: &cli::Cli, warnings: &mut Vec<String>) -> error::Result<Value> {
         || cli.chezmoi_destination.is_some()
         || cli.chezmoi_config.is_some();
     policy::cli::config_scope(&cli.command, chezmoi_requested)?;
+    validate_project_scope(&cli.command)?;
     let ctx = context::Context::from_cli(cli, warnings)?;
     if let Some(result) = migration_command(cli, &ctx)? {
         return Ok(result);
@@ -101,79 +132,174 @@ fn run(cli: &cli::Cli, warnings: &mut Vec<String>) -> error::Result<Value> {
     if let Some(value) = run_recovery(cli, &ctx)? {
         return Ok(value);
     }
-    if let cli::Command::History { id } = &cli.command {
+    if let cli::Command::History { query } = &cli.command {
         return Ok(json!(
             store::history(&ctx)?
                 .into_iter()
-                .filter(|j| id.as_ref().is_none_or(|id| j.plan.package.id == *id))
+                .filter(|j| query.as_ref().is_none_or(|id| j.plan.package.id == *id))
                 .collect::<Vec<_>>()
         ));
     }
-    if let cli::Command::Credential { command } = &cli.command {
-        return Ok(metadata::credentials(&ctx, command));
+    if let cli::Command::Search { query } = &cli.command {
+        return run_search(&ctx, query);
     }
-    if let Some(value) = run_config_or_reconcile(cli, &ctx)? {
-        return Ok(value);
-    }
-    match &cli.command {
-        cli::Command::Service {
-            command: cli::Service::Start { name },
-        } => return service::control(&ctx, name, domain::Action::Start, cli.dry_run, cli.yes),
-        cli::Command::Service {
-            command: cli::Service::Stop { name },
-        } => return service::control(&ctx, name, domain::Action::Stop, cli.dry_run, cli.yes),
-        _ => (),
-    }
-    if let Some(value) = native_skills::run(&ctx, &cli.command, cli.dry_run, cli.yes)? {
-        return Ok(value);
-    }
-    if let Some(value) = capability_tx::write(&ctx, &cli.command, cli.dry_run, cli.yes)? {
-        return Ok(value);
-    }
-    if let Some(value) = run_source_adoption(cli, &ctx)? {
-        return Ok(value);
-    }
-    if let Some(value) = capabilities::query(&ctx, &cli.command)? {
-        return Ok(value);
-    }
-    if let Some(value) = ai::run(&ctx, &cli.command, cli.dry_run)? {
-        return Ok(value);
-    }
-    if let Some(value) = resource_inventory::query(&ctx, &cli.command)? {
+    if let Some(value) = run_pipeline(cli, &ctx)? {
         return Ok(value);
     }
     let catalog = inventory::load(&ctx)?;
-    match &cli.command {
-        cli::Command::Doctor { id } => {
-            let selected: Vec<_> = if let Some(id) = id {
-                vec![catalog.select(id)?]
-            } else {
-                catalog.packages.iter().collect()
-            };
-            require_config_target(chezmoi_requested, &selected)?;
-            target::diagnose(&ctx, &selected)
+    catalog_query(cli, &ctx, &catalog, chezmoi_requested)
+}
+
+fn validate_project_scope(command: &cli::Command) -> error::Result<()> {
+    use cli::{AgentCmd, AppCmd, Command, Config, SkillCmd};
+    let valid = match command {
+        Command::App {
+            project: Some(_),
+            command,
+        } => {
+            matches!(command, None | Some(AppCmd::Resources | AppCmd::Detail(_)))
         }
+        Command::Config {
+            project: Some(_),
+            command,
+        } => {
+            matches!(command, None | Some(Config::Resources | Config::Detail(_)))
+        }
+        Command::Skill {
+            project: Some(_),
+            command,
+            details,
+            only,
+        } => {
+            !details
+                && only.is_empty()
+                && matches!(
+                    command,
+                    None | Some(SkillCmd::Resources | SkillCmd::Detail(_))
+                )
+        }
+        Command::Agent {
+            project: Some(_),
+            command,
+        } => {
+            matches!(
+                command,
+                None | Some(AgentCmd::Resources | AgentCmd::Detail(_))
+            )
+        }
+        _ => true,
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(error::Error::new(
+            "project_scope_unsupported",
+            "--project 仅用于资源列表和详情",
+        ))
+    }
+}
+
+fn run_pipeline(cli: &cli::Cli, ctx: &context::Context) -> error::Result<Option<Value>> {
+    if let Some(value) = run_config_or_reconcile(cli, ctx)? {
+        return Ok(Some(value));
+    }
+    match &cli.command {
+        cli::Command::App {
+            project: _,
+            command: Some(cli::AppCmd::Start { id }),
+        } => {
+            return service::control(
+                ctx,
+                service_selector(id),
+                domain::Action::Start,
+                cli.dry_run,
+                cli.yes,
+            )
+            .map(Some);
+        }
+        cli::Command::App {
+            project: _,
+            command: Some(cli::AppCmd::Stop { id }),
+        } => {
+            return service::control(
+                ctx,
+                service_selector(id),
+                domain::Action::Stop,
+                cli.dry_run,
+                cli.yes,
+            )
+            .map(Some);
+        }
+        _ => (),
+    }
+    if let Some(target) = policy::cli::adopt_target(&cli.command)
+        && let Some(value) = native_skills::app_scoped(
+            ctx,
+            target.key,
+            target.exact,
+            None,
+            domain::Action::Adopt,
+            cli.dry_run,
+            cli.yes,
+        )?
+    {
+        return Ok(Some(value));
+    }
+    if let Some(value) = native_skills::run(ctx, &cli.command, cli.dry_run, cli.yes)? {
+        return Ok(Some(value));
+    }
+    if let Some(value) = capability_tx::write(ctx, &cli.command, cli.dry_run, cli.yes)? {
+        return Ok(Some(value));
+    }
+    if let Some(value) = run_source_adoption(cli, ctx)? {
+        return Ok(Some(value));
+    }
+    if let Some(value) = resource_inventory::query(ctx, &cli.command)? {
+        return Ok(Some(value));
+    }
+    if let Some(value) = capabilities::query(ctx, &cli.command)? {
+        return Ok(Some(value));
+    }
+    if let Some(value) = ai::run(ctx, &cli.command, cli.dry_run)? {
+        return Ok(Some(value));
+    }
+    Ok(None)
+}
+
+fn catalog_query(
+    cli: &cli::Cli,
+    ctx: &context::Context,
+    catalog: &domain::Catalog,
+    chezmoi_requested: bool,
+) -> error::Result<Value> {
+    match &cli.command {
+        cli::Command::App {
+            project,
+            command: Some(command),
+        } => run_application(
+            cli,
+            ctx,
+            catalog,
+            project.as_deref(),
+            command,
+            chezmoi_requested,
+        ),
         cli::Command::Dirs { id, .. } => {
-            let selected: Vec<_> = if let Some(id) = id {
-                vec![catalog.select(id)?]
-            } else {
-                catalog.packages.iter().collect()
-            };
+            let packages = selected(catalog, id.as_deref())?;
             Ok(json!(
-                selected
+                packages
                     .iter()
                     .map(|p| json!({"id":p.id,"paths":p.paths}))
                     .collect::<Vec<_>>()
             ))
         }
-        cli::Command::Discover { manager } => discover_all(&ctx, manager.as_deref()),
-        cli::Command::App { command } => app(&ctx, &catalog, command),
-        cli::Command::Toolchain { command } => match command {
-            cli::Toolchain::List { manager } => discover_all(&ctx, manager.as_deref()),
-            cli::Toolchain::Info { manager } => inventory::discover(&ctx, manager),
-        },
-        cli::Command::Service { command } => service_read(&ctx, command),
-        _ => run_operation(cli, &ctx, &catalog),
+        cli::Command::Cleanup { id } => {
+            cache::cleanup(ctx, catalog.select(id)?, cli.dry_run, cli.yes)
+        }
+        _ => Err(error::Error::new(
+            "unsupported_command",
+            "该命令没有已验证的执行接口",
+        )),
     }
 }
 
@@ -185,99 +311,147 @@ fn run_scoped_entry(
     if let Some(value) = ai::unified_upgrade(ctx, &cli.command, cli.dry_run, chezmoi_requested)? {
         return Ok(Some(value));
     }
-    if matches!(cli.command, cli::Command::Setup) {
-        return recommend_setup::run(ctx, cli.json, cli.dry_run).map(Some);
-    }
-    if let cli::Command::Resume { operation_id } = &cli.command {
-        return claude_install::resume(ctx, operation_id, cli.dry_run, cli.yes).map(Some);
-    }
-    if let cli::Command::Launch {
-        profile,
-        native_profile,
-    } = &cli.command
-    {
-        if cli.json && !cli.dry_run {
-            return Err(error::Error::new(
-                "launch_json_requires_preview",
-                "使用 --dry-run 查看启动计划",
-            ));
+    match &cli.command {
+        cli::Command::Recommend { setup: true, .. } => {
+            recommend_setup::run(ctx, cli.json, cli.dry_run).map(Some)
         }
-        return codex_install::session::launch(
-            ctx,
-            profile,
-            native_profile.as_deref(),
-            cli.dry_run,
-            cli.yes,
-        )
-        .map(Some);
-    }
-    if let cli::Command::Plugins { profile, online } = &cli.command {
-        let interactive = browser::interactive_marketplaces(cli);
-        if interactive && *online && plugin_marketplaces::cursor_profile(profile.as_deref()) {
-            eprintln!("正在查询 Cursor 账户市场…");
-        }
-        let data = plugin_marketplaces::list(ctx, profile.as_deref(), *online, cli.dry_run)?;
-        if interactive {
-            browser::browse_marketplaces(ctx, &data)?;
-        }
-        return Ok(Some(data));
-    }
-    if let cli::Command::Recommend {
-        product,
-        evidence,
-        github,
-        model,
-        keychain_account,
-    } = &cli.command
-    {
-        let interactive = recommend::interactive(cli);
-        let repository = if evidence.is_none() && github.is_none() && !model {
-            recommend_upstream::repository_subject(product.trim())
-        } else {
-            None
-        };
-        let data = if let Some(repository) = repository {
-            recommend_upstream::show_repository(ctx, repository, cli.dry_run, interactive)?
-        } else {
-            recommend::show(
-                ctx,
-                product,
-                evidence.as_deref(),
-                github.as_deref(),
-                *model,
-                keychain_account.as_deref(),
-                cli.dry_run,
-            )?
-        };
-        return if interactive {
-            recommend::choose(ctx, data).map(Some)
-        } else {
-            Ok(Some(data))
-        };
-    }
-    if let cli::Command::Manifest { command } = &cli.command {
-        return manifest::run(ctx, command, cli.dry_run, cli.yes).map(Some);
-    }
-    if matches!(
-        cli.command,
-        cli::Command::Adopt {
-            bind_recipe: true,
+        cli::Command::Recommend {
+            product,
+            evidence,
+            github,
+            model,
+            keychain_account,
             ..
+        } => run_recommend(
+            cli,
+            ctx,
+            product.as_deref(),
+            evidence.as_deref(),
+            github.as_deref(),
+            *model,
+            keychain_account.as_deref(),
+        ),
+        cli::Command::Agent {
+            command: Some(command),
+            ..
+        } => run_agent_entry(cli, ctx, command),
+        cli::Command::Skill {
+            command: Some(cli::SkillCmd::Market { profile, online }),
+            ..
+        } => run_market(cli, ctx, profile.as_deref(), *online).map(Some),
+        cli::Command::Manifest { command } => {
+            manifest::run(ctx, command, cli.dry_run, cli.yes).map(Some)
         }
-    ) && let Some(target) = policy::cli::adopt_target(&cli.command)
-    {
-        if chezmoi_requested {
-            return Err(error::Error::new(
-                "config_scope_unsupported",
-                "chezmoi 目录参数不能用于 npm 配方",
-            ));
+        cli::Command::App {
+            command: Some(cli::AppCmd::Adopt {
+                bind_recipe: true, ..
+            }),
+            ..
+        } => {
+            if chezmoi_requested {
+                return Err(error::Error::new(
+                    "config_scope_unsupported",
+                    "chezmoi 目录参数不能用于 npm 配方",
+                ));
+            }
+            let target = policy::cli::adopt_target(&cli.command).ok_or_else(|| {
+                error::Error::attention("adopt_target_required", "请指定要绑定 npm 配方的对象")
+            })?;
+            npm_adoption::run(ctx, target.key, cli.dry_run, cli.yes).map(Some)
         }
-        return npm_adoption::run(ctx, target.key, cli.dry_run, cli.yes).map(Some);
+        _ => Ok(None),
     }
-    if matches!(cli.command, cli::Command::Adopt { .. }) {
-        return Ok(None);
+}
+
+fn run_agent_entry(
+    cli: &cli::Cli,
+    ctx: &context::Context,
+    command: &cli::AgentCmd,
+) -> error::Result<Option<Value>> {
+    match command {
+        cli::AgentCmd::Resume { operation_id } => {
+            claude_install::resume(ctx, operation_id, cli.dry_run, cli.yes).map(Some)
+        }
+        cli::AgentCmd::Launch {
+            profile,
+            native_profile,
+        } => {
+            if cli.json && !cli.dry_run {
+                return Err(error::Error::new(
+                    "launch_json_requires_preview",
+                    "使用 --dry-run 查看启动计划",
+                ));
+            }
+            codex_install::session::launch(
+                ctx,
+                profile,
+                native_profile.as_deref(),
+                cli.dry_run,
+                cli.yes,
+            )
+            .map(Some)
+        }
+        cli::AgentCmd::Credential { command } => Ok(Some(metadata::credentials(ctx, command))),
+        _ => Ok(None),
     }
-    brew::public_command(ctx, cli)
+}
+
+fn run_market(
+    cli: &cli::Cli,
+    ctx: &context::Context,
+    profile: Option<&str>,
+    online: bool,
+) -> error::Result<Value> {
+    let interactive = browser::interactive_marketplaces(cli);
+    if interactive && online && plugin_marketplaces::cursor_profile(profile) {
+        eprintln!("正在查询 Cursor 账户市场…");
+    }
+    let data = plugin_marketplaces::list(ctx, profile, online, cli.dry_run)?;
+    if interactive {
+        browser::browse_marketplaces(ctx, &data)?;
+    }
+    Ok(data)
+}
+
+fn run_recommend(
+    cli: &cli::Cli,
+    ctx: &context::Context,
+    product: Option<&str>,
+    evidence: Option<&std::path::Path>,
+    github: Option<&str>,
+    model: bool,
+    keychain_account: Option<&str>,
+) -> error::Result<Option<Value>> {
+    let Some(product) = product else {
+        return Err(error::Error::new(
+            "recommend_target_required",
+            "recommend 需要一个目标，或使用 --setup 配置模型",
+        ));
+    };
+    let interactive = recommend::interactive(cli);
+    let repository = if evidence.is_none() && github.is_none() && !model {
+        recommend_upstream::repository_subject(product.trim())
+    } else {
+        None
+    };
+    let data = if let Some(repository) = repository {
+        recommend_upstream::show_repository(ctx, repository, cli.dry_run, interactive)?
+    } else {
+        recommend::show(
+            ctx,
+            product,
+            evidence,
+            github,
+            model,
+            keychain_account,
+            cli.dry_run,
+        )?
+    };
+    if interactive {
+        recommend::choose(ctx, data).map(Some)
+    } else {
+        Ok(Some(data))
+    }
 }
 
 fn migration_command(cli: &cli::Cli, ctx: &context::Context) -> error::Result<Option<Value>> {
@@ -299,10 +473,68 @@ fn run_recovery(cli: &cli::Cli, ctx: &context::Context) -> error::Result<Option<
         resolve_failed,
     } = &cli.command
     {
-        return operations::recover(ctx, operation_id, cli.dry_run, *resolve_failed, cli.yes)
-            .map(Some);
+        if let Some(operation_id) = operation_id {
+            return operations::recover(ctx, operation_id, cli.dry_run, *resolve_failed, cli.yes)
+                .map(Some);
+        }
+        let (pending, incomplete) = operations::pending_recovery(ctx)?;
+        return Ok(Some(json!({
+            "pending":pending,
+            "incomplete":incomplete,
+            "hint":"执行 mo recover <operationId> 收口；--resolve-failed 人工确认失败",
+            "persistentWrites":false,
+        })));
     }
     Ok(None)
+}
+
+fn run_search(ctx: &context::Context, query: &str) -> error::Result<Value> {
+    let scope = query.split_once(':').and_then(|(noun, _)| match noun {
+        "app" => Some("applications"),
+        "config" => Some("configs"),
+        "skill" => Some("capabilities"),
+        "agent" => Some("agents"),
+        _ => None,
+    });
+    let data = resource_inventory::snapshot(ctx, scope, None)?;
+    let exact = data.resources.iter().find(|row| row.id == query);
+    let candidates: Vec<_> = if let Some(row) = exact {
+        vec![row]
+    } else {
+        data.resources
+            .iter()
+            .filter(|row| {
+                row.matches_name(query)
+                    || scope
+                        .and_then(|_| query.split_once(':'))
+                        .is_some_and(|(_, name)| row.matches_name(name))
+            })
+            .collect()
+    };
+    match candidates.as_slice() {
+        [] => {
+            if scope.is_none() || scope == Some("agents") {
+                let key = scoped_retry("agent", query).unwrap_or(query);
+                if let Some(tool) = ai::detail(ctx, key)? {
+                    return Ok(tool);
+                }
+            }
+            Err(error::Error::attention(
+                "not_found",
+                format!("没有发现对应对象：{query}"),
+            ))
+        }
+        [resource] => {
+            Ok(json!({"resource":resource,"coverage":data.coverage,"incomplete":data.incomplete}))
+        }
+        _ => {
+            let choices: Vec<_> = candidates
+                .iter()
+                .map(|row| json!({"id":row.id,"name":row.name,"category":row.category()}))
+                .collect();
+            Ok(json!({"candidates":choices,"coverage":data.coverage,"incomplete":data.incomplete}))
+        }
+    }
 }
 
 fn run_worker(command: &cli::Command) -> error::Result<Option<Value>> {
@@ -382,43 +614,34 @@ fn run_source_adoption(cli: &cli::Cli, ctx: &context::Context) -> error::Result<
 fn run_config_or_reconcile(cli: &cli::Cli, ctx: &context::Context) -> error::Result<Option<Value>> {
     if let cli::Command::Config {
         command: Some(command),
+        ..
     } = &cli.command
+        && !matches!(command, cli::Config::Resources | cli::Config::Detail(_))
         && let Some(value) = chezmoi_native::run(ctx, command, cli.dry_run, cli.yes)?
     {
         return Ok(Some(value));
     }
     match &cli.command {
-        cli::Command::Skills {
-            command: Some(cli::Skills::Plugins { command }),
+        cli::Command::Skill {
+            project: _,
+            details: _,
+            only: _,
+            command: Some(cli::SkillCmd::Plugins { command }),
         } => native_plugins::run(ctx, command, cli.dry_run, cli.yes).map(Some),
         cli::Command::Config {
+            project: _,
             command: Some(cli::Config::Restore { operation_id }),
         } => config_tx::restore(ctx, operation_id, cli.dry_run, cli.yes).map(Some),
         cli::Command::Config {
+            project: _,
             command: Some(cli::Config::Reconcile { id }),
         } => config_tx::reconcile(ctx, id.as_deref(), cli.dry_run, cli.yes).map(Some),
-        cli::Command::Ai {
-            command: cli::Ai::Reconcile { tool },
-        } => config_tx::reconcile(ctx, tool.as_deref(), cli.dry_run, cli.yes).map(Some),
+        cli::Command::Agent {
+            project: _,
+            command: Some(cli::AgentCmd::Upgrade { tool: None, .. }),
+        } => config_tx::reconcile(ctx, None, cli.dry_run, cli.yes).map(Some),
         _ => Ok(None),
     }
-}
-
-fn require_config_target(
-    chezmoi_requested: bool,
-    packages: &[&domain::Package],
-) -> error::Result<()> {
-    if chezmoi_requested
-        && packages
-            .iter()
-            .any(|p| !matches!(p.provider, domain::Provider::ConfigObserved { .. }))
-    {
-        return Err(error::Error::new(
-            "config_scope_unsupported",
-            "chezmoi 目录参数不能用于非配置目标",
-        ));
-    }
-    Ok(())
 }
 
 fn discover_all(ctx: &context::Context, manager: Option<&str>) -> error::Result<Value> {
@@ -438,41 +661,15 @@ fn discover_all(ctx: &context::Context, manager: Option<&str>) -> error::Result<
     ))
 }
 
-fn app(
-    ctx: &context::Context,
-    catalog: &domain::Catalog,
-    command: &cli::App,
-) -> error::Result<Value> {
-    match command {
-        cli::App::List => Ok(json!(
-            catalog
-                .packages
-                .iter()
-                .filter(|p| matches!(
-                    p.kind,
-                    domain::Kind::App | domain::Kind::Cli | domain::Kind::Manager
-                ))
-                .collect::<Vec<_>>()
-        )),
-        cli::App::Info { name } => Ok(
-            json!({"package":catalog.select(name)?,"observation":inventory::observe(ctx,catalog.select(name)?)}),
-        ),
-        cli::App::Check { name } => Ok(json!(
-            selected(catalog, name.as_deref())?
-                .iter()
-                .filter(|p| matches!(p.kind, domain::Kind::App))
-                .map(|p| json!({"id":p.id,"observation":inventory::observe(ctx,p)}))
-                .collect::<Vec<_>>()
-        )),
-        cli::App::Upgrade { .. } => Err(error::Error::new("route_error", "升级应进入明确后端")),
-    }
+fn service_selector(key: &str) -> &str {
+    let key = scoped_retry("app", key).unwrap_or(key);
+    key.strip_prefix("service:").unwrap_or(key)
 }
 
-fn service_read(ctx: &context::Context, command: &cli::Service) -> error::Result<Value> {
+fn service_read(ctx: &context::Context, command: &cli::ServiceCmd) -> error::Result<Value> {
     let name = match command {
-        cli::Service::List => "postgresql",
-        cli::Service::Check { name } => name.as_deref().unwrap_or("postgresql"),
-        _ => return Err(error::Error::new("route_error", "服务写入应进入明确后端")),
+        cli::ServiceCmd::List => "postgresql",
+        cli::ServiceCmd::Check { name } => name.as_deref().unwrap_or("postgresql"),
     };
     if name != "postgresql" {
         return Err(error::Error::new("undeclared_service", name));
@@ -492,8 +689,348 @@ fn service_read(ctx: &context::Context, command: &cli::Service) -> error::Result
     }
     let value = inventory::parse_service(&out.stdout, "postgresql@16")?;
     Ok(
-        json!({"service":value,"status":if value.running {"running"} else {"stopped"},"requires_running":matches!(command,cli::Service::Check {..})}),
+        json!({"service":value,"status":if value.running {"running"} else {"stopped"},"requires_running":matches!(command,cli::ServiceCmd::Check {..})}),
     )
+}
+
+fn require_config_target(
+    chezmoi_requested: bool,
+    packages: &[&domain::Package],
+) -> error::Result<()> {
+    if chezmoi_requested
+        && packages
+            .iter()
+            .any(|p| !matches!(p.provider, domain::Provider::ConfigObserved { .. }))
+    {
+        return Err(error::Error::new(
+            "config_scope_unsupported",
+            "chezmoi 目录参数不能用于非配置目标",
+        ));
+    }
+    Ok(())
+}
+
+fn object_action(
+    cli: &cli::Cli,
+    ctx: &context::Context,
+    key: &str,
+    action: domain::Action,
+    version: Option<&str>,
+) -> error::Result<Value> {
+    for id in [Some(key), scoped_retry("app", key)].into_iter().flatten() {
+        let request = brew::ObjectRequest {
+            action,
+            id: id.to_owned(),
+            version: version.map(str::to_owned),
+            doctor: false,
+        };
+        if let Some(value) = brew::route_object(ctx, &request, cli.dry_run, cli.yes, None)? {
+            return Ok(value);
+        }
+        if action != domain::Action::Install
+            && let Some(value) =
+                native_skills::app_scoped(ctx, id, false, version, action, cli.dry_run, cli.yes)?
+        {
+            return Ok(value);
+        }
+    }
+    let package = resolve_scoped(ctx, "app", key)?;
+    operations::execute(
+        ctx,
+        operations::plan(ctx, &package, action, version, cli.dry_run)?,
+        cli.dry_run,
+        cli.yes,
+    )
+}
+
+fn upgrade_all(
+    cli: &cli::Cli,
+    ctx: &context::Context,
+    catalog: &domain::Catalog,
+) -> error::Result<Value> {
+    use domain::{Kind, Provider};
+    let (explicit, candidates): (Vec<_>, Vec<_>) = catalog
+        .packages
+        .iter()
+        .filter(|package| {
+            matches!(package.kind, Kind::App | Kind::Cli | Kind::Runtime)
+                && (matches!(package.provider, Provider::BrewFormula { .. })
+                    || policy::commands::available_query(&ctx.home, package).is_ok())
+        })
+        .partition(|package| package.exact_version_required);
+    let (native, indexed): (Vec<_>, Vec<_>) = candidates
+        .into_iter()
+        .partition(|package| matches!(package.provider, Provider::BrewFormula { .. }));
+    let explicit = explicit
+        .into_iter()
+        .map(|package| json!({"id":package.id,"status":"explicit_version_required"}));
+    if cli.dry_run {
+        let mut results = upgrade_rows(ctx, &indexed)?;
+        results.extend(explicit);
+        results.extend(
+            native
+                .iter()
+                .map(|package| json!({"id":package.id,"status":"native_query_required"})),
+        );
+        return Ok(
+            json!({"mode":"dry-run","results":results,"refresh":"not-run","persistentWrites":false}),
+        );
+    }
+    let mut results = refresh_upgrade_sources(cli, ctx, &indexed, &native)?;
+    for row in &mut results {
+        if row["status"] != "different" || row["installed"]["version"].is_null() {
+            continue;
+        }
+        let (Some(id), Some(version)) = (row["id"].as_str(), row["available"].as_str()) else {
+            continue;
+        };
+        let outcome = if let Some(package) = indexed.iter().find(|package| package.id == id) {
+            upgrade_indexed(cli, ctx, package, version)
+        } else {
+            object_action(cli, ctx, id, domain::Action::Upgrade, None)
+        };
+        match outcome {
+            Ok(value) => {
+                let incomplete = attention(&cli.command, &value);
+                *row = json!({"id":id,"status":if incomplete {"unknown"} else {"upgraded"},"operation":value});
+                if incomplete {
+                    break;
+                }
+            }
+            Err(error) => *row = json!({"id":id,"status":"unknown","error":error}),
+        }
+    }
+    results.extend(explicit);
+    Ok(json!({"results":results}))
+}
+
+fn upgrade_indexed(
+    cli: &cli::Cli,
+    ctx: &context::Context,
+    package: &domain::Package,
+    version: &str,
+) -> error::Result<Value> {
+    let explicit = (!matches!(package.provider, domain::Provider::Brew { .. })).then_some(version);
+    let plan = operations::plan(ctx, package, domain::Action::Upgrade, explicit, false)?;
+    if plan.target.as_deref() != Some(version) {
+        return Err(error::Error::attention(
+            "plan_stale",
+            "查询到的版本已改变，请重新检查",
+        ));
+    }
+    operations::execute(ctx, plan, false, cli.yes)
+}
+
+fn upgrade_rows(
+    ctx: &context::Context,
+    packages: &[&domain::Package],
+) -> error::Result<Vec<Value>> {
+    let mut rows: Vec<Value> = serde_json::from_value(updates::outdated(ctx, packages)?)?;
+    for row in &mut rows {
+        if row["installed"]["status"] == "missing" {
+            row["status"] = json!("not_installed");
+        } else if row["installed"]["version"].is_null() {
+            row["status"] = json!("unknown");
+        }
+    }
+    Ok(rows)
+}
+
+fn refresh_upgrade_sources(
+    cli: &cli::Cli,
+    ctx: &context::Context,
+    indexed: &[&domain::Package],
+    native: &[&domain::Package],
+) -> error::Result<Vec<Value>> {
+    let mut rows = if indexed.is_empty() {
+        vec![]
+    } else {
+        let refreshed = updates::update(ctx, indexed, false)?;
+        let mut rows = upgrade_rows(ctx, indexed)?;
+        for (row, refresh) in rows
+            .iter_mut()
+            .zip(refreshed["results"].as_array().into_iter().flatten())
+        {
+            if refresh["status"] != "updated" {
+                row["status"] = json!("unknown");
+                row["error"] = refresh["error"].clone();
+            }
+        }
+        rows
+    };
+    for package in native {
+        let request = brew::ObjectRequest {
+            action: domain::Action::Update,
+            id: package.id.clone(),
+            version: None,
+            doctor: false,
+        };
+        let row = match brew::route_object(ctx, &request, false, cli.yes, None) {
+            Ok(Some(value)) => {
+                let available = &value["results"][0]["version"];
+                let installed = &value["observed"];
+                let status = if installed["status"] == "brew-missing" {
+                    "not_installed"
+                } else if installed["version"] == *available {
+                    "current"
+                } else {
+                    "different"
+                };
+                json!({"id":package.id,"status":status,"available":available,"installed":installed})
+            }
+            Ok(None) => json!({"id":package.id,"status":"unknown"}),
+            Err(error) => json!({"id":package.id,"status":"unknown","error":error}),
+        };
+        rows.push(row);
+    }
+    Ok(rows)
+}
+
+fn scoped_packages<'a>(
+    catalog: &'a domain::Catalog,
+    key: Option<&str>,
+) -> error::Result<Vec<&'a domain::Package>> {
+    key.map_or_else(
+        || selected(catalog, None),
+        |key| Ok(vec![select_scoped(catalog, "app", key)?]),
+    )
+}
+
+fn run_application(
+    cli: &cli::Cli,
+    ctx: &context::Context,
+    catalog: &domain::Catalog,
+    project: Option<&std::path::Path>,
+    command: &cli::AppCmd,
+    chezmoi_requested: bool,
+) -> error::Result<Value> {
+    match command {
+        cli::AppCmd::Install { id, version } => {
+            object_action(cli, ctx, id, domain::Action::Install, version.as_deref())
+        }
+        cli::AppCmd::Upgrade { id, version, .. } => match id {
+            Some(id) => object_action(cli, ctx, id, domain::Action::Upgrade, version.as_deref()),
+            None => upgrade_all(cli, ctx, catalog),
+        },
+        cli::AppCmd::Uninstall { id } => {
+            object_action(cli, ctx, id, domain::Action::Uninstall, None)
+        }
+        cli::AppCmd::Adopt { .. } => run_adoption(cli, ctx),
+        cli::AppCmd::Refresh { id } => {
+            if let Some(id) = id {
+                for key in [Some(id.as_str()), scoped_retry("app", id)]
+                    .into_iter()
+                    .flatten()
+                {
+                    let request = brew::ObjectRequest {
+                        action: domain::Action::Update,
+                        id: key.to_owned(),
+                        version: None,
+                        doctor: false,
+                    };
+                    if let Some(value) =
+                        brew::route_object(ctx, &request, cli.dry_run, cli.yes, None)?
+                    {
+                        return Ok(value);
+                    }
+                }
+            }
+            if let Some(key) = id
+                && key.starts_with("application:")
+            {
+                let resolved = target::resolve(ctx, key)?;
+                if policy::uv_local::is_uv(&resolved.provider) {
+                    return updates::update(ctx, &[&resolved], cli.dry_run);
+                }
+            }
+            updates::update(ctx, &scoped_packages(catalog, id.as_deref())?, cli.dry_run)
+        }
+        cli::AppCmd::Outdated { id } => {
+            updates::outdated(ctx, &scoped_packages(catalog, id.as_deref())?)
+        }
+        cli::AppCmd::Detail(detail) => application_detail(ctx, catalog, project, &detail.target),
+        cli::AppCmd::Doctor { id } => {
+            application_doctor(cli, ctx, catalog, id.as_deref(), chezmoi_requested)
+        }
+        cli::AppCmd::Discover { manager } => discover_all(ctx, manager.as_deref()),
+        cli::AppCmd::Service { command } => service_read(ctx, command),
+        _ => Err(error::Error::new(
+            "unsupported_command",
+            "该命令没有已验证的执行接口",
+        )),
+    }
+}
+
+fn application_detail(
+    ctx: &context::Context,
+    catalog: &domain::Catalog,
+    project: Option<&std::path::Path>,
+    term: &str,
+) -> error::Result<Value> {
+    let exact = scoped_retry("app", term).unwrap_or(term);
+    if project.is_none() && !exact.starts_with("application:") {
+        let declared = inventory::declared_catalog(ctx)?;
+        if let Some(package) = declared
+            .packages
+            .iter()
+            .find(|package| package.id == term)
+            .or_else(|| declared.packages.iter().find(|package| package.id == exact))
+        {
+            return Ok(package_detail(ctx, package));
+        }
+    }
+    let snapshot = resource_inventory::snapshot(ctx, Some("applications"), project)?;
+    let detail = resource_inventory::snapshot_detail(&snapshot, "applications", term);
+    if project.is_some() || term.starts_with("application:") {
+        return detail;
+    }
+    if detail
+        .as_ref()
+        .is_err_and(|error| error.code != "not_found")
+    {
+        return detail;
+    }
+    let declared = inventory::declared_catalog(ctx)?;
+    match select_scoped(&declared, "app", term) {
+        Ok(package) => return Ok(package_detail(ctx, package)),
+        Err(error) if error.code != "not_found" => return Err(error),
+        Err(_) => (),
+    }
+    if let Ok(package) = select_scoped(catalog, "app", term)
+        && matches!(package.provider, domain::Provider::ObservedApp { .. })
+    {
+        return Ok(package_detail(ctx, package));
+    }
+    detail
+}
+
+fn package_detail(ctx: &context::Context, package: &domain::Package) -> Value {
+    json!({"package":package,"observation":inventory::observe(ctx, package)})
+}
+
+fn application_doctor(
+    cli: &cli::Cli,
+    ctx: &context::Context,
+    catalog: &domain::Catalog,
+    id: Option<&str>,
+    chezmoi_requested: bool,
+) -> error::Result<Value> {
+    if let Some(id) = id {
+        for key in [Some(id), scoped_retry("app", id)].into_iter().flatten() {
+            let request = brew::ObjectRequest {
+                action: domain::Action::Upgrade,
+                id: key.to_owned(),
+                version: None,
+                doctor: true,
+            };
+            if let Some(value) = brew::route_object(ctx, &request, cli.dry_run, cli.yes, None)? {
+                return Ok(value);
+            }
+        }
+    }
+    let packages = scoped_packages(catalog, id)?;
+    require_config_target(chezmoi_requested, &packages)?;
+    target::diagnose(ctx, &packages)
 }
 
 fn emit(value: &Value) -> std::io::Result<()> {
@@ -505,14 +1042,19 @@ fn emit(value: &Value) -> std::io::Result<()> {
 fn root_help() -> String {
     use std::fmt::Write as _;
     let mut text = String::from(concat!(
-        "本机软件、能力与配置\n\n",
-        "用法  mo [全局参数] <命令> [参数]\n\n",
-        "常用入口\n",
-        "  mo                      浏览本机清单\n",
-        "  mo adopt [名称]         纳管现有软件\n",
-        "  mo recommend <目标>     查找官方渠道\n",
-        "  mo plugins [档案]       浏览插件市场\n",
-        "  mo setup                设置推荐模型\n\n",
+        "本机软件、技能与配置\n\n",
+        "用法  mo [全局参数] <类型> [对象] [动作]\n\n",
+        "四类入口\n",
+        "  mo app [应用]         应用：安装、升级、卸载、纳管\n",
+        "  mo config [子命令]    配置：chezmoi 归属与治理\n",
+        "  mo skill [技能]       技能与插件：安装、升级、检查\n",
+        "  mo agent [子命令]     Agent CLI、档案、凭据与启动\n\n",
+        "常用动作\n",
+        "  mo <名称>             跨类型查询对象\n",
+        "  mo recommend <目标>   查找官方渠道\n",
+        "  mo app adopt [名称]   纳管现有软件\n",
+        "  mo skill market       浏览插件市场\n",
+        "  mo recover [操作号]   收口未完结操作\n\n",
         "可用命令\n",
     ));
     let command = cli::Cli::command();
@@ -543,10 +1085,93 @@ fn root_help() -> String {
     text
 }
 
+fn parse_entry(mut args: Vec<std::ffi::OsString>) -> Result<cli::Cli, clap::Error> {
+    let result = cli::Cli::try_parse_from(&args);
+    match result {
+        Ok(cli) => {
+            let Some((terms, actions)) = target_args(&cli.command) else {
+                return Ok(cli);
+            };
+            let index = args.len() - terms.len();
+            let action = terms.get(1).filter(|arg| actions.contains(&arg.as_str()));
+            if action.is_some() {
+                args.swap(index, index + 1);
+            } else {
+                args.insert(index, "__detail".into());
+            }
+            cli::Cli::try_parse_from(args)
+        }
+        Err(error) if error.kind() == clap::error::ErrorKind::InvalidSubcommand => {
+            args.insert(1, "search".into());
+            cli::Cli::try_parse_from(args).map_err(|_| error)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn target_args(command: &cli::Command) -> Option<(&[String], &'static [&'static str])> {
+    use cli::{AgentCmd, AppCmd, Command, Config, SkillCmd};
+    match command {
+        Command::App {
+            command: Some(AppCmd::Target(terms)),
+            ..
+        } => Some((
+            terms,
+            &[
+                "install",
+                "upgrade",
+                "uninstall",
+                "adopt",
+                "doctor",
+                "start",
+                "stop",
+                "refresh",
+                "outdated",
+            ],
+        )),
+        Command::Config {
+            command: Some(Config::Target(terms)),
+            ..
+        } => Some((
+            terms,
+            &[
+                "adopt",
+                "forget",
+                "source-path",
+                "status",
+                "verify",
+                "diff",
+                "apply",
+                "reconcile",
+            ],
+        )),
+        Command::Skill {
+            command: Some(SkillCmd::Target(terms)),
+            ..
+        } => Some((
+            terms,
+            &[
+                "adopt",
+                "upgrade",
+                "uninstall",
+                "doctor",
+                "sync",
+                "refresh",
+                "outdated",
+            ],
+        )),
+        Command::Agent {
+            command: Some(AgentCmd::Target(terms)),
+            ..
+        } => Some((terms, &["install", "upgrade", "launch"])),
+        _ => None,
+    }
+}
+
 pub fn main_entry() -> ExitCode {
     let mut raw: Vec<_> = std::env::args_os().collect();
     if raw.len() == 1 && browser::interactive_terminal() {
-        raw.push("list".into());
+        raw.push("app".into());
     }
     if matches!(&raw[1..], [help, advanced] if help == "help" && advanced == "advanced") {
         return if cli::Cli::command().print_long_help().is_ok() {
@@ -569,7 +1194,7 @@ pub fn main_entry() -> ExitCode {
         };
     }
     let json_output = raw.iter().any(|v| v == "--json");
-    let cli = match cli::Cli::try_parse_from(raw) {
+    let cli = match parse_entry(raw) {
         Ok(v) => v,
         Err(e) => {
             let code = if e.use_stderr() { 2 } else { 0 };
@@ -583,6 +1208,10 @@ pub fn main_entry() -> ExitCode {
             return ExitCode::from(code);
         }
     };
+    dispatch(&cli)
+}
+
+fn dispatch(cli: &cli::Cli) -> ExitCode {
     if let cli::Command::NpmObserve { npm, prefix, name } = &cli.command {
         let observed = target::probe(npm, prefix, name)
             .unwrap_or_else(|error| domain::Observation::Unknown { reason: error.code });
@@ -592,11 +1221,11 @@ pub fn main_entry() -> ExitCode {
             ExitCode::SUCCESS
         };
     }
-    if let Some(result) = browser::entry(&cli) {
+    if let Some(result) = browser::entry(cli) {
         return result;
     }
     let mut warnings = vec![];
-    let result = run(&cli, &mut warnings);
+    let result = run(cli, &mut warnings);
     if !cli.json {
         for warning in &warnings {
             eprintln!("macops: {warning}");
@@ -605,7 +1234,7 @@ pub fn main_entry() -> ExitCode {
     match result {
         Ok(data) => {
             let code = if attention(&cli.command, &data) { 3 } else { 0 };
-            if recommend::interactive(&cli) || browser::interactive_marketplaces(&cli) {
+            if recommend::interactive(cli) || browser::interactive_marketplaces(cli) {
                 return ExitCode::from(code);
             }
             let data = policy::brew::public_value(&data);
@@ -614,7 +1243,12 @@ pub fn main_entry() -> ExitCode {
                 emit(&value)
             } else {
                 let text = match cli.command {
-                    cli::Command::Plugins { .. } => plugin_marketplaces::human(&data),
+                    cli::Command::Skill {
+                        project: _,
+                        details: _,
+                        only: _,
+                        command: Some(cli::SkillCmd::Market { .. }),
+                    } => plugin_marketplaces::human(&data),
                     _ => output::human(&data),
                 };
                 std::io::stdout().lock().write_all(text.as_bytes())
@@ -648,16 +1282,31 @@ fn choose_adoption(
         && !cli.yes
         && browser::interactive_terminal();
     let name = if let Some(target) = policy::cli::adopt_target(&cli.command) {
-        match target::resolve_adoption(ctx, target, cli.dry_run) {
+        let selected = target::resolve_adoption(ctx, target, cli.dry_run).or_else(|error| {
+            if error.code != "not_found" {
+                return Err(error);
+            }
+            scoped_retry("app", target.key).map_or(Err(error), |key| {
+                target::resolve_adoption(
+                    ctx,
+                    cli::AdoptTarget {
+                        key,
+                        exact: target.exact,
+                    },
+                    cli.dry_run,
+                )
+            })
+        });
+        match selected {
             Ok(package) => return Ok(Some(package)),
             Err(mut error) if error.code == "ambiguous" && !target.exact => {
                 if !interactive {
                     error
                         .message
-                        .push_str("。请用 mo adopt --id <ID> 指定，或在 mo apps 中选中目标");
+                        .push_str("。请用 mo app adopt --id <ID> 指定，或在 mo app 中选中目标");
                     return Err(error);
                 }
-                Some(target.key)
+                Some(scoped_retry("app", target.key).unwrap_or(target.key))
             }
             Err(error) => return Err(error),
         }
@@ -666,14 +1315,14 @@ fn choose_adoption(
     } else {
         return Err(error::Error::attention(
             "adopt_target_required",
-            "请指定软件名称或使用 mo adopt --id <ID>；在终端运行 mo adopt 可选择软件",
+            "请指定软件名称或使用 mo app adopt --id <ID>；在终端运行 mo app adopt 可选择软件",
         ));
     };
     let view = browser::adoption_view(ctx, name)?;
     if name.is_some() && view.items.is_empty() {
         return Err(error::Error::attention(
             "ambiguous",
-            "同名候选已变化或不在软件清单中，请确认目标后使用 mo adopt --id <ID>",
+            "同名候选已变化或不在软件清单中，请确认目标后使用 mo app adopt --id <ID>",
         ));
     }
     let Some(id) = terminal::pick_adoption(view)? else {
@@ -702,71 +1351,6 @@ fn run_adoption(cli: &cli::Cli, ctx: &context::Context) -> error::Result<Value> 
         cli.dry_run,
         cli.yes,
     )
-}
-
-fn run_operation(
-    cli: &cli::Cli,
-    ctx: &context::Context,
-    catalog: &domain::Catalog,
-) -> error::Result<Value> {
-    match &cli.command {
-        cli::Command::Install { id, version } => operations::execute(
-            ctx,
-            operations::plan(
-                ctx,
-                &target::resolve(ctx, id)?,
-                domain::Action::Install,
-                version.as_deref(),
-                cli.dry_run,
-            )?,
-            cli.dry_run,
-            cli.yes,
-        ),
-        cli::Command::Upgrade { id, version, .. } => operations::execute(
-            ctx,
-            operations::plan(
-                ctx,
-                &target::resolve(ctx, id)?,
-                domain::Action::Upgrade,
-                version.as_deref(),
-                cli.dry_run,
-            )?,
-            cli.dry_run,
-            cli.yes,
-        ),
-        cli::Command::Uninstall { id } => operations::execute(
-            ctx,
-            operations::plan(
-                ctx,
-                &target::resolve(ctx, id)?,
-                domain::Action::Uninstall,
-                None,
-                cli.dry_run,
-            )?,
-            cli.dry_run,
-            cli.yes,
-        ),
-        cli::Command::Adopt { .. } => run_adoption(cli, ctx),
-        cli::Command::Update { id } => {
-            if let Some(key) = id
-                && key.starts_with("application:")
-            {
-                let resolved = target::resolve(ctx, key)?;
-                if policy::uv_local::is_uv(&resolved.provider) {
-                    return updates::update(ctx, &[&resolved], cli.dry_run);
-                }
-            }
-            updates::update(ctx, &selected(catalog, id.as_deref())?, cli.dry_run)
-        }
-        cli::Command::Outdated { id } => updates::outdated(ctx, &selected(catalog, id.as_deref())?),
-        cli::Command::Cleanup { id } => {
-            cache::cleanup(ctx, catalog.select(id)?, cli.dry_run, cli.yes)
-        }
-        _ => Err(error::Error::new(
-            "unsupported_command",
-            "该命令没有已验证的执行接口",
-        )),
-    }
 }
 
 use crate::policy::cli::{attention, selected};

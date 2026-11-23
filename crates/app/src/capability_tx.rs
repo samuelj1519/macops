@@ -1095,14 +1095,17 @@ pub fn write(
     dry_run: bool,
     yes: bool,
 ) -> Result<Option<Value>> {
-    use crate::cli::{Command, Policy, Skills};
-    let Command::Skills {
+    use crate::cli::{Command, Policy, SkillCmd};
+    let Command::Skill {
+        project: _,
+        details: _,
+        only: _,
         command: Some(command),
     } = command
     else {
         return Ok(None);
     };
-    if let Skills::Policy {
+    if let SkillCmd::Policy {
         command:
             Policy::Sync {
                 change_id: Some(id),
@@ -1116,11 +1119,11 @@ pub fn write(
             .map_err(|_| Error::new("invalid_change_id", "change-id 无效"))?;
     }
     let result = match command {
-        Skills::Sync(selection) => sync_links(ctx, selection, dry_run, yes)?,
-        Skills::Policy {
+        SkillCmd::Sync(selection) => sync_links(ctx, selection, dry_run, yes)?,
+        SkillCmd::Policy {
             command: Policy::Sync { change_id },
         } => sync(ctx, change_id.as_deref(), dry_run, yes)?,
-        Skills::Policy {
+        SkillCmd::Policy {
             command: Policy::Recover { change_id },
         } => recover_policy(ctx, change_id.as_deref(), dry_run, yes)?,
         _ => return Ok(None),

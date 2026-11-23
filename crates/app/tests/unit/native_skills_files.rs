@@ -113,7 +113,7 @@ fn independent_claude_profile_placements_are_protected_during_central_maintenanc
         br#"{"model":"opaque-custom"}"#,
     )?;
     fs::write(&other, b"unrelated")?;
-    let cli = Cli::try_parse_from(["macops", "--home", home.to_str().ok_or("home")?, "list"])?;
+    let cli = Cli::try_parse_from(["macops", "--home", home.to_str().ok_or("home")?, "app"])?;
     let ctx = Context::from_cli(&cli, &mut vec![])?;
     let recipe = policy::decode(&serde_json::to_vec(&serde_json::json!({
         "schemaVersion":1,"id":"alpha","owner":"skills-cli","cliVersion":"1.9.0",

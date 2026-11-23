@@ -1,6 +1,6 @@
 use crate::{
     capability_local,
-    cli::{Command, Skills},
+    cli::{Command, SkillCmd},
     context::Context,
     domain::{
         self, Action, CapabilityKind, Journal, Observation, Package, Phase, Plan, Provider,
@@ -1364,6 +1364,7 @@ fn compatibility_keys(
         recipe.install_name.clone(),
         format!("skill:{}", recipe.install_name),
         format!("asset:{}", recipe.id),
+        format!("skill:{}", recipe.source.repository.to_ascii_lowercase()),
     ]);
     keys.insert(policy::installation_id(&crate::paths::read_path(
         &disk::payload(ctx, &recipe.install_name)?,
@@ -1401,6 +1402,8 @@ fn select_registered(
     book: Book,
     rows: &BTreeMap<String, Value>,
 ) -> Result<Recipe> {
+    let normalized = repository_selector(key);
+    let key = normalized.as_deref().unwrap_or(key);
     let mut found = vec![];
     for recipe in book.recipes {
         if compatibility_keys(ctx, &recipe, rows.get(&recipe.install_name))?.contains(key) {
@@ -1502,6 +1505,12 @@ fn source_aliases(ctx: &Context) -> Result<BTreeMap<String, String>> {
             .collect()
     })
 }
+fn repository_selector(key: &str) -> Option<String> {
+    let source = key.strip_prefix("skill:")?;
+    let repository = crate::policy::source_git::Repository::parse(source).ok()?;
+    Some(format!("skill:{}", repository.key()))
+}
+
 fn normalize_selection(
     ctx: &Context,
     book: &Book,
@@ -1510,6 +1519,9 @@ fn normalize_selection(
 ) -> Result<()> {
     if let crate::policy::delivery::Selection::Explicit(keys) = &mut request.selection {
         for key in keys {
+            if let Some(normalized) = repository_selector(key) {
+                *key = normalized;
+            }
             if key.starts_with("capability:") || key.starts_with("asset:") {
                 let mut matched = vec![];
                 for recipe in &book.recipes {
@@ -1585,6 +1597,7 @@ fn selected_recipes(ctx: &Context, selection: &crate::cli::SkillSelection) -> Re
             aliases: std::collections::BTreeSet::from([
                 recipe.id.clone(),
                 format!("skill:{}", recipe.install_name),
+                format!("skill:{key}"),
             ]),
         });
         let group = groups.entry(key.clone()).or_insert_with(|| SourceGroup {
@@ -1629,22 +1642,31 @@ fn explicit_recipe(
 ) -> Result<Option<Value>> {
     if !matches!(
         command,
-        Command::Skills {
-            command: Some(Skills::Install { .. } | Skills::Adopt { .. })
+        Command::Skill {
+            project: _,
+            details: _,
+            only: _,
+            command: Some(SkillCmd::Install { .. } | SkillCmd::Adopt { .. })
         }
     ) {
         return Ok(None);
     }
     native_config_scope(ctx)?;
     let value = match command {
-        Command::Skills {
-            command: Some(Skills::Install { recipe }),
+        Command::Skill {
+            project: _,
+            details: _,
+            only: _,
+            command: Some(SkillCmd::Install { recipe }),
         } => {
             let (recipe, fence) = read_recipe(recipe)?;
             execute(ctx, recipe, Action::Install, dry, yes, fence)?
         }
-        Command::Skills {
-            command: Some(Skills::Adopt { id, recipe }),
+        Command::Skill {
+            project: _,
+            details: _,
+            only: _,
+            command: Some(SkillCmd::Adopt { id, recipe }),
         } => {
             let (recipe, fence) = read_recipe(recipe)?;
             let expected = policy::installation_id(&crate::paths::read_path(&disk::payload(
@@ -1654,6 +1676,9 @@ fn explicit_recipe(
             if id != &expected
                 && id != &recipe.install_name
                 && id != &format!("skill:{}", recipe.install_name)
+                && !repository_selector(id).is_some_and(|key| {
+                    key == format!("skill:{}", recipe.source.repository.to_ascii_lowercase())
+                })
             {
                 return Err(invalid());
             }
@@ -1758,25 +1783,24 @@ pub fn run(ctx: &Context, command: &Command, dry: bool, yes: bool) -> Result<Opt
         return Ok(Some(value));
     }
     let value = match command {
-        Command::Skills {
-            command: Some(Skills::Info { id }),
-        } => native_info(
-            ctx,
-            &if id.contains(':') {
-                id.clone()
+        Command::Skill {
+            project: None,
+            command: Some(SkillCmd::Detail(detail)),
+            ..
+        } => {
+            let term = &detail.target;
+            let key = if term.contains(':') {
+                term.clone()
             } else {
-                format!("skill:{id}")
-            },
-        )?
-        .ok_or_else(required)?,
-        Command::Info { id, project: None } => {
-            let Some(value) = native_info(ctx, id)? else {
-                return Ok(None);
+                format!("skill:{term}")
             };
-            value
+            return native_info(ctx, &key);
         }
-        Command::Skills {
-            command: Some(Skills::Remove { id }),
+        Command::Skill {
+            project: _,
+            details: _,
+            only: _,
+            command: Some(SkillCmd::Remove { id }),
         } => execute(
             ctx,
             select(ctx, id)?,
@@ -1785,65 +1809,73 @@ pub fn run(ctx: &Context, command: &Command, dry: bool, yes: bool) -> Result<Opt
             yes,
             InputFence::default(),
         )?,
-        Command::Skills {
-            command: Some(Skills::Upgrade(selection)),
+        Command::Skill {
+            project: _,
+            details: _,
+            only: _,
+            command: Some(SkillCmd::Upgrade(selection)),
         } => upgrade(ctx, selection, dry, yes)?,
-        Command::Skills {
-            command: Some(Skills::Update(selection)),
+        Command::Skill {
+            project: _,
+            details: _,
+            only: _,
+            command: Some(SkillCmd::Refresh(selection)),
         } => refresh(ctx, selection, dry)?,
-        Command::Skills {
-            command: Some(Skills::Outdated { name, only }),
+        Command::Skill {
+            project: _,
+            details: _,
+            only: _,
+            command: Some(SkillCmd::Outdated { name, only }),
         } => outdated(ctx, name.as_deref(), only)?,
-        Command::Adopt {
-            target: Some(id), ..
-        }
-        | Command::Adopt { id: Some(id), .. }
-        | Command::Upgrade { id, .. }
-        | Command::Uninstall { id } => {
-            let exact = matches!(command, Command::Adopt { id: Some(_), .. });
-            let native = crate::capability_local::resolve_package(ctx, id, false, exact)?;
-            if !native.as_ref().is_some_and(|p| {
-                matches!(
-                    p.provider,
-                    Provider::CapabilityObserved {
-                        capability: CapabilityKind::SkillsCli,
-                        ..
-                    }
-                )
-            }) {
-                return Ok(None);
-            }
-            native_config_scope(ctx)?;
-            if let Command::Upgrade { version, .. } = command {
-                let package = native.as_ref().ok_or_else(invalid)?;
-                let id = capability_local::canonical_identity(package)?;
-                let selection = crate::cli::SkillSelection {
-                    name: Some(id),
-                    revision: version.clone(),
-                    only: vec![],
-                    all: false,
-                    change_id: None,
-                };
-                return Ok(Some(upgrade(ctx, &selection, dry, yes)?));
-            }
-            let action = match command {
-                Command::Adopt { .. } => Action::Adopt,
-                Command::Upgrade { .. } => Action::Upgrade,
-                _ => Action::Uninstall,
-            };
-            execute(
-                ctx,
-                select(ctx, id)?,
-                action,
-                dry,
-                yes,
-                InputFence::default(),
-            )?
-        }
         _ => return Ok(None),
     };
     Ok(Some(value))
 }
+
+pub fn app_scoped(
+    ctx: &Context,
+    key: &str,
+    exact: bool,
+    version: Option<&str>,
+    action: Action,
+    dry: bool,
+    yes: bool,
+) -> Result<Option<Value>> {
+    let Some(package) = crate::capability_local::resolve_package(ctx, key, false, exact)? else {
+        return Ok(None);
+    };
+    if !matches!(
+        package.provider,
+        Provider::CapabilityObserved {
+            capability: CapabilityKind::SkillsCli,
+            ..
+        }
+    ) {
+        return Ok(None);
+    }
+    native_config_scope(ctx)?;
+    if action == Action::Upgrade {
+        let identity = capability_local::canonical_identity(&package)?;
+        let selection = crate::cli::SkillSelection {
+            name: Some(identity),
+            revision: version.map(str::to_owned),
+            only: vec![],
+            all: false,
+            change_id: None,
+        };
+        return Ok(Some(upgrade(ctx, &selection, dry, yes)?));
+    }
+    execute(
+        ctx,
+        select(ctx, key)?,
+        action,
+        dry,
+        yes,
+        InputFence::default(),
+    )
+    .map(Some)
+}
+
 pub fn catalog_summary(ctx: &Context) -> Result<Value> {
     let (_, book) = load_book(ctx)?;
     let rows = policy::registry(disk::regular(&disk::lock_path(ctx))?.as_deref())?;
@@ -1862,7 +1894,7 @@ pub fn catalog_summary(ctx: &Context) -> Result<Value> {
         json!({"maintainable_scope":"native-skills-fixed-recipes","sources":sources,"persistentWrites":false}),
     )
 }
-fn native_info(ctx: &Context, key: &str) -> Result<Option<Value>> {
+pub(crate) fn native_info(ctx: &Context, key: &str) -> Result<Option<Value>> {
     let Some(package) = crate::capability_local::resolve_package(ctx, key, false, false)? else {
         return Ok(None);
     };

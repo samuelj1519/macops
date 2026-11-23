@@ -7,8 +7,8 @@ use serde_json::json;
 fn profile_configuration_and_its_recovery_accept_frozen_static_root_arguments() -> TestResult {
     use clap::Parser;
     for args in [
-        vec!["macops", "skills", "sync", "--only", "profile:mi"],
-        vec!["macops", "skills", "policy", "recover"],
+        vec!["macops", "skill", "sync", "--only", "profile:mi"],
+        vec!["macops", "skill", "policy", "recover"],
         vec!["macops", "recover", "OP-1"],
     ] {
         let cli = crate::cli::Cli::try_parse_from(args)?;
@@ -19,37 +19,46 @@ fn profile_configuration_and_its_recovery_accept_frozen_static_root_arguments() 
 
 #[test]
 fn exit_status_preserves_unknown_and_display_only_contracts() -> TestResult {
-    let doctor = Command::Doctor { id: None };
+    let doctor = Command::App {
+        project: None,
+        command: Some(AppCmd::Doctor { id: None }),
+    };
     assert!(attention(&doctor, &json!({"uncertain":true})));
     assert!(attention(
         &Command::App {
-            command: App::Info {
-                name: "demo".into()
-            }
+            project: None,
+            command: Some(AppCmd::Detail(crate::cli::Detail {
+                target: "demo".into()
+            }))
         },
         &json!({"observation":{"status":"missing"}})
     ));
     assert!(!attention(
         &Command::App {
-            command: App::Info {
-                name: "demo".into()
-            }
+            project: None,
+            command: Some(AppCmd::Detail(crate::cli::Detail {
+                target: "demo".into()
+            }))
         },
         &json!({"observation":{"status":"present"}})
     ));
     for command in [
-        Command::History { id: None },
-        Command::List {
-            kind: None,
+        Command::History { query: None },
+        Command::App {
             project: None,
+            command: None,
         },
         Command::Dirs {
             id: None,
             roots: false,
         },
-        Command::Info {
-            id: "demo".into(),
+        Command::Skill {
             project: None,
+            details: false,
+            only: vec![],
+            command: Some(SkillCmd::Detail(crate::cli::Detail {
+                target: "demo".into(),
+            })),
         },
     ] {
         assert!(!attention(&command, &json!({"status":"unknown"})));
@@ -116,19 +125,28 @@ fn credential_inventory_and_manual_routes_are_display_only_but_checks_need_atten
         },
     ] {
         assert!(!attention(
-            &Command::Credential { command },
+            &Command::Agent {
+                project: None,
+                command: Some(AgentCmd::Credential { command })
+            },
             &json!([{"status":"unknown"}])
         ));
     }
     assert!(attention(
-        &Command::Credential {
-            command: Credential::Check { profile: None }
+        &Command::Agent {
+            project: None,
+            command: Some(AgentCmd::Credential {
+                command: Credential::Check { profile: None }
+            })
         },
         &json!([{"status":"missing"}])
     ));
     assert!(!attention(
-        &Command::Credential {
-            command: Credential::Check { profile: None }
+        &Command::Agent {
+            project: None,
+            command: Some(AgentCmd::Credential {
+                command: Credential::Check { profile: None }
+            })
         },
         &json!([{"status":"present"}])
     ));
@@ -137,9 +155,9 @@ fn credential_inventory_and_manual_routes_are_display_only_but_checks_need_atten
 #[test]
 fn incomplete_inventory_is_attention_even_for_display_commands() {
     assert!(attention(
-        &Command::List {
-            kind: None,
-            project: None
+        &Command::App {
+            project: None,
+            command: None,
         },
         &json!({"incomplete":true})
     ));
@@ -147,7 +165,10 @@ fn incomplete_inventory_is_attention_even_for_display_commands() {
 
 #[test]
 fn doctor_flags_native_baseline_drift_and_unknown_comparison() {
-    let doctor = Command::Doctor { id: None };
+    let doctor = Command::App {
+        project: None,
+        command: Some(AppCmd::Doctor { id: None }),
+    };
     for comparison in ["different", "unknown"] {
         assert!(attention(
             &doctor,
@@ -161,50 +182,73 @@ fn doctor_flags_native_baseline_drift_and_unknown_comparison() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn candidate_scope_flags_cannot_be_silently_ignored_by_write_routes() -> TestResult {
     config_scope(
         &Command::Config {
+            project: None,
             command: Some(Config::List { refresh: false }),
         },
         true,
     )?;
     config_scope(
-        &Command::List {
-            kind: None,
+        &Command::App {
             project: None,
+            command: None,
         },
         true,
     )?;
     config_scope(
-        &Command::Info {
-            id: "target".into(),
+        &Command::Skill {
             project: None,
+            details: false,
+            only: vec![],
+            command: Some(SkillCmd::Detail(crate::cli::Detail {
+                target: "target".into(),
+            })),
         },
         true,
     )?;
     config_scope(
         &Command::Config {
+            project: None,
             command: Some(Config::Diff { path: None }),
         },
         true,
     )?;
     config_scope(
-        &Command::Adopt {
-            bind_recipe: false,
-            target: Some("config:demo".into()),
-            id: None,
+        &Command::App {
+            project: None,
+            command: Some(AppCmd::Adopt {
+                bind_recipe: false,
+                target: Some("config:demo".into()),
+                id: None,
+            }),
         },
         true,
     )?;
     config_scope(
-        &Command::Doctor {
-            id: Some("config:demo".into()),
+        &Command::App {
+            project: None,
+            command: Some(AppCmd::Doctor {
+                id: Some("config:demo".into()),
+            }),
         },
         true,
     )?;
-    assert!(config_scope(&Command::Doctor { id: None }, true).is_err());
+    assert!(
+        config_scope(
+            &Command::App {
+                project: None,
+                command: Some(AppCmd::Doctor { id: None })
+            },
+            true
+        )
+        .is_err()
+    );
     config_scope(
         &Command::Config {
+            project: None,
             command: Some(Config::Reconcile {
                 id: Some("codex".into()),
             }),
@@ -213,6 +257,7 @@ fn candidate_scope_flags_cannot_be_silently_ignored_by_write_routes() -> TestRes
     )?;
     config_scope(
         &Command::Config {
+            project: None,
             command: Some(Config::Apply {
                 target: "/h/.rc".into(),
             }),
@@ -220,14 +265,19 @@ fn candidate_scope_flags_cannot_be_silently_ignored_by_write_routes() -> TestRes
         true,
     )?;
     config_scope(
-        &Command::Ai {
-            command: Ai::Reconcile { tool: None },
+        &Command::Agent {
+            project: None,
+            command: Some(AgentCmd::Upgrade {
+                tool: None,
+                force_live: false,
+            }),
         },
         true,
     )?;
     assert!(
         config_scope(
             &Command::Config {
+                project: None,
                 command: Some(Config::Restore {
                     operation_id: "OP-1".into()
                 })
@@ -237,49 +287,62 @@ fn candidate_scope_flags_cannot_be_silently_ignored_by_write_routes() -> TestRes
         .is_err()
     );
     assert!(attention(
-        &Command::Doctor { id: None },
+        &doctor_of_none(),
         &json!({"reconcile_state":"drift"})
     ));
     assert!(!attention(
-        &Command::Doctor { id: None },
+        &doctor_of_none(),
         &json!({"reconcile_state":"in_sync"})
     ));
-    let install = Command::Install {
-        id: "target".into(),
-        version: None,
+    let install = Command::App {
+        project: None,
+        command: Some(AppCmd::Install {
+            id: "target".into(),
+            version: None,
+        }),
     };
     assert!(config_scope(&install, true).is_err());
     config_scope(&install, false)?;
     Ok(())
 }
 
+fn doctor_of_none() -> Command {
+    Command::App {
+        project: None,
+        command: Some(AppCmd::Doctor { id: None }),
+    }
+}
+
 #[test]
 fn ai_native_upgrade_and_compatibility_alias_honor_explicit_chezmoi_scope() -> TestResult {
     for (id, accepted) in [("ai:codex", true), ("ai:unknown", false), ("codex", false)] {
-        let command = Command::Upgrade {
-            id: id.into(),
-            version: Some("2.0.0".into()),
-            force_live: false,
+        let command = Command::App {
+            project: None,
+            command: Some(AppCmd::Upgrade {
+                id: Some(id.into()),
+                version: Some("2.0.0".into()),
+            }),
         };
         assert_eq!(config_scope(&command, true).is_ok(), accepted);
     }
     config_scope(
-        &Command::Ai {
-            command: Ai::Upgrade {
+        &Command::Agent {
+            project: None,
+            command: Some(AgentCmd::Install {
                 tool: "codex".into(),
                 version: Some("2.0.0".into()),
                 force_live: false,
-            },
+            }),
         },
         true,
     )?;
     config_scope(
-        &Command::App {
-            command: crate::cli::App::Upgrade {
-                tool: "claude".into(),
-                version: Some("2.0.0".into()),
+        &Command::Agent {
+            project: None,
+            command: Some(AgentCmd::Upgrade {
+                tool: Some("claude".into()),
                 force_live: false,
-            },
+            }),
         },
         true,
     )?;

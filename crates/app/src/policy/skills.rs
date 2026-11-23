@@ -21,8 +21,7 @@ pub fn parse_change_id(value: &str) -> std::result::Result<String, String> {
 
 pub fn matches_resource(resource: &Resource, key: &str) -> bool {
     resource.id == key
-        || resource.name == key
-        || resource.aliases.iter().any(|alias| alias == key)
+        || resource.matches_name(key)
         || matches!(&resource.data,Data::Capability {native_id,..} if native_id.split_once('@').is_some_and(|(short,_)|short==key))
 }
 

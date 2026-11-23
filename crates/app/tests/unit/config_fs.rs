@@ -86,7 +86,7 @@ fn inventory_keeps_other_known_files_when_the_absent_config_root_appears() -> Te
         "macops",
         "--home",
         home.to_str().ok_or("fixture HOME")?,
-        "list",
+        "app",
     ])?;
     let ctx = Context::from_cli(&cli, &mut vec![])?;
     let scan = || {

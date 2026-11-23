@@ -56,3 +56,57 @@ fn terminal_history_shows_typed_operations_and_limits_recovery_to_pending() -> T
     assert_eq!(unverifiable.details.len(), 4);
     Ok(())
 }
+
+#[test]
+fn browser_rows_keep_application_and_profile_resource_ids() -> TestResult {
+    use clap::Parser;
+    use std::fs;
+
+    let temp = tempfile::tempdir_in("/private/tmp")?;
+    let home = temp.path().join("home");
+    fs::create_dir(&home)?;
+    for profile in ["mi", "glm"] {
+        let path = home.join(format!(".claude-{profile}"));
+        fs::create_dir(&path)?;
+        fs::write(
+            path.join("settings.json"),
+            serde_json::to_vec(&serde_json::json!({"model":format!("fixture-{profile}")}))?,
+        )?;
+    }
+    let catalog = temp.path().join("catalog.json");
+    fs::write(
+        &catalog,
+        serde_json::to_vec(&crate::domain::Catalog {
+            schema_version: 1,
+            packages: vec![crate::test_support::package()],
+        })?,
+    )?;
+    let cli = Cli::try_parse_from([
+        "mo",
+        "--home",
+        home.to_str().ok_or("home")?,
+        "--catalog",
+        catalog.to_str().ok_or("catalog")?,
+        "app",
+    ])?;
+    let ctx = Context::from_cli(&cli, &mut vec![])?;
+    for (kind, category) in [(Kind::Apps, "applications"), (Kind::Agents, "agents")] {
+        let snapshot = crate::resource_inventory::snapshot(&ctx, Some(category), None)?;
+        let (_, view) = Session::load(&ctx, kind)?;
+        assert!(!snapshot.resources.is_empty());
+        for resource in &snapshot.resources {
+            let item = view
+                .items
+                .iter()
+                .find(|item| item.id == resource.id)
+                .ok_or("ID missing in browser")?;
+            assert_eq!(item.name, resource.name);
+            if let crate::resource::Data::Agent { model, profile, .. } = &resource.data {
+                let expected = format!("fixture-{profile}");
+                assert_eq!(model.selected.as_deref(), Some(expected.as_str()));
+                assert!(item.details.contains(&format!("模型 {expected}")));
+            }
+        }
+    }
+    Ok(())
+}

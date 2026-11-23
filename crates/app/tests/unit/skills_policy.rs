@@ -27,6 +27,7 @@ fn selectors_match_exact_ids_aliases_and_plugin_groups_without_matching_other_ki
             delivery_kind: "plugin".into(),
             native_id: "pstack@market".into(),
             origin: Origin {
+                repository: None,
                 manager: "claude-plugin".into(),
                 label: None,
                 record: "/home/registry".into(),

@@ -82,7 +82,7 @@ pub fn plan(
             query: None,
             recipe_sha256: fingerprint(package)?,
             warnings: vec![
-                "目标尚未解析；预演不联网。先 update 或提供 --version，才能显示完整执行命令".into(),
+                "目标尚未解析；预演不联网。先运行 mo app refresh 或提供 --version，才能显示完整执行命令".into(),
             ],
             synchronous: providers::synchronous(package),
             delegated: false,
@@ -492,10 +492,36 @@ impl RecoveryPreview {
     }
 }
 
+pub(crate) fn pending_recovery(ctx: &Context) -> Result<(Vec<Journal>, bool)> {
+    let mut records = store::history(ctx)?;
+    if let Some(active) = store::active(ctx)? {
+        records.retain(|record| record.id != active.id);
+        records.push(active);
+        records.sort_by(|left, right| left.id.cmp(&right.id));
+    }
+    let (claude, mut incomplete) = crate::claude_install::awaiting_followup(ctx, &records)
+        .unwrap_or_else(|_| (std::collections::BTreeSet::new(), true));
+    records.retain(|journal| {
+        if claude.contains(&journal.id) {
+            return true;
+        }
+        if let Ok(pending) = recoverable(ctx, journal) {
+            pending
+        } else {
+            incomplete = true;
+            false
+        }
+    });
+    Ok((records, incomplete))
+}
+
+fn recoverable(ctx: &Context, journal: &Journal) -> Result<bool> {
+    Ok(crate::policy::state::pending(journal.phase)
+        || crate::codex_install::awaiting_publication(ctx, journal)?)
+}
+
 fn require_recoverable_from_history(ctx: &Context, journal: &Journal) -> Result<()> {
-    if crate::policy::state::pending(journal.phase)
-        || crate::codex_install::awaiting_publication(ctx, journal)?
-    {
+    if recoverable(ctx, journal)? {
         Ok(())
     } else {
         Err(Error::attention(
@@ -799,13 +825,10 @@ fn checked_query(query: &QuerySpec) -> bool {
 mod worker_tests;
 
 fn requested_journal(ctx: &Context, id: &str) -> Result<Journal> {
-    let active = ctx.state.join("active.json");
-    if paths::read_path(&active)?.exists() {
-        let journal: Journal = paths::regular_json(&active)?;
-        store::validate_journal(&journal)?;
-        if journal.id == id {
-            return Ok(journal);
-        }
+    if let Some(journal) = store::active(ctx)?
+        && journal.id == id
+    {
+        return Ok(journal);
     }
     paths::regular_json(&ctx.state.join("operations").join(format!("{id}.json")))
 }

@@ -111,7 +111,7 @@ pub(super) fn fixture_context() -> Result<(tempfile::TempDir, Context)> {
     let temporary = tempfile::tempdir_in("/private/tmp")?;
     let home = temporary.path().join("home");
     fs::create_dir(&home)?;
-    let cli = crate::cli::Cli::try_parse_from(["macops", "--home", &text(&home)?, "list"])
+    let cli = crate::cli::Cli::try_parse_from(["macops", "--home", &text(&home)?, "app"])
         .map_err(|_| stale())?;
     let context = Context::from_cli(&cli, &mut Vec::new())?;
     Ok((temporary, context))
@@ -274,6 +274,14 @@ fn fixture_first_install_publishes_one_discoverable_receipt_and_recovers_publica
     Store::atomic(&store.root, "active.json", &native)?;
     assert_eq!(managed_profiles(&ctx)?, []);
     assert!(awaiting_publication(&ctx, &native)?);
+    let active_before = fs::read(ctx.state.join("active.json"))?;
+    let (pending, incomplete) = crate::operations::pending_recovery(&ctx)?;
+    assert!(!incomplete);
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].id, native_id);
+    assert_eq!(pending[0].phase, Phase::Succeeded);
+    assert_eq!(fs::read(ctx.state.join("active.json"))?, active_before);
+    assert!(!ctx.state.join("receipts.json").exists());
     let preview = crate::operations::RecoveryPreview::read(&ctx, native_id)?;
     assert_eq!(preview.journal.id, native_id);
     let restored = recover_using(&ctx, &store, &mut native, false, false, &FIXTURE)?;

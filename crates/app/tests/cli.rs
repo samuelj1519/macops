@@ -48,7 +48,7 @@ fn native_skill_fixture(f: &Fixture, names: &[&str]) -> TestResult {
 }
 
 #[test]
-fn bare_skills_json_reuses_only_skill_rows_and_identifies_agent_deployments() -> TestResult {
+fn skill_inventory_and_browser_identify_agent_deployments() -> TestResult {
     let f = Fixture::new()?;
     native_skill_fixture(&f, &["fixture-skill"])?;
     fs::create_dir_all(f.home.join(".codex/skills"))?;
@@ -60,7 +60,7 @@ fn bare_skills_json_reuses_only_skill_rows_and_identifies_agent_deployments() ->
         f.home.join(".codex/config.toml"),
         "[mcp_servers.fixture]\ncommand = 'demo'\n",
     )?;
-    let (_, legacy) = f.run(&["skills", "list", "--details"])?;
+    let (_, legacy) = f.run(&["skill", "resources"])?;
     assert!(
         legacy["data"]["resources"]
             .as_array()
@@ -68,14 +68,28 @@ fn bare_skills_json_reuses_only_skill_rows_and_identifies_agent_deployments() ->
             .iter()
             .any(|row| row["delivery_kind"] == "mcp")
     );
-    let (original, value) = f.run(&["skills"])?;
+    let (original, value) = f.run(&["skill"])?;
     assert_code(&original, 0);
-    let rows = value["data"]["items"].as_array().ok_or("items")?;
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0]["name"], "fixture-skill");
-    assert_eq!(rows[0]["agents"], json!(["codex:default"]));
-    assert_eq!(rows[0]["loaded"], serde_json::Value::Null);
-    chezmoi_native::run_browser_pty(&f, &["skills"], "skill", &f.home, "72", "0")?;
+    let rows = value["data"]["resources"].as_array().ok_or("resources")?;
+    let skills: Vec<_> = rows
+        .iter()
+        .filter(|row| row["delivery_kind"] == "skill")
+        .collect();
+    assert_eq!(skills.len(), 1);
+    assert_eq!(skills[0]["name"], "fixture-skill");
+    assert_eq!(
+        skills[0]["deployments"]
+            .as_array()
+            .ok_or("deployments")?
+            .len(),
+        1
+    );
+    assert_eq!(
+        skills[0]["deployments"][0]["path"],
+        json!(f.home.join(".agents/skills/fixture-skill"))
+    );
+    assert!(skills[0]["loaded"].is_null());
+    chezmoi_native::run_browser_pty(&f, &["skill"], "skill", &f.home, "72", "0")?;
     assert!(!f.file("state").exists());
     Ok(())
 }
@@ -105,43 +119,25 @@ fn skill_browser_shows_installed_locations_and_shared_profile_visibility() -> Te
     for root in [".claude-glm", ".cursor"] {
         fs::create_dir(f.home.join(root))?;
     }
-    let (out, v) = f.run(&["skills"])?;
+    let (out, v) = f.run(&["skill"])?;
     assert_code(&out, 0);
-    let rows = v["data"]["items"].as_array().ok_or("items")?;
-    let row = |name: &str| {
-        rows.iter()
-            .find(|row| row["name"] == name)
-            .ok_or("missing skill")
-    };
-    let shared = row("fixture-skill")?;
+    let rows = v["data"]["resources"].as_array().ok_or("resources")?;
+    let shared = rows
+        .iter()
+        .find(|row| row["name"] == "fixture-skill")
+        .ok_or("shared skill")?;
     assert_eq!(
-        shared["agents"],
-        json!(["claude:mi", "codex:default", "cursor:default"])
+        shared["contents"][0]["path"],
+        json!(f.home.join(".agents/skills/fixture-skill"))
     );
-    let details = shared["details"].as_array().ok_or("details")?;
-    for (label, path) in [
-        ("载荷 在磁盘上", ".agents/skills/fixture-skill"),
-        (
-            "可发现 claude:mi · 档案目录",
-            ".claude-mi/skills/fixture-skill",
-        ),
-        (
-            "可发现 cursor:default · 共享目录",
-            ".agents/skills/fixture-skill",
-        ),
-    ] {
-        assert!(
-            details.contains(&json!(format!("{label} · {}", f.home.join(path).display()))),
-            "{details:?}"
-        );
-    }
     assert!(shared["loaded"].is_null());
-    assert_eq!(
-        row("claude-import")?["agents"],
-        json!(["claude:default", "cursor:default"])
-    );
-    assert_eq!(row("codex-import")?["agents"], json!(["cursor:default"]));
-    chezmoi_native::run_browser_pty(&f, &["skills"], "skill-visibility", &f.home, "95", "0")?;
+    for scenario in [
+        "skill-visibility",
+        "skill-claude-import",
+        "skill-codex-import",
+    ] {
+        chezmoi_native::run_browser_pty(&f, &["skill"], scenario, &f.home, "140", "0")?;
+    }
     assert!(!f.file("state").exists());
     Ok(())
 }
@@ -169,7 +165,7 @@ fn capability_browser_shows_native_plugin_configuration_per_profile() -> TestRes
         )?;
         chezmoi_native::run_browser_pty(
             &f,
-            &["list"],
+            &["app"],
             "plugin-visibility",
             std::path::Path::new(&format!("claude:{profile} {label}")),
             "95",
@@ -187,14 +183,17 @@ fn skill_browser_keeps_known_rows_when_cursor_compatibility_root_is_invalid() ->
     fs::create_dir(f.home.join(".cursor"))?;
     fs::create_dir(f.home.join(".codex"))?;
     fs::write(f.home.join(".codex/skills"), "this should be a directory")?;
-    let (out, v) = f.run(&["skills"])?;
+    let (out, v) = f.run(&["skill"])?;
     assert_code(&out, 3);
-    assert_eq!(v["data"]["coverage"], "partial");
-    assert_eq!(v["data"]["items"][0]["name"], "fixture-skill");
-    assert_eq!(
-        v["data"]["items"][0]["agents"],
-        json!(["codex:default", "cursor:default"])
+    assert!(
+        v["data"]["coverage"]
+            .as_array()
+            .ok_or("coverage")?
+            .iter()
+            .any(|row| row["source"] == "skill-deployments" && row["state"] == "invalid")
     );
+    assert_eq!(v["data"]["resources"][0]["name"], "fixture-skill");
+    chezmoi_native::run_browser_pty(&f, &["skill"], "skill-partial", &f.home, "140", "3")?;
     assert!(!f.file("state").exists());
     Ok(())
 }
@@ -207,39 +206,31 @@ fn browsers_share_application_identities_and_keep_claude_profiles_separate() -> 
         fs::create_dir_all(&root)?;
         write_json(&root.join("settings.json"), &json!({"model":model}))?;
     }
-    for (command, kind) in [("apps", "applications"), ("agents", "agents")] {
-        let (_, legacy) = f.run(&["list", "--kind", kind])?;
-        let (_, selected) = f.run(&[command])?;
-        let ids = |data: &serde_json::Value, field: &str| -> TestResult {
-            assert!(data["data"][field].as_array().is_some());
-            Ok(())
-        };
-        ids(&legacy, "resources")?;
-        ids(&selected, "items")?;
-        let keys = |rows: &[serde_json::Value]| {
-            rows.iter()
-                .filter_map(|row| row["id"].as_str().map(str::to_owned))
-                .collect::<std::collections::BTreeSet<_>>()
-        };
-        let legacy = legacy["data"]["resources"].as_array().ok_or("legacy")?;
-        let selected = selected["data"]["items"].as_array().ok_or("items")?;
-        assert_eq!(keys(legacy), keys(selected));
-        if kind == "agents" {
-            assert_eq!(selected.len(), 2);
-            assert!(selected.iter().any(|row| {
-                row["summary"] == "claude · mi"
-                    && row["details"]
-                        .as_array()
-                        .is_some_and(|lines| lines.contains(&json!("模型 fixture-mi-model")))
-            }));
-            assert!(selected.iter().any(|row| {
-                row["summary"] == "claude · glm"
-                    && row["details"]
-                        .as_array()
-                        .is_some_and(|lines| lines.contains(&json!("模型 fixture-glm-model")))
-            }));
-        }
+    for command in [["app", "resources"], ["agent", "resources"]] {
+        let (_, snapshot) = f.run(&command)?;
+        assert!(
+            snapshot["data"]["resources"].as_array().is_some(),
+            "{snapshot}"
+        );
     }
+    let (_, agents) = f.run(&["agent", "resources"])?;
+    let rows = agents["data"]["resources"].as_array().ok_or("agents")?;
+    assert_eq!(rows.len(), 2);
+    assert_ne!(rows[0]["id"], rows[1]["id"]);
+    assert!(rows.iter().any(|row| {
+        row["model"]["selected"] == "model-mi" || row["model"]["selected"] == "fixture-mi-model"
+    }));
+    assert!(rows.iter().any(|row| {
+        row["model"]["selected"] == "model-glm" || row["model"]["selected"] == "fixture-glm-model"
+    }));
+    let (_, items) = f.run(&["agent"])?;
+    let items = items["data"]["resources"].as_array().ok_or("items")?;
+    let keys = |rows: &[serde_json::Value]| {
+        rows.iter()
+            .filter_map(|row| row["id"].as_str().map(str::to_owned))
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    assert_eq!(keys(rows), keys(items));
     assert!(!f.file("state").exists());
     Ok(())
 }
@@ -254,9 +245,9 @@ fn skill_browser_can_show_discovered_skills_and_refuses_unrelated_config_scope()
         own.join("SKILL.md"),
         "---\nname: fixture-loose\n---\nfixture\n",
     )?;
-    chezmoi_native::run_browser_pty(&f, &["skills"], "skills-discovered", &f.home, "72", "0")?;
+    chezmoi_native::run_browser_pty(&f, &["skill"], "skills-discovered", &f.home, "72", "0")?;
     let (out, v) = f.run(&[
-        "skills",
+        "skill",
         "--chezmoi-source",
         "/private/tmp/not-a-skill-scope",
     ])?;
@@ -275,10 +266,10 @@ fn list_opens_a_unified_inventory_in_the_terminal_and_keeps_structured_queries()
         loose.join("SKILL.md"),
         "---\nname: fixture-loose\n---\nbody\n",
     )?;
-    let (out, json) = f.run(&["list"])?;
+    let (out, json) = f.run(&["app", "resources"])?;
     assert_code(&out, 0);
     assert!(json["data"]["resources"].is_array(), "{json}");
-    chezmoi_native::run_browser_pty(&f, &["list"], "unified-list", &f.home, "100", "0")?;
+    chezmoi_native::run_browser_pty(&f, &["app"], "unified-list", &f.home, "100", "0")?;
     assert!(!f.file("state").exists());
     Ok(())
 }
@@ -305,7 +296,7 @@ uninstall)
 *) printf 'unexpected' >> "$MACOPS_TEST_HOME/native-called"; exit 8 ;;
 esac"#,
     )?;
-    let (_, registry) = f.run(&["list", "--kind", "applications"])?;
+    let (_, registry) = f.run(&["app", "resources"])?;
     let items = registry["data"]["resources"]
         .as_array()
         .ok_or("resources")?;
@@ -317,27 +308,28 @@ esac"#,
     let source = f.home.to_str().ok_or("source")?;
     chezmoi_native::run_browser_pty(
         &f,
-        &["list", "--chezmoi-source", source],
+        &["app", "--chezmoi-source", source],
         "inventory-reject-scope",
         name,
         "110",
         "0",
     )?;
     assert!(!f.file("state").exists());
-    chezmoi_native::run_browser_pty(&f, &["list"], "inventory-adopt-cancel", name, "110", "0")?;
+    chezmoi_native::run_browser_pty(&f, &["app"], "inventory-adopt-cancel", name, "110", "0")?;
     assert!(!f.file("state").exists());
-    chezmoi_native::run_browser_pty(&f, &["list"], "inventory-adopt", name, "110", "0")?;
+    chezmoi_native::run_browser_pty(&f, &["app"], "inventory-adopt", name, "110", "0")?;
     assert!(f.read_json("state/receipts.json")?["installations"]["npm:scoped-demo"].is_object());
     assert_eq!(fs::read(&path)?, original);
-    chezmoi_native::run_browser_pty(&f, &["list"], "inventory-upgrade-cancel", name, "110", "0")?;
+    chezmoi_native::run_browser_pty(&f, &["app"], "inventory-upgrade-cancel", name, "110", "0")?;
     assert_eq!(fs::read(&path)?, original);
-    chezmoi_native::run_browser_pty(&f, &["list"], "inventory-remove", name, "110", "0")?;
+    chezmoi_native::run_browser_pty(&f, &["app"], "inventory-remove", name, "110", "0")?;
     assert!(!path.exists());
     assert!(!f.home.join("native-called").exists());
     Ok(())
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn adopt_picker_selects_one_installation_and_exact_id_never_uses_names() -> TestResult {
     let f = Fixture::new()?;
     let left = f.home.join("picker-left");
@@ -367,31 +359,35 @@ prefix) printf '%s' "$MACOPS_TEST_HOME/picker-left" ;;
 esac"#,
     )?;
     for (args, code, error) in [
-        (vec!["adopt"], 3, "adopt_target_required"),
-        (vec!["adopt", "--yes"], 3, "adopt_target_required"),
-        (vec!["adopt", "--dry-run", "@scope/demo"], 3, "ambiguous"),
+        (vec!["app", "adopt"], 3, "adopt_target_required"),
+        (vec!["app", "adopt", "--yes"], 3, "adopt_target_required"),
         (
-            vec!["adopt", "--dry-run", "--id", "scoped-demo"],
+            vec!["app", "adopt", "--dry-run", "@scope/demo"],
+            3,
+            "ambiguous",
+        ),
+        (
+            vec!["app", "adopt", "--dry-run", "--id", "scoped-demo"],
             3,
             "not_found",
         ),
         (
-            vec!["adopt", "@scope/demo", "--id", "npm:other-scope"],
+            vec!["app", "adopt", "@scope/demo", "--id", "npm:other-scope"],
             2,
             "usage",
         ),
-        (vec!["adopt", "--bind-recipe"], 2, "usage"),
+        (vec!["app", "adopt", "--bind-recipe"], 2, "usage"),
     ] {
         let (out, value) = f.run(&args)?;
         assert_code(&out, code);
         assert_eq!(value["error"]["code"], error, "{value}");
         assert!(!f.file("state/receipts.json").exists());
     }
-    let (out, value) = f.run(&["adopt", "--dry-run", "--id", "npm:other-scope"])?;
+    let (out, value) = f.run(&["app", "adopt", "--dry-run", "--id", "npm:other-scope"])?;
     assert_code(&out, 0);
     assert_eq!(value["data"]["plan"]["package"]["id"], "npm:other-scope");
     assert_eq!(value["data"]["persistentWrites"], false);
-    let (_, listed) = f.run(&["list", "--kind", "apps"])?;
+    let (_, listed) = f.run(&["app", "resources"])?;
     let id = listed["data"]["resources"]
         .as_array()
         .ok_or("apps")?
@@ -399,14 +395,21 @@ esac"#,
         .find(|item| item["recipe_ref"] == "npm:other-scope")
         .and_then(|item| item["id"].as_str())
         .ok_or("visible id")?;
-    let (out, value) = f.run(&["adopt", "--dry-run", "--id", id])?;
+    let (out, value) = f.run(&["app", "adopt", "--dry-run", "--id", id])?;
     assert_code(&out, 0);
     assert_eq!(value["data"]["plan"]["package"]["id"], "npm:other-scope");
-    chezmoi_native::run_browser_pty(&f, &["adopt"], "adopt-picker-cancel", &right, "110", "0")?;
+    chezmoi_native::run_browser_pty(
+        &f,
+        &["app", "adopt"],
+        "adopt-picker-cancel",
+        &right,
+        "110",
+        "0",
+    )?;
     assert!(!f.file("state/receipts.json").exists());
     chezmoi_native::run_browser_pty(
         &f,
-        &["adopt", "scoped-demo"],
+        &["app", "adopt", "scoped-demo"],
         "adopt-picker-select",
         &right,
         "110",
@@ -430,7 +433,7 @@ esac"#,
     );
     chezmoi_native::run_browser_pty(
         &f,
-        &["adopt"],
+        &["app", "adopt"],
         "adopt-picker-confirmation-cancel",
         &left,
         "100",
@@ -449,7 +452,7 @@ fn adopt_picker_keeps_the_selected_inventory_identity_when_a_catalog_id_collides
     npm_manifest(&right, "@scope/demo", "2.0.0")?;
     write_authorized_npm_catalog(&f, &left, true, false)?;
     f.script("npm", "printf '%s' \"$MACOPS_TEST_HOME/picker-left\"")?;
-    let (_, listed) = f.run(&["list", "--kind", "apps"])?;
+    let (_, listed) = f.run(&["app", "resources"])?;
     let left_id = listed["data"]["resources"]
         .as_array()
         .ok_or("apps")?
@@ -469,10 +472,13 @@ fn adopt_picker_keeps_the_selected_inventory_identity_when_a_catalog_id_collides
     write_json(&f.catalog, &catalog)?;
     for (args, error) in [
         (
-            vec!["adopt", "--dry-run", "--id", left_id],
+            vec!["app", "adopt", "--dry-run", "--id", left_id],
             "adopt_id_collision",
         ),
-        (vec!["adopt", "--dry-run", "scoped-demo"], "ambiguous"),
+        (
+            vec!["app", "adopt", "--dry-run", "scoped-demo"],
+            "ambiguous",
+        ),
     ] {
         let (out, value) = f.run(&args)?;
         assert_code(&out, 3);
@@ -481,7 +487,7 @@ fn adopt_picker_keeps_the_selected_inventory_identity_when_a_catalog_id_collides
     }
     chezmoi_native::run_browser_pty(
         &f,
-        &["adopt", "scoped-demo"],
+        &["app", "adopt", "scoped-demo"],
         "adopt-picker-select",
         &left,
         "110",
@@ -509,12 +515,12 @@ fn root_help_prioritizes_daily_tasks_and_advanced_help_keeps_recovery() -> TestR
         assert!(!help.contains("--resolve-failed"), "{help}");
         assert!(!help.contains("--chezmoi-source"), "{help}");
         for item in [
-            "mo [全局参数] <命令> [参数]",
+            "mo [全局参数] <类型> [对象] [动作]",
             "mo help <命令>",
-            "apps",
-            "config",
-            "skills",
-            "discover",
+            "mo app [应用]",
+            "mo config",
+            "mo skill",
+            "mo agent",
             "recover",
             "--json",
             "--dry-run",
@@ -532,15 +538,322 @@ fn root_help_prioritizes_daily_tasks_and_advanced_help_keeps_recovery() -> TestR
         help.contains("recover") && help.contains("--chezmoi-source"),
         "{help}"
     );
-    for args in [["help", "plugins"], ["plugins", "--help"]] {
+    for args in [["help", "skill", "market"], ["skill", "market", "--help"]] {
         let output = std::process::Command::new(command).args(args).output()?;
         assert_code(&output, 0);
         let help = String::from_utf8(output.stdout)?;
         assert!(
-            help.contains("mo plugins") && help.contains("--online") && help.contains("claude:mi"),
+            help.contains("mo skill market")
+                && help.contains("--online")
+                && help.contains("claude:mi"),
             "{help}"
         );
     }
+    Ok(())
+}
+
+#[test]
+fn typed_details_and_target_first_actions_keep_global_options() -> TestResult {
+    let f = Fixture::new()?;
+    let (out, detail) = f.run(&["app", "app:demo", "--json"])?;
+    assert_code(&out, 3);
+    assert_eq!(detail["data"]["package"]["id"], "fixture:demo");
+    assert_eq!(detail["data"]["observation"]["status"], "missing");
+
+    let (out, result) = f.run(&[
+        "app",
+        "app:demo",
+        "install",
+        "--version",
+        "1.0.0",
+        "--dry-run",
+    ])?;
+    assert_code(&out, 0);
+    assert_eq!(result["data"]["plan"]["package"]["id"], "fixture:demo");
+    assert_eq!(result["data"]["plan"]["target"], "1.0.0");
+
+    let (out, invalid) = f.run(&["app", "demo", "--unknown"])?;
+    assert_code(&out, 2);
+    assert_eq!(invalid["error"]["code"], "usage");
+
+    let project = f.home.join("project");
+    fs::create_dir(&project)?;
+    let project = project.to_str().ok_or("project")?;
+    let (out, blocked) = f.run(&[
+        "app",
+        "install",
+        "demo",
+        "--version",
+        "1.0.0",
+        "--project",
+        project,
+    ])?;
+    assert_code(&out, 1);
+    assert_eq!(blocked["error"]["code"], "project_scope_unsupported");
+
+    let (out, explicit) = f.run(&["search", "app:demo"])?;
+    assert_code(&out, 0);
+    let (out, bare) = f.run(&["app:demo"])?;
+    assert_code(&out, 0);
+    assert_eq!(bare, explicit);
+    assert_eq!(bare["data"]["resource"]["recipe_ref"], "fixture:demo");
+
+    let (out, agent) = f.run(&["agent", "agent:codex"])?;
+    assert_code(&out, 0);
+    assert_eq!(agent["data"]["tool"]["tool"], "codex");
+    assert!(!f.file("state").exists());
+    assert!(!f.file("calls").exists());
+    Ok(())
+}
+
+#[test]
+fn project_scope_filters_all_four_resource_lists_and_rejects_other_routes() -> TestResult {
+    let f = Fixture::new()?;
+    let project = f.home.join("project");
+    fs::create_dir(&project)?;
+    let path = project.to_str().ok_or("project")?;
+    for noun in ["app", "config", "skill", "agent"] {
+        let (out, value) = f.run(&[noun, "--project", path])?;
+        assert_code(&out, 0);
+        assert_eq!(value["data"]["project"], json!(project));
+        assert!(value["data"]["resources"].is_array());
+        let (out, explicit) = f.run(&[noun, "resources", "--project", path])?;
+        assert_code(&out, 0);
+        assert_eq!(value, explicit);
+    }
+    for (noun, action) in [
+        ("app", "upgrade"),
+        ("config", "enroll"),
+        ("skill", "market"),
+        ("agent", "upgrade"),
+    ] {
+        let (out, value) = f.run(&[noun, action, "--project", path])?;
+        assert_code(&out, 1);
+        assert_eq!(value["error"]["code"], "project_scope_unsupported");
+    }
+    assert!(!f.file("state").exists());
+    Ok(())
+}
+
+#[test]
+fn app_upgrade_refreshes_then_updates_only_eligible_installed_apps() -> TestResult {
+    let f = Fixture::new()?;
+    let mut catalog = f.read_json("catalog.json")?;
+    let mut missing = catalog["packages"][0].clone();
+    missing["id"] = json!("fixture:other");
+    missing["name"] = json!("other");
+    missing["provider"]["query"]["args"][1] = json!(f.file("missing-version"));
+    catalog["packages"]
+        .as_array_mut()
+        .ok_or("packages")?
+        .push(missing);
+    write_json(&f.catalog, &catalog)?;
+
+    let (out, preview) = f.run(&["app", "upgrade", "--dry-run"])?;
+    assert_code(&out, 0);
+    assert_eq!(preview["data"]["mode"], "dry-run");
+    assert!(!f.file("state").exists());
+    assert!(!f.file("cache").exists());
+
+    let (out, _) = f.run(&["app", "install", "demo", "--version", "1.0.0"])?;
+    assert_code(&out, 0);
+    let (out, updated) = f.run(&["app", "upgrade", "--yes"])?;
+    assert_code(&out, 0);
+    assert_eq!(updated["data"]["results"][0]["status"], "upgraded");
+    assert_eq!(updated["data"]["results"][1]["status"], "not_installed");
+    assert_eq!(fs::read_to_string(f.file("version"))?, "2.0.0");
+    assert_eq!(fs::read_to_string(f.file("calls"))?, "install\nupgrade\n");
+    assert!(f.current_index()?.exists());
+    assert!(!f.file("missing-version").exists());
+    Ok(())
+}
+
+#[test]
+fn app_upgrade_respects_explicit_version_requirement_in_batch_mode() -> TestResult {
+    let f = Fixture::new()?;
+    let mut catalog = f.read_json("catalog.json")?;
+    catalog["packages"][0]["exact_version_required"] = json!(true);
+    write_json(&f.catalog, &catalog)?;
+    assert_code(
+        &f.run(&["app", "install", "demo", "--version", "1.0.0"])?.0,
+        0,
+    );
+    let (out, result) = f.run(&["app", "upgrade", "--yes"])?;
+    assert_code(&out, 0);
+    assert_eq!(
+        result["data"]["results"][0]["status"],
+        "explicit_version_required"
+    );
+    assert_eq!(fs::read_to_string(f.file("version"))?, "1.0.0");
+    assert_eq!(fs::read_to_string(f.file("calls"))?, "install\n");
+    Ok(())
+}
+
+#[test]
+fn app_upgrade_does_not_reuse_a_stale_version_when_refresh_fails() -> TestResult {
+    let f = Fixture::new()?;
+    let available = f.script(
+        "available",
+        r#"[ ! -f "$MACOPS_TEST_HOME/fail-refresh" ] || exit 7
+printf '{"version":"2.0.0"}\n'"#,
+    )?;
+    let mut catalog = f.read_json("catalog.json")?;
+    catalog["packages"][0]["provider"]["available"] = json!({"program":available,"args":[]});
+    write_json(&f.catalog, &catalog)?;
+    assert_code(
+        &f.run(&["app", "install", "demo", "--version", "1.0.0"])?.0,
+        0,
+    );
+    assert_code(&f.run(&["app", "refresh", "demo"])?.0, 0);
+    fs::write(f.home.join("fail-refresh"), "")?;
+    let (out, result) = f.run(&["app", "upgrade", "--yes"])?;
+    assert_code(&out, 3);
+    assert_eq!(result["data"]["results"][0]["status"], "unknown");
+    assert!(result["data"]["results"][0]["error"]["code"].is_string());
+    assert_eq!(fs::read_to_string(f.file("version"))?, "1.0.0");
+    assert_eq!(fs::read_to_string(f.file("calls"))?, "install\n");
+    Ok(())
+}
+
+#[test]
+fn batch_upgrade_stops_after_an_unknown_original_operation() -> TestResult {
+    let f = Fixture::new()?;
+    let mut catalog = f.read_json("catalog.json")?;
+    let mut other = catalog["packages"][0].clone();
+    other["id"] = json!("fixture:other");
+    other["name"] = json!("other");
+    for operation in ["query", "install", "upgrade", "uninstall"] {
+        other["provider"][operation]["args"][1] = json!(f.file("other-version"));
+        if operation != "query" {
+            other["provider"][operation]["args"][2] = json!(f.file("other-calls"));
+        }
+    }
+    catalog["packages"]
+        .as_array_mut()
+        .ok_or("packages")?
+        .push(other);
+    catalog["packages"][0]["provider"]["upgrade"]["program"] = json!(f.script(
+        "fail-upgrade",
+        r#"printf attempted > "$MACOPS_TEST_HOME/upgrade-attempt"; exit 8"#,
+    )?);
+    write_json(&f.catalog, &catalog)?;
+    for name in ["demo", "other"] {
+        assert_code(
+            &f.run(&["app", "install", name, "--version", "1.0.0"])?.0,
+            0,
+        );
+    }
+
+    let (out, result) = f.run(&["app", "upgrade", "--yes"])?;
+    assert_code(&out, 3);
+    let rows = result["data"]["results"].as_array().ok_or("results")?;
+    assert_eq!(rows[0]["status"], "unknown");
+    assert_eq!(rows[0]["operation"]["phase"], "unknown");
+    assert_eq!(rows[1]["id"], "fixture:other");
+    assert!(f.home.join("upgrade-attempt").exists());
+    assert_eq!(fs::read_to_string(f.file("other-version"))?, "1.0.0");
+    assert_eq!(fs::read_to_string(f.file("other-calls"))?, "install\n");
+
+    let (out, recovery) = f.run(&["recover"])?;
+    assert_code(&out, 0);
+    assert_eq!(
+        recovery["data"]["pending"][0]["id"],
+        rows[0]["operation"]["id"]
+    );
+    assert_eq!(recovery["data"]["persistentWrites"], false);
+    Ok(())
+}
+
+#[test]
+fn search_preserves_same_name_matches_across_types() -> TestResult {
+    let f = Fixture::new()?;
+    native_skill_fixture(&f, &["demo"])?;
+    let (out, result) = f.run(&["demo"])?;
+    assert_code(&out, 0);
+    let rows = result["data"]["candidates"]
+        .as_array()
+        .ok_or("candidates")?;
+    assert_eq!(rows.len(), 2, "{result}");
+    for (qualifier, category) in [("app:demo", "applications"), ("skill:demo", "capabilities")] {
+        let expected = rows
+            .iter()
+            .find(|row| row["category"] == category)
+            .ok_or("category")?;
+        let (out, detail) = f.run(&["search", qualifier])?;
+        assert_code(&out, 0);
+        assert_eq!(detail["data"]["resource"]["id"], expected["id"]);
+    }
+    let (out, missing) = f.run(&["search", "config:missing"])?;
+    assert_code(&out, 3);
+    assert_eq!(missing["error"]["code"], "not_found");
+    let (out, invalid) = f.run(&["recover", "--resolve-failed"])?;
+    assert_code(&out, 2);
+    assert_eq!(invalid["error"]["code"], "usage");
+    assert!(!f.file("state").exists());
+    Ok(())
+}
+
+#[test]
+fn app_upgrade_uses_brew_cask_native_version_resolution() -> TestResult {
+    let f = Fixture::new()?;
+    f.script("brew", r#"case "$1" in
+info) printf '{"casks":[{"token":"demo","installed":null,"version":"%s"}],"formulae":[]}\n' "$(/bin/cat "$MACOPS_TEST_HOME/latest")" ;;
+list) if [ -f "$MACOPS_TEST_HOME/version" ]; then printf 'demo %s\n' "$(/bin/cat "$MACOPS_TEST_HOME/version")"; fi ;;
+install|upgrade) /bin/cat "$MACOPS_TEST_HOME/latest" > "$MACOPS_TEST_HOME/version"; printf '%s\n' "$1" >> "$MACOPS_TEST_HOME/calls" ;;
+*) exit 8 ;;
+esac"#)?;
+    let mut catalog = f.read_json("catalog.json")?;
+    catalog["packages"][0]["kind"] = json!("app");
+    catalog["packages"][0]["provider"] = json!({"type":"brew","package":"demo","cask":true});
+    write_json(&f.catalog, &catalog)?;
+    fs::write(f.home.join("latest"), "1.0.0")?;
+    assert_code(&f.run(&["app", "install", "demo"])?.0, 0);
+    fs::write(f.home.join("latest"), "2.0.0")?;
+    let (out, result) = f.run(&["app", "upgrade", "--yes"])?;
+    assert_code(&out, 0);
+    assert_eq!(result["data"]["results"][0]["status"], "upgraded");
+    assert_eq!(fs::read_to_string(f.home.join("version"))?, "2.0.0");
+    assert_eq!(
+        fs::read_to_string(f.home.join("calls"))?,
+        "install\nupgrade\n"
+    );
+    Ok(())
+}
+
+#[test]
+fn github_skill_selectors_work_without_adding_public_aliases() -> TestResult {
+    let f = Fixture::new()?;
+    native_skill_fixture(&f, &["devnorm-kit"])?;
+    let path = f.home.join(".agents/.skill-lock.json");
+    let mut lock: serde_json::Value = serde_json::from_slice(&fs::read(&path)?)?;
+    lock["skills"]["devnorm-kit"]["source"] = json!("samuelj1519/devnorm-kit");
+    lock["skills"]["devnorm-kit"]["sourceUrl"] =
+        json!("https://github.com/samuelj1519/devnorm-kit");
+    write_json(&path, &lock)?;
+    for args in [
+        ["skill", "skill:samuelj1519/devnorm-kit"],
+        ["search", "skill:SamuelJ1519/Devnorm-Kit"],
+    ] {
+        let (out, response) = f.run(&args)?;
+        assert_code(&out, 0);
+        assert!(
+            response["data"]["package"]["name"] == "devnorm-kit"
+                || response["data"]["resource"]["name"] == "devnorm-kit"
+        );
+    }
+    let (out, doctor) = f.run(&["skill", "doctor", "skill:samuelj1519/devnorm-kit"])?;
+    assert_code(&out, 0);
+    assert_eq!(doctor["data"]["resources"][0]["name"], "devnorm-kit");
+    assert_eq!(
+        doctor["data"]["resources"][0]["origin"]["label"],
+        "https://github.com"
+    );
+    assert!(
+        !doctor["data"]["resources"][0]["aliases"]
+            .to_string()
+            .contains("samuelj1519")
+    );
+    assert!(!f.file("state").exists());
     Ok(())
 }
 
@@ -563,18 +876,32 @@ fn recommend_accepts_repository_subjects_without_a_second_argument() -> TestResu
 #[test]
 fn setup_reports_local_mode_and_cancels_without_creating_state() -> TestResult {
     let f = Fixture::new()?;
-    let (out, data) = f.run(&["setup"])?;
+    let (out, data) = f.run(&["recommend", "--setup"])?;
     assert_code(&out, 0);
     assert_eq!(data["data"]["mode"], "local", "{data}");
     let fixture = f.command();
     let noninteractive = std::process::Command::new(fixture.get_program())
         .args(fixture.get_args().filter(|arg| *arg != "--json"))
-        .arg("setup")
+        .args(["recommend", "--setup"])
         .output()?;
     assert_code(&noninteractive, 3);
     assert!(String::from_utf8(noninteractive.stderr)?.contains("model_setup_terminal_required"));
-    chezmoi_native::run_browser_pty(&f, &["setup"], "setup-cancel", &f.home, "100", "0")?;
-    chezmoi_native::run_browser_pty(&f, &["setup"], "setup-hide-key", &f.home, "100", "0")?;
+    chezmoi_native::run_browser_pty(
+        &f,
+        &["recommend", "--setup"],
+        "setup-cancel",
+        &f.home,
+        "100",
+        "0",
+    )?;
+    chezmoi_native::run_browser_pty(
+        &f,
+        &["recommend", "--setup"],
+        "setup-hide-key",
+        &f.home,
+        "100",
+        "0",
+    )?;
     assert!(!f.file("state").exists());
     assert!(!f.home.join(".config/macops/recommend-model.json").exists());
     Ok(())
@@ -594,18 +921,25 @@ fn setup_metadata_and_pty_actions_use_only_the_isolated_credential_scope() -> Te
         "account":format!("setup-{}", "a".repeat(64))
     });
     write_json(&profile_file, &profile)?;
-    let (out, response) = f.run(&["setup"])?;
+    let (out, response) = f.run(&["recommend", "--setup"])?;
     assert_code(&out, 0);
     assert_eq!(
         response["data"],
         json!({"mode":"remote","endpoint":profile["endpoint"],"model":"fixture"})
     );
-    chezmoi_native::run_browser_pty(&f, &["setup"], "setup-saved-isolated", &f.home, "100", "3")?;
+    chezmoi_native::run_browser_pty(
+        &f,
+        &["recommend", "--setup"],
+        "setup-saved-isolated",
+        &f.home,
+        "100",
+        "3",
+    )?;
     let external = f.file("external-fixture.keychain-db");
     std::fs::write(&external, b"fixture")?;
     chezmoi_native::run_browser_pty(
         &f,
-        &["setup"],
+        &["recommend", "--setup"],
         "setup-external-isolated",
         &external,
         "100",
@@ -617,7 +951,7 @@ fn setup_metadata_and_pty_actions_use_only_the_isolated_credential_scope() -> Te
     );
     profile["enabled"] = json!(false);
     write_json(&profile_file, &profile)?;
-    let (out, paused) = f.run(&["--dry-run", "setup"])?;
+    let (out, paused) = f.run(&["--dry-run", "recommend", "--setup"])?;
     assert_code(&out, 0);
     assert_eq!(paused["data"]["mode"], "local");
     assert_eq!(paused["data"]["model"], "fixture");
@@ -634,7 +968,14 @@ fn setup_masked_input_can_cancel_or_reject_isolated_network_before_publishing() 
         ("setup-key-interrupt", "0"),
         ("setup-new-isolated", "3"),
     ] {
-        chezmoi_native::run_browser_pty(&f, &["setup"], scenario, &f.home, "100", status)?;
+        chezmoi_native::run_browser_pty(
+            &f,
+            &["recommend", "--setup"],
+            scenario,
+            &f.home,
+            "100",
+            status,
+        )?;
         assert!(!f.file("state").exists());
         assert!(!f.home.join(".config/macops").exists());
     }
@@ -658,13 +999,27 @@ fn setup_pauses_saved_profile_and_recovery_keeps_its_identity() -> TestResult {
         "account":format!("setup-{}", "b".repeat(64))
     });
     write_json(&profile_file, &profile)?;
-    chezmoi_native::run_browser_pty(&f, &["setup"], "setup-pause-saved", &f.home, "100", "0")?;
+    chezmoi_native::run_browser_pty(
+        &f,
+        &["recommend", "--setup"],
+        "setup-pause-saved",
+        &f.home,
+        "100",
+        "0",
+    )?;
     profile["enabled"] = json!(false);
     assert_eq!(
         serde_json::from_slice::<serde_json::Value>(&std::fs::read(&profile_file)?)?,
         profile
     );
-    chezmoi_native::run_browser_pty(&f, &["setup"], "setup-recover-clean", &f.home, "100", "0")?;
+    chezmoi_native::run_browser_pty(
+        &f,
+        &["recommend", "--setup"],
+        "setup-recover-clean",
+        &f.home,
+        "100",
+        "0",
+    )?;
     assert_eq!(
         serde_json::from_slice::<serde_json::Value>(&std::fs::read(&profile_file)?)?,
         profile
@@ -802,6 +1157,7 @@ fn timeout_stays_unknown_then_recovers_using_frozen_recipe() -> TestResult {
     let (out, v) = f.run(&[
         "--timeout-secs",
         "1",
+        "app",
         "install",
         "demo",
         "--version",
@@ -810,7 +1166,7 @@ fn timeout_stays_unknown_then_recovers_using_frozen_recipe() -> TestResult {
     assert_code(&out, 3);
     assert_eq!(v["data"]["phase"], "unknown");
     assert_eq!(fs::read_to_string(f.file("calls"))?, "install\n");
-    let (out, v) = f.run(&["update", "demo"])?;
+    let (out, v) = f.run(&["app", "refresh", "demo"])?;
     assert_code(&out, 3);
     assert_eq!(v["error"]["code"], "recovery_required");
     let journal = f.read_json("state/active.json")?;
@@ -830,7 +1186,7 @@ fn killed_parent_leaves_live_group_blocking_other_writes() -> TestResult {
     slow_installer(&f)?;
     let mut parent = f
         .command()
-        .args(["install", "demo", "--version", "1.0.0"])
+        .args(["app", "install", "demo", "--version", "1.0.0"])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()?;
@@ -847,7 +1203,7 @@ fn killed_parent_leaves_live_group_blocking_other_writes() -> TestResult {
     let (out, v) = f.run(&["recover", id])?;
     assert_code(&out, 3);
     assert_eq!(v["error"]["code"], "operation_in_flight");
-    let (out, v) = f.run(&["update", "demo"])?;
+    let (out, v) = f.run(&["app", "refresh", "demo"])?;
     assert_code(&out, 3);
     assert_eq!(v["error"]["code"], "recovery_required");
     nix::sys::signal::killpg(
@@ -877,7 +1233,7 @@ fn valid_worker_journal_without_gate_never_executes() -> TestResult {
         process::{Command, Stdio},
     };
     let f = Fixture::new()?;
-    let (out, _) = f.run(&["install", "demo", "--version", "1.0.0"])?;
+    let (out, _) = f.run(&["app", "install", "demo", "--version", "1.0.0"])?;
     assert_code(&out, 0);
     let mut journal = f.read_json("state/active.json")?;
     let id = journal["id"].as_str().ok_or("id")?.to_owned();
@@ -900,7 +1256,7 @@ fn corrupt_active_journal_blocks_writes() -> TestResult {
     let f = Fixture::new()?;
     fs::create_dir_all(f.file("state"))?;
     fs::write(f.file("state/active.json"), "[]")?;
-    let (out, _) = f.run(&["install", "demo", "--version", "1.0.0"])?;
+    let (out, _) = f.run(&["app", "install", "demo", "--version", "1.0.0"])?;
     assert_code(&out, 1);
     assert!(!f.file("calls").exists());
     Ok(())
@@ -913,7 +1269,7 @@ fn nonzero_backend_and_unverified_success_do_not_create_receipt() -> TestResult 
         "demo",
         r#"case "$1" in query) printf '{"status":"missing"}\n';; install) exit 0;; esac"#,
     )?;
-    let (out, v) = f.run(&["install", "demo", "--version", "1.0.0"])?;
+    let (out, v) = f.run(&["app", "install", "demo", "--version", "1.0.0"])?;
     assert_code(&out, 3);
     assert_eq!(v["data"]["phase"], "unknown");
     assert!(!f.file("state/receipts.json").exists());
@@ -925,7 +1281,7 @@ fn nonzero_backend_and_unverified_success_do_not_create_receipt() -> TestResult 
         "demo",
         r#"case "$1" in query) printf '{"status":"missing"}\n';; install) exit 9;; esac"#,
     )?;
-    let (out, v) = f.run(&["install", "demo", "--version", "1.0.0"])?;
+    let (out, v) = f.run(&["app", "install", "demo", "--version", "1.0.0"])?;
     assert_code(&out, 3);
     assert_eq!(v["data"]["phase"], "unknown");
     assert!(!f.file("state/receipts.json").exists());
@@ -974,7 +1330,7 @@ esac"#)?;
         write_json(&f.catalog, &catalog)?;
         if manager == "brew" {
             for verb in ["adopt", "upgrade", "uninstall"] {
-                let (out, value) = f.run(&[verb, "fixture:demo", "--yes"])?;
+                let (out, value) = f.run(&["app", verb, "fixture:demo", "--yes"])?;
                 assert_code(&out, 3);
                 assert_eq!(value["error"]["code"], "brew_context_binding_required");
             }
@@ -983,21 +1339,21 @@ esac"#)?;
             continue;
         }
         if manager == "uv" {
-            let (out, value) = f.run(&["adopt", "fixture:demo", "--yes"])?;
+            let (out, value) = f.run(&["app", "adopt", "fixture:demo", "--yes"])?;
             assert_code(&out, 3);
             assert!(value.to_string().contains("legacy_uv_query_unbound"));
-            let (out, _) = f.run(&["upgrade", "fixture:demo", "--version", "2.0.0"])?;
+            let (out, _) = f.run(&["app", "upgrade", "fixture:demo", "--version", "2.0.0"])?;
             assert_code(&out, 3);
             assert_eq!(fs::read_to_string(&native_version)?, "1.0.0");
             assert!(!f.file("state/receipts.json").exists());
             continue;
         }
-        let (out, _) = f.run(&["adopt", "fixture:demo", "--yes"])?;
+        let (out, _) = f.run(&["app", "adopt", "fixture:demo", "--yes"])?;
         assert_code(&out, 0);
         let args = if manager == "brew" {
-            vec!["upgrade", "fixture:demo"]
+            vec!["app", "upgrade", "fixture:demo"]
         } else {
-            vec!["upgrade", "fixture:demo", "--version", "2.0.0"]
+            vec!["app", "upgrade", "fixture:demo", "--version", "2.0.0"]
         };
         let (out, v) = f.run(&args)?;
         assert_code(&out, 0);
@@ -1010,7 +1366,7 @@ esac"#)?;
 #[test]
 fn recover_rebuilds_missing_or_lagging_history_from_active() -> TestResult {
     let f = Fixture::new()?;
-    let (out, _) = f.run(&["install", "demo", "--version", "1.0.0"])?;
+    let (out, _) = f.run(&["app", "install", "demo", "--version", "1.0.0"])?;
     assert_code(&out, 0);
     let mut journal = f.read_json("state/active.json")?;
     let id = journal["id"].as_str().ok_or("id")?.to_owned();
@@ -1018,13 +1374,20 @@ fn recover_rebuilds_missing_or_lagging_history_from_active() -> TestResult {
     journal["process_group"] = serde_json::Value::Null;
     write_json(&f.file("state/active.json"), &journal)?;
     fs::remove_file(f.file(&format!("state/operations/{id}.json")))?;
+    let original = fs::read(f.file("state/active.json"))?;
+    let (out, listing) = f.run(&["recover"])?;
+    assert_code(&out, 0);
+    assert_eq!(listing["data"]["pending"], json!([journal]));
+    assert_eq!(listing["data"]["persistentWrites"], false);
+    assert_eq!(fs::read(f.file("state/active.json"))?, original);
+    assert!(!f.file(&format!("state/operations/{id}.json")).exists());
     fs::remove_file(f.file("version"))?;
     fs::remove_file(f.file("state/receipts.json"))?;
     let (out, v) = f.run(&["recover", &id])?;
     assert_code(&out, 3);
     assert_eq!(v["data"]["phase"], "failed");
     assert!(f.file(&format!("state/operations/{id}.json")).exists());
-    let (out, _) = f.run(&["install", "demo", "--version", "1.0.0"])?;
+    let (out, _) = f.run(&["app", "install", "demo", "--version", "1.0.0"])?;
     assert_code(&out, 0);
     let mut active = f.read_json("state/active.json")?;
     let id = active["id"].as_str().ok_or("id")?.to_owned();
@@ -1046,7 +1409,7 @@ fn recover_rebuilds_missing_or_lagging_history_from_active() -> TestResult {
 fn adopt_receipt_commit_and_old_terminal_recovery_are_consistent() -> TestResult {
     let f = Fixture::new()?;
     fs::write(f.file("version"), "1.0.0")?;
-    let (out, _) = f.run(&["adopt", "demo", "--yes"])?;
+    let (out, _) = f.run(&["app", "adopt", "demo", "--yes"])?;
     assert_code(&out, 0);
     let mut journal = f.read_json("state/active.json")?;
     let id = journal["id"].as_str().ok_or("id")?.to_owned();
@@ -1056,7 +1419,7 @@ fn adopt_receipt_commit_and_old_terminal_recovery_are_consistent() -> TestResult
     let (out, v) = f.run(&["recover", &id])?;
     assert_code(&out, 0);
     assert_eq!(v["data"]["phase"], "succeeded");
-    let (out, _) = f.run(&["upgrade", "demo", "--version", "2.0.0"])?;
+    let (out, _) = f.run(&["app", "upgrade", "demo", "--version", "2.0.0"])?;
     assert_code(&out, 0);
     let latest = f.read_json("state/active.json")?;
     let (out, _) = f.run(&["recover", &id])?;
@@ -1074,7 +1437,7 @@ case "$1" in
 query) if [ -f "$2" ]; then printf '{"status":"present","version":"1.0.0"}'; else printf '{"status":"missing"}'; fi ;;
 install) printf '1.0.0' > "$2" ;;
 esac"#)?;
-    let (out, _) = f.run(&["install", "demo", "--version", "1.0.0"])?;
+    let (out, _) = f.run(&["app", "install", "demo", "--version", "1.0.0"])?;
     assert_code(&out, 0);
     assert_eq!(
         fs::read_to_string(f.home.join("observed-home"))?,
@@ -1102,9 +1465,9 @@ fn garbage_native_output_blocks_install_and_unrelated_brew_identity_is_unknown()
         };
         write_json(&f.catalog, &catalog)?;
         let args = if manager == "brew" {
-            vec!["install", "demo"]
+            vec!["app", "install", "demo"]
         } else {
-            vec!["install", "demo", "--version", "1.0.0"]
+            vec!["app", "install", "demo", "--version", "1.0.0"]
         };
         let (out, v) = f.run(&args)?;
         assert_code(&out, 3);
@@ -1130,11 +1493,11 @@ fn native_npm_absence_is_accepted_but_errors_are_not() -> TestResult {
     write_json(&f.catalog, &catalog)?;
     fs::create_dir(f.home.join("npm"))?;
     f.script("npm", "exit 98")?;
-    let (out, v) = f.run(&["doctor", "demo"])?;
+    let (out, v) = f.run(&["app", "doctor", "demo"])?;
     assert_code(&out, 3);
     assert_eq!(v["data"][0]["observation"]["status"], "missing");
     fs::create_dir_all(f.home.join("npm/lib/node_modules/demo"))?;
-    let (out, v) = f.run(&["doctor", "demo"])?;
+    let (out, v) = f.run(&["app", "doctor", "demo"])?;
     assert_code(&out, 3);
     assert_eq!(v["data"][0]["observation"]["status"], "unknown");
     Ok(())
@@ -1147,7 +1510,7 @@ fn fast_oversized_write_never_commits_receipt() -> TestResult {
 query) if [ -f "$2" ]; then printf '{"status":"present","version":"1.0.0"}'; else printf '{"status":"missing"}'; fi ;;
 install) printf 1.0.0 > "$2"; /bin/dd if=/dev/zero bs=1048576 count=5 2>/dev/null ;;
 esac"#)?;
-    let (out, v) = f.run(&["install", "demo", "--version", "1.0.0"])?;
+    let (out, v) = f.run(&["app", "install", "demo", "--version", "1.0.0"])?;
     assert_eq!(out.status.code(), Some(3));
     assert_eq!(v["data"]["phase"], "unknown");
     assert!(!f.file("state/receipts.json").exists());
@@ -1158,7 +1521,7 @@ esac"#)?;
 fn app_info_unknown_matches_doctor_exit_contract() -> TestResult {
     let f = Fixture::new()?;
     f.script("demo", "printf 'invalid-json'")?;
-    let (out, v) = f.run(&["app", "info", "demo"])?;
+    let (out, v) = f.run(&["app", "demo"])?;
     assert_code(&out, 3);
     assert_eq!(v["status"], "attention");
     assert_eq!(v["data"]["observation"]["status"], "unknown");
@@ -1177,9 +1540,9 @@ fn native_read_selection_is_preserved_without_running_the_old_backend() -> TestR
     )?;
     fs::copy(script, directory.join("mo"))?;
     for args in [
-        vec!["skills", "status", "demo"],
-        vec!["skills", "list", "--only", "demo"],
-        vec!["skills", "check", "--only", "demo"],
+        vec!["skill", "doctor", "demo"],
+        vec!["skill", "--only", "demo"],
+        vec!["skill", "doctor", "--only", "demo"],
     ] {
         let (out, value) = f.run(&args)?;
         assert_code(&out, 0);
@@ -1207,7 +1570,7 @@ fn fifo_state_is_rejected_without_waiting_for_a_writer() -> TestResult {
     );
     let mut child = f
         .command()
-        .args(["install", "demo", "--version", "1.0.0"])
+        .args(["app", "install", "demo", "--version", "1.0.0"])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()?;
@@ -1238,7 +1601,7 @@ fn native_ai_oversized_query_is_attention_not_success() -> TestResult {
         "/bin/dd if=/dev/zero bs=1048576 count=5 2>/dev/null",
     )?;
     assert!(source.is_file());
-    let (out, v) = f.run(&["ai", "list"])?;
+    let (out, v) = f.run(&["agent"])?;
     assert_eq!(out.status.code(), Some(3));
     assert_eq!(v["status"], "attention");
     assert_eq!(v["data"]["incomplete"], true);
@@ -1271,7 +1634,7 @@ uninstall)
 *) exit 8 ;;
 esac"#,
     )?;
-    let (out, v) = f.run(&["install", "demo", "--version", "1.0.0"])?;
+    let (out, v) = f.run(&["app", "install", "demo", "--version", "1.0.0"])?;
     assert_code(&out, 0);
     assert_eq!(v["data"]["phase"], "succeeded");
     assert_eq!(
@@ -1287,9 +1650,9 @@ esac"#,
         receipt["installations"]["fixture:demo"]["query"]["namespace"]["anchor"]["kind"],
         "existing-prefix"
     );
-    let (out, _) = f.run(&["upgrade", "fixture:demo", "--version", "2.0.0"])?;
+    let (out, _) = f.run(&["app", "upgrade", "fixture:demo", "--version", "2.0.0"])?;
     assert_code(&out, 0);
-    let (out, _) = f.run(&["uninstall", "fixture:demo", "--yes"])?;
+    let (out, _) = f.run(&["app", "uninstall", "fixture:demo", "--yes"])?;
     assert_code(&out, 0);
     assert_eq!(
         fs::read_to_string(f.home.join("installed"))?,
@@ -1305,14 +1668,14 @@ fn changed_scope_cannot_upgrade_a_different_installation() -> TestResult {
     let out = command
         .env("HOME", &f.home)
         .env("UV_TOOL_DIR", f.home.join("scope-a"))
-        .args(["install", "demo", "--version", "1.0.0"])
+        .args(["app", "install", "demo", "--version", "1.0.0"])
         .output()?;
     assert_code(&out, 0);
     let out = f
         .command()
         .env("HOME", &f.home)
         .env("UV_TOOL_DIR", f.home.join("scope-b"))
-        .args(["upgrade", "demo", "--version", "2.0.0"])
+        .args(["app", "upgrade", "demo", "--version", "2.0.0"])
         .output()?;
     assert_code(&out, 3);
     let value: serde_json::Value = serde_json::from_slice(&out.stdout)?;
@@ -1324,11 +1687,11 @@ fn changed_scope_cannot_upgrade_a_different_installation() -> TestResult {
 #[test]
 fn conflicting_frozen_plan_is_not_merged_as_a_history_repair() -> TestResult {
     let f = Fixture::new()?;
-    let (out, _) = f.run(&["install", "demo", "--version", "1.0.0"])?;
+    let (out, _) = f.run(&["app", "install", "demo", "--version", "1.0.0"])?;
     assert_code(&out, 0);
     let mut first = f.read_json("state/active.json")?;
     let id = first["id"].as_str().ok_or("id")?.to_owned();
-    let (out, _) = f.run(&["upgrade", "demo", "--version", "2.0.0"])?;
+    let (out, _) = f.run(&["app", "upgrade", "demo", "--version", "2.0.0"])?;
     assert_code(&out, 0);
     let mut different = f.read_json("state/active.json")?;
     first["phase"] = json!("unknown");
@@ -1348,7 +1711,7 @@ fn proxy_symlink_preserves_the_invocation_name() -> TestResult {
     let f = Fixture::new()?;
     f.script("proxy",r#"case "$0" in */cargo) printf 'cargo 1.0.0';; *) printf 'wrong invocation';exit 9;; esac"#)?;
     symlink("proxy", f.home.join("bin/cargo"))?;
-    let (out, v) = f.run(&["doctor", "manager:cargo"])?;
+    let (out, v) = f.run(&["app", "doctor", "manager:cargo"])?;
     assert_code(&out, 0);
     assert_eq!(v["data"][0]["observation"]["version"], "cargo 1.0.0");
     Ok(())
@@ -1361,14 +1724,14 @@ fn mise_target_array_and_ambiguous_active_versions_are_distinguished() -> TestRe
     catalog["packages"][0]["provider"] = json!({"type":"mise","package":"aqua:openai/codex"});
     write_json(&f.catalog, &catalog)?;
     f.script("mise", r#"printf '[{"version":"1.2.3","active":true}]'"#)?;
-    let (out, v) = f.run(&["doctor", "demo"])?;
+    let (out, v) = f.run(&["app", "doctor", "demo"])?;
     assert_code(&out, 0);
     assert_eq!(v["data"][0]["observation"]["version"], "1.2.3");
     f.script(
         "mise",
         r#"printf '[{"version":"1.2.3","active":true},{"version":"2.0.0","active":true}]'"#,
     )?;
-    let (out, v) = f.run(&["doctor", "demo"])?;
+    let (out, v) = f.run(&["app", "doctor", "demo"])?;
     assert_code(&out, 3);
     assert_eq!(v["data"][0]["observation"]["status"], "unknown");
     Ok(())
@@ -1384,12 +1747,12 @@ fn unbound_brew_declaration_never_queries_or_blesses_missing() -> TestResult {
         "brew",
         "printf invoked >> \"$MACOPS_TEST_HOME/calls\"; exit 1",
     )?;
-    for command in ["doctor", "update", "install", "upgrade", "uninstall"] {
-        let (out, value) = f.run(&[command, "demo", "--yes"])?;
+    for command in ["doctor", "refresh", "install", "upgrade", "uninstall"] {
+        let (out, value) = f.run(&["app", command, "demo", "--yes"])?;
         assert_code(&out, 3);
         assert_eq!(value["error"]["code"], "brew_context_binding_required");
     }
-    let (out, preview) = f.run(&["upgrade", "demo", "--dry-run"])?;
+    let (out, preview) = f.run(&["app", "upgrade", "demo", "--dry-run"])?;
     assert_code(&out, 0);
     assert_eq!(preview["data"]["nativeRuns"], 0);
     assert!(!f.home.join("calls").exists());
@@ -1408,10 +1771,10 @@ pm) if [ -f "$MACOPS_TEST_HOME/bun-installed" ]; then printf '/fixture/global no
 add) [ "$2" = --global ] && [ "$3" = demo@1.0.0 ];printf installed > "$MACOPS_TEST_HOME/bun-installed" ;;
 *) exit 7 ;;
 esac"#)?;
-    let (out, v) = f.run(&["doctor", "demo"])?;
+    let (out, v) = f.run(&["app", "doctor", "demo"])?;
     assert_code(&out, 3);
     assert_eq!(v["data"][0]["observation"]["status"], "missing");
-    let (out, v) = f.run(&["install", "demo", "--version", "1.0.0"])?;
+    let (out, v) = f.run(&["app", "install", "demo", "--version", "1.0.0"])?;
     assert_code(&out, 0);
     assert_eq!(v["data"]["phase"], "succeeded");
     Ok(())
@@ -1423,14 +1786,14 @@ fn metadata_refresh_never_overwrites_unowned_cache_files() -> TestResult {
     fs::create_dir_all(f.file("cache"))?;
     let bytes = b"{\"schema_version\":1,\"entries\":{}}";
     fs::write(f.file("cache/updates.json"), bytes)?;
-    let (out, v) = f.run(&["update", "demo"])?;
+    let (out, v) = f.run(&["app", "refresh", "demo"])?;
     assert_code(&out, 0);
     assert!(v["data"]["index"].is_string());
     assert_eq!(fs::read(f.file("cache/updates.json"))?, bytes);
     let (out, v) = f.run(&["cleanup", "macops:cache", "--dry-run"])?;
     assert_code(&out, 0);
     assert_eq!(v["data"]["review"], json!(["updates.json"]));
-    let (out, v) = f.run(&["install", "demo", "--version", "1.0.0"])?;
+    let (out, v) = f.run(&["app", "install", "demo", "--version", "1.0.0"])?;
     assert_code(&out, 0);
     assert_eq!(v["data"]["phase"], "succeeded");
     assert_eq!(fs::read(f.file("cache/updates.json"))?, bytes);
@@ -1449,9 +1812,9 @@ fn generic_mise_write_cannot_bypass_chezmoi_source_owner() -> TestResult {
     fs::create_dir_all(source.parent().ok_or("parent")?)?;
     fs::write(&source, "[tools]\ndemo='1.0.0'\n")?;
     f.script("mise",r#"case "$1" in ls) printf '[{"version":"1.0.0","active":true}]';; *) printf forbidden > "$MACOPS_TEST_HOME/should-not-exist";; esac"#)?;
-    let (out, _) = f.run(&["adopt", "demo", "--yes"])?;
+    let (out, _) = f.run(&["app", "adopt", "demo", "--yes"])?;
     assert_code(&out, 0);
-    let (out, v) = f.run(&["upgrade", "demo", "--version", "2.0.0"])?;
+    let (out, v) = f.run(&["app", "upgrade", "demo", "--version", "2.0.0"])?;
     assert_code(&out, 3);
     assert_eq!(v["error"]["code"], "configuration_owner_requires_review");
     assert!(!f.home.join("should-not-exist").exists());
@@ -1474,7 +1837,7 @@ fn bun_corrupt_or_duplicate_inventory_never_proves_absence() -> TestResult {
         let text = f.home.join("inventory.txt");
         fs::write(&text, payload)?;
         f.script("bun",r#"if [ "$1" = pm ]; then /bin/cat "$MACOPS_TEST_HOME/inventory.txt";else printf BAD > "$MACOPS_TEST_HOME/mutation";fi"#)?;
-        let (out, v) = f.run(&["install", "demo", "--version", "1.0.0"])?;
+        let (out, v) = f.run(&["app", "install", "demo", "--version", "1.0.0"])?;
         assert_code(&out, 3);
         assert_eq!(v["error"]["code"], "observation_required");
         assert!(!f.home.join("mutation").exists());
@@ -1494,7 +1857,7 @@ fn outdated_only_keeps_the_original_read_filter() -> TestResult {
         r#"printf 'called' > "$MACOPS_TEST_HOME/read-args";exit 97"#,
     )?;
     fs::copy(source, directory.join("mo"))?;
-    let (out, value) = f.run(&["skills", "outdated", "--only", "demo"])?;
+    let (out, value) = f.run(&["skill", "outdated", "--only", "demo"])?;
     assert_code(&out, 3);
     let resources = value["data"]["resources"].as_array().ok_or("resources")?;
     assert_eq!(resources.len(), 1);
@@ -1508,17 +1871,17 @@ fn outdated_only_keeps_the_original_read_filter() -> TestResult {
 #[test]
 fn identical_refresh_reuses_content_and_borrowed_blob_is_not_gc_owned() -> TestResult {
     let f = Fixture::new()?;
-    let (out, first) = f.run(&["update", "demo"])?;
+    let (out, first) = f.run(&["app", "refresh", "demo"])?;
     assert_code(&out, 0);
     let index = f.current_index()?;
     let bytes = fs::read(&index)?;
-    let (out, second) = f.run(&["update", "demo"])?;
+    let (out, second) = f.run(&["app", "refresh", "demo"])?;
     assert_code(&out, 0);
     assert_eq!(first["data"]["index"], second["data"]["index"]);
     assert_eq!(second["data"]["created"], false);
     assert_eq!(second["data"]["owned"], true);
     fs::remove_file(f.file("state/version-indexes.json"))?;
-    let (out, borrowed) = f.run(&["update", "demo"])?;
+    let (out, borrowed) = f.run(&["app", "refresh", "demo"])?;
     assert_code(&out, 0);
     assert_eq!(borrowed["data"]["created"], false);
     assert_eq!(borrowed["data"]["owned"], false);
@@ -1541,7 +1904,7 @@ query) printf '{"status":"missing"}' ;;
 esac"#)?;
     let mut child = f
         .command()
-        .args(["update", "demo"])
+        .args(["app", "refresh", "demo"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
@@ -1569,12 +1932,12 @@ esac"#)?;
 #[test]
 fn cache_marker_change_blocks_reads_and_gc_without_claiming_other_data() -> TestResult {
     let f = Fixture::new()?;
-    let (out, _) = f.run(&["update", "demo"])?;
+    let (out, _) = f.run(&["app", "refresh", "demo"])?;
     assert_code(&out, 0);
     let index = f.current_index()?;
     fs::write(f.file("cache/indexes/.macops-scope.json"), "{}")?;
     for args in [
-        vec!["outdated", "demo"],
+        vec!["app", "outdated", "demo"],
         vec!["cleanup", "macops:cache", "--yes"],
     ] {
         let (out, _) = f.run(&args)?;
@@ -1610,7 +1973,7 @@ esac"#
 fn foreign_content_at_digest_name_is_never_replaced_or_claimed() -> TestResult {
     use std::process::Stdio;
     let f = Fixture::new()?;
-    let (out, _) = f.run(&["update", "demo"])?;
+    let (out, _) = f.run(&["app", "refresh", "demo"])?;
     assert_code(&out, 0);
     let path = f.current_index()?;
     fs::remove_file(&path)?;
@@ -1618,7 +1981,7 @@ fn foreign_content_at_digest_name_is_never_replaced_or_claimed() -> TestResult {
     metadata_barrier(&f, "2.0.0")?;
     let child = f
         .command()
-        .args(["update", "demo"])
+        .args(["app", "refresh", "demo"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
@@ -1644,7 +2007,7 @@ fn root_exchange_during_query_cannot_redirect_publication() -> TestResult {
     metadata_barrier(&f, "2.0.0")?;
     let child = f
         .command()
-        .args(["update", "demo"])
+        .args(["app", "refresh", "demo"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
@@ -1664,13 +2027,13 @@ fn root_exchange_during_query_cannot_redirect_publication() -> TestResult {
 fn failed_book_commit_leaves_orphan_borrowed_not_owned() -> TestResult {
     use std::{os::unix::fs::PermissionsExt, process::Stdio};
     let f = Fixture::new()?;
-    let (out, _) = f.run(&["update", "demo"])?;
+    let (out, _) = f.run(&["app", "refresh", "demo"])?;
     assert_code(&out, 0);
     let before = fs::read(f.file("state/version-indexes.json"))?;
     metadata_barrier(&f, "3.0.0")?;
     let child = f
         .command()
-        .args(["update", "demo"])
+        .args(["app", "refresh", "demo"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
@@ -1682,7 +2045,7 @@ fn failed_book_commit_leaves_orphan_borrowed_not_owned() -> TestResult {
     let out = output?;
     assert_code(&out, 1);
     assert_eq!(before, fs::read(f.file("state/version-indexes.json"))?);
-    let (out, v) = f.run(&["update", "demo"])?;
+    let (out, v) = f.run(&["app", "refresh", "demo"])?;
     assert_code(&out, 0);
     assert_eq!(v["data"]["created"], false);
     assert_eq!(v["data"]["owned"], false);
@@ -1706,7 +2069,7 @@ fn partial_metadata_refresh_preserves_other_source_times() -> TestResult {
         .push(other);
     write_json(&f.catalog, &catalog)?;
     for name in ["demo", "other"] {
-        let (out, _) = f.run(&["update", name])?;
+        let (out, _) = f.run(&["app", "refresh", name])?;
         assert_code(&out, 0);
     }
     let mut book = f.read_json("state/version-indexes.json")?;
@@ -1717,7 +2080,7 @@ fn partial_metadata_refresh_preserves_other_source_times() -> TestResult {
     times["queried_at"]["fixture:demo"] = json!(1);
     times["queried_at"]["fixture:other"] = json!(2);
     write_json(&f.file("state/version-indexes.json"), &book)?;
-    let (out, _) = f.run(&["update", "demo"])?;
+    let (out, _) = f.run(&["app", "refresh", "demo"])?;
     assert_code(&out, 0);
     let after = f.read_json("state/version-indexes.json")?;
     let scope = after["scopes"]
@@ -1732,7 +2095,7 @@ fn partial_metadata_refresh_preserves_other_source_times() -> TestResult {
     assert_eq!(scope["queried_at"]["fixture:other"], 2);
     f.script("demo", "exit 9")?;
     let before = fs::read(f.file("state/version-indexes.json"))?;
-    let (out, _) = f.run(&["update", "demo"])?;
+    let (out, _) = f.run(&["app", "refresh", "demo"])?;
     assert_code(&out, 3);
     assert_eq!(before, fs::read(f.file("state/version-indexes.json"))?);
     Ok(())
@@ -1741,7 +2104,7 @@ fn partial_metadata_refresh_preserves_other_source_times() -> TestResult {
 #[test]
 fn cleanup_does_not_recreate_the_retired_ownership_file() -> TestResult {
     let f = Fixture::new()?;
-    let (out, _) = f.run(&["update", "demo"])?;
+    let (out, _) = f.run(&["app", "refresh", "demo"])?;
     assert_code(&out, 0);
     fs::write(
         f.file("cache/indexes/ownership.json"),
@@ -1769,7 +2132,7 @@ fn existing_legacy_home_app_paths_do_not_break_the_catalogue() -> TestResult {
     let manifest = f.file("settings/manifests/mac-apps.tsv");
     let body = "scope\tpath\tbundle_id\tversion\towner\tsource\nuser_top_level\t~//Applications/Demo.app\tcom.demo\t1\tvendor\tlegacy\ncask_non_app_artifact\tnot_applicable\tunknown\tunknown\thomebrew_cask\thomebrew_cask\n";
     fs::write(&manifest, body)?;
-    let (out, v) = f.run(&["app", "info", "com.demo"])?;
+    let (out, v) = f.run(&["app", "com.demo"])?;
     assert_code(&out, 3);
     assert_eq!(
         v["data"]["package"]["provider"]["path"],
@@ -1787,14 +2150,14 @@ fn preview_never_resolves_from_another_scope_index() -> TestResult {
         .command()
         .env("HOME", &f.home)
         .env("UV_TOOL_DIR", f.home.join("scope-a"))
-        .args(["update", "demo"])
+        .args(["app", "refresh", "demo"])
         .output()?;
     assert_code(&out, 0);
     let out = f
         .command()
         .env("HOME", &f.home)
         .env("UV_TOOL_DIR", f.home.join("scope-b"))
-        .args(["install", "demo", "--dry-run"])
+        .args(["app", "install", "demo", "--dry-run"])
         .output()?;
     assert_code(&out, 0);
     let value: serde_json::Value = serde_json::from_slice(&out.stdout)?;
@@ -1812,12 +2175,12 @@ fn preview_never_resolves_from_another_scope_index() -> TestResult {
 #[test]
 fn install_upgrade_uninstall_and_history_use_actual_artifact() -> TestResult {
     let f = Fixture::new()?;
-    let (out, plan) = f.run(&["install", "demo", "--version", "1.0.0", "--dry-run"])?;
+    let (out, plan) = f.run(&["app", "install", "demo", "--version", "1.0.0", "--dry-run"])?;
     assert_code(&out, 0);
     assert_eq!(plan["data"]["persistentWrites"], false);
     assert!(!f.file("state").exists());
     assert!(!f.file("calls").exists());
-    let (out, installed) = f.run(&["install", "demo", "--version", "1.0.0"])?;
+    let (out, installed) = f.run(&["app", "install", "demo", "--version", "1.0.0"])?;
     assert_code(&out, 0);
     assert_eq!(installed["data"]["phase"], "succeeded");
     assert_eq!(fs::read_to_string(f.file("version"))?, "1.0.0");
@@ -1826,10 +2189,10 @@ fn install_upgrade_uninstall_and_history_use_actual_artifact() -> TestResult {
         receipt["installations"]["fixture:demo"]["observation"]["version"],
         "1.0.0"
     );
-    let (out, _) = f.run(&["upgrade", "demo", "--version", "2.0.0"])?;
+    let (out, _) = f.run(&["app", "upgrade", "demo", "--version", "2.0.0"])?;
     assert_code(&out, 0);
     assert_eq!(fs::read_to_string(f.file("version"))?, "2.0.0");
-    let (out, _) = f.run(&["uninstall", "demo", "--yes"])?;
+    let (out, _) = f.run(&["app", "uninstall", "demo", "--yes"])?;
     assert_code(&out, 0);
     assert!(!f.file("version").exists());
     let receipts = f.read_json("state/receipts.json")?;
@@ -1847,18 +2210,18 @@ fn install_upgrade_uninstall_and_history_use_actual_artifact() -> TestResult {
 #[test]
 fn adopt_requires_present_and_preserves_installation() -> TestResult {
     let f = Fixture::new()?;
-    let (out, v) = f.run(&["adopt", "demo", "--yes"])?;
+    let (out, v) = f.run(&["app", "adopt", "demo", "--yes"])?;
     assert_code(&out, 3);
     assert_eq!(v["error"]["code"], "not_installed");
     fs::write(f.file("version"), "0.5.0")?;
-    let (out, v) = f.run(&["upgrade", "demo", "--version", "1.0.0"])?;
+    let (out, v) = f.run(&["app", "upgrade", "demo", "--version", "1.0.0"])?;
     assert_code(&out, 3);
     assert_eq!(v["error"]["code"], "adoption_required");
-    let (out, _) = f.run(&["adopt", "demo", "--yes"])?;
+    let (out, _) = f.run(&["app", "adopt", "demo", "--yes"])?;
     assert_code(&out, 0);
     assert!(!f.file("calls").exists());
     fs::write(f.file("version"), "external")?;
-    let (out, v) = f.run(&["uninstall", "demo", "--yes"])?;
+    let (out, v) = f.run(&["app", "uninstall", "demo", "--yes"])?;
     assert_code(&out, 3);
     assert_eq!(v["error"]["code"], "installation_drift");
     assert!(!f.file("calls").exists());
@@ -1870,17 +2233,17 @@ fn strict_manifests_distinguish_bad_header_and_empty_list() -> TestResult {
     let f = Fixture::new()?;
     let manifest = f.file("settings/manifests/mac-apps.tsv");
     fs::write(&manifest, "bad\nrow\n")?;
-    let (out, v) = f.run(&["list"])?;
+    let (out, v) = f.run(&["app", "resources"])?;
     assert_code(&out, 1);
     assert_eq!(v["error"]["code"], "invalid_manifest");
     fs::write(&manifest, "path\tbundle_id\tversion\towner\tsource\n")?;
-    let (out, _) = f.run(&["app", "list"])?;
+    let (out, _) = f.run(&["app", "resources"])?;
     assert_code(&out, 0);
     fs::write(
         &manifest,
         "path\tbundle_id\tversion\towner\tsource\nonly-one-column\n",
     )?;
-    let (out, _) = f.run(&["list"])?;
+    let (out, _) = f.run(&["app", "resources"])?;
     assert_code(&out, 1);
     Ok(())
 }
@@ -1889,11 +2252,11 @@ fn strict_manifests_distinguish_bad_header_and_empty_list() -> TestResult {
 fn conda_wrong_field_type_is_not_a_healthy_environment() -> TestResult {
     let f = Fixture::new()?;
     f.script("conda", "printf '%s' '{\"envs\":\"abc\"}'")?;
-    let (out, v) = f.run(&["discover", "conda"])?;
+    let (out, v) = f.run(&["app", "discover", "conda"])?;
     assert_code(&out, 1);
     assert_eq!(v["error"]["code"], "invalid_json");
     f.script("conda", "printf '%s' '{\"envs\":[\"/synthetic/env\"]}'")?;
-    let (out, v) = f.run(&["toolchain", "info", "conda"])?;
+    let (out, v) = f.run(&["app", "discover", "conda"])?;
     assert_code(&out, 0);
     assert_eq!(v["data"]["data"]["envs"], json!(["/synthetic/env"]));
     Ok(())
@@ -1906,22 +2269,22 @@ fn service_string_false_is_not_running_and_identity_is_checked() -> TestResult {
         "brew",
         "printf '%s' '[{\"name\":\"postgresql@16\",\"running\":\"false\"}]'",
     )?;
-    let (out, _) = f.run(&["service", "list"])?;
+    let (out, _) = f.run(&["app", "service", "list"])?;
     assert_code(&out, 1);
     f.script(
         "brew",
         "printf '%s' '[{\"name\":\"postgresql@16\",\"running\":false}]'",
     )?;
-    let (out, v) = f.run(&["service", "list"])?;
+    let (out, v) = f.run(&["app", "service", "list"])?;
     assert_code(&out, 0);
     assert_eq!(v["data"]["status"], "stopped");
-    let (out, _) = f.run(&["service", "check"])?;
+    let (out, _) = f.run(&["app", "service", "check"])?;
     assert_code(&out, 3);
     f.script(
         "brew",
         "printf '%s' '[{\"name\":\"unrelated\",\"running\":true}]'",
     )?;
-    let (out, v) = f.run(&["service", "list"])?;
+    let (out, v) = f.run(&["app", "service", "list"])?;
     assert_code(&out, 1);
     assert_eq!(v["error"]["code"], "service_identity_mismatch");
     Ok(())
@@ -1930,13 +2293,13 @@ fn service_string_false_is_not_running_and_identity_is_checked() -> TestResult {
 #[test]
 fn update_outdated_and_owned_cleanup_leave_unknown_files() -> TestResult {
     let f = Fixture::new()?;
-    let (out, _) = f.run(&["update", "demo", "--dry-run"])?;
+    let (out, _) = f.run(&["app", "refresh", "demo", "--dry-run"])?;
     assert_code(&out, 0);
     assert!(!f.file("cache").exists());
     assert!(!f.file("state").exists());
-    let (out, _) = f.run(&["outdated", "demo"])?;
+    let (out, _) = f.run(&["app", "outdated", "demo"])?;
     assert_code(&out, 3);
-    let (out, _) = f.run(&["update", "demo"])?;
+    let (out, _) = f.run(&["app", "refresh", "demo"])?;
     assert_code(&out, 0);
     let index = f.current_index()?;
     assert!(index.is_file());
@@ -1958,7 +2321,7 @@ fn update_outdated_and_owned_cleanup_leave_unknown_files() -> TestResult {
 #[test]
 fn changed_cache_and_symlink_are_never_deleted() -> TestResult {
     let f = Fixture::new()?;
-    let (out, _) = f.run(&["update", "demo"])?;
+    let (out, _) = f.run(&["app", "refresh", "demo"])?;
     assert_code(&out, 0);
     let index = f.current_index()?;
     fs::write(&index, "user changed")?;
@@ -1978,10 +2341,10 @@ fn changed_cache_and_symlink_are_never_deleted() -> TestResult {
 fn unknown_options_and_ambiguous_objects_cannot_execute() -> TestResult {
     let f = Fixture::new()?;
     for args in [
-        vec!["install", "demo", "--apply"],
-        vec!["upgrade"],
-        vec!["credential", "get"],
-        vec!["install", "demo", "--dry"],
+        vec!["app", "install", "demo", "--apply"],
+        vec!["app", "install"],
+        vec!["agent", "credential", "get"],
+        vec!["app", "install", "demo", "--dry"],
     ] {
         let (out, v) = f.run(&args)?;
         assert_code(&out, 2);
@@ -1995,7 +2358,7 @@ fn unknown_options_and_ambiguous_objects_cannot_execute() -> TestResult {
         .ok_or("packages")?
         .push(other);
     write_json(&f.catalog, &catalog)?;
-    let (out, v) = f.run(&["install", "demo", "--version", "1.0.0"])?;
+    let (out, v) = f.run(&["app", "install", "demo", "--version", "1.0.0"])?;
     assert_code(&out, 3);
     assert_eq!(v["error"]["code"], "ambiguous");
     assert!(!f.file("calls").exists());
@@ -2007,17 +2370,12 @@ fn exclusion_happens_before_reading_link_targets() -> TestResult {
     let f = Fixture::new()?;
     let path = f.file("excluded");
     symlink("/Users/example/job/nonexistent", &path)?;
-    let out = f
-        .command()
-        .arg("--catalog")
-        .arg(path)
-        .arg("list")
-        .output()?;
+    let out = f.command().arg("--catalog").arg(path).arg("app").output()?;
     assert_code(&out, 2);
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_macops"))
         .args(["--json", "--catalog"])
         .arg(f.file("excluded"))
-        .arg("list")
+        .arg("app")
         .output()?;
     assert_code(&out, 1);
     let value: serde_json::Value = serde_json::from_slice(&out.stdout)?;
@@ -2213,7 +2571,7 @@ fn existing_default_state_cannot_be_silently_bypassed_using_xdg() -> TestResult 
     fs::write(old.join("active.json"), "unknown operation bytes")?;
     for args in [
         vec!["dirs", "--roots"],
-        vec!["install", "demo", "--version", "2"],
+        vec!["app", "install", "demo", "--version", "2"],
     ] {
         let out = f
             .roots_command()
@@ -2353,6 +2711,7 @@ esac"#)?;
         .args([
             "--timeout-secs",
             "1",
+            "app",
             "install",
             "demo",
             "--version",
@@ -2388,7 +2747,7 @@ esac"#)?;
 #[test]
 fn native_credential_routes_do_not_require_or_invoke_legacy_mo() -> TestResult {
     let f = Fixture::new()?;
-    let (out, v) = f.run(&["credential", "add", "mi", "fixture"])?;
+    let (out, v) = f.run(&["agent", "credential", "add", "mi", "fixture"])?;
     assert_code(&out, 0);
     assert_eq!(
         v["data"]["command"]["args"],
@@ -2416,7 +2775,7 @@ if [ -f "$MACOPS_TEST_HOME/probe-code" ]; then exit "$(/bin/cat "$MACOPS_TEST_HO
     let out = f
         .command()
         .env("TMPDIR", f.file("missing-temp-root"))
-        .args(["credential", "check", "mi"])
+        .args(["agent", "credential", "check", "mi"])
         .output()?;
     assert_code(&out, 0);
     let v: serde_json::Value = serde_json::from_slice(&out.stdout)?;
@@ -2430,19 +2789,19 @@ if [ -f "$MACOPS_TEST_HOME/probe-code" ]; then exit "$(/bin/cat "$MACOPS_TEST_HO
     assert!(!f.file("missing-temp-root").exists());
     for code in ["1", "44"] {
         fs::write(f.home.join("probe-code"), code)?;
-        let (out, v) = f.run(&["credential", "check", "mi"])?;
+        let (out, v) = f.run(&["agent", "credential", "check", "mi"])?;
         assert_code(&out, 3);
         assert_eq!(v["data"][0]["status"], "unknown");
         assert!(!v.to_string().contains("SYNTHETIC_SECRET"));
     }
     f.script("security", "/bin/sleep 2")?;
-    let (out, v) = f.run(&["--timeout-secs", "1", "credential", "check", "mi"])?;
+    let (out, v) = f.run(&["--timeout-secs", "1", "agent", "credential", "check", "mi"])?;
     assert_code(&out, 3);
     assert_eq!(v["data"][0]["status"], "unknown");
     let out = f
         .command()
         .env("PATH", f.home.join("empty-bin"))
-        .args(["credential", "check", "mi"])
+        .args(["agent", "credential", "check", "mi"])
         .output()?;
     assert_code(&out, 3);
     let v: serde_json::Value = serde_json::from_slice(&out.stdout)?;
@@ -2455,14 +2814,14 @@ if [ -f "$MACOPS_TEST_HOME/probe-code" ]; then exit "$(/bin/cat "$MACOPS_TEST_HO
 #[test]
 fn native_credential_validation_retains_safe_selection_and_no_secret_parameters() -> TestResult {
     let f = Fixture::new()?;
-    let (out, v) = f.run(&["credential", "list"])?;
+    let (out, v) = f.run(&["agent", "credential", "list"])?;
     assert_code(&out, 0);
     assert_eq!(v["data"].as_array().ok_or("profiles")?.len(), 4);
-    let (out, v) = f.run(&["credential", "check"])?;
+    let (out, v) = f.run(&["agent", "credential", "check"])?;
     assert_code(&out, 3);
     assert_eq!(v["data"][0]["reason"], "settings_missing");
     for profile in ["glm", "kimi", "mi", "zen"] {
-        let (out, v) = f.run(&["credential", "activate", profile, "safe_alias-1"])?;
+        let (out, v) = f.run(&["agent", "credential", "activate", profile, "safe_alias-1"])?;
         assert_code(&out, 0);
         assert_eq!(
             v["data"]["command"]["args"],
@@ -2471,11 +2830,18 @@ fn native_credential_validation_retains_safe_selection_and_no_secret_parameters(
         assert_eq!(v["data"]["executed"], false);
     }
     for args in [
-        vec!["credential", "check", "unknown"],
-        vec!["credential", "add", "unknown", "fixture"],
-        vec!["credential", "add", "mi", "a;bad"],
-        vec!["credential", "add", "mi", "fixture", "secret-value"],
-        vec!["credential", "get"],
+        vec!["agent", "credential", "check", "unknown"],
+        vec!["agent", "credential", "add", "unknown", "fixture"],
+        vec!["agent", "credential", "add", "mi", "a;bad"],
+        vec![
+            "agent",
+            "credential",
+            "add",
+            "mi",
+            "fixture",
+            "secret-value",
+        ],
+        vec!["agent", "credential", "get"],
     ] {
         let (out, _) = f.run(&args)?;
         assert_code(&out, 2);
@@ -2488,13 +2854,13 @@ fn native_credential_validation_retains_safe_selection_and_no_secret_parameters(
         "{\"apiKeyHelper\":\"/wrong claude-mi@fixture\"}",
     ] {
         fs::write(&settings, body)?;
-        let (out, v) = f.run(&["credential", "check", "mi"])?;
+        let (out, v) = f.run(&["agent", "credential", "check", "mi"])?;
         assert_code(&out, 3);
         assert_eq!(v["data"][0]["reason"], "invalid_profile_settings");
     }
     fs::remove_file(&settings)?;
     symlink(f.catalog.clone(), &settings)?;
-    let (out, v) = f.run(&["credential", "check", "mi"])?;
+    let (out, v) = f.run(&["agent", "credential", "check", "mi"])?;
     assert_code(&out, 3);
     assert_eq!(v["data"][0]["reason"], "invalid_profile_settings");
     assert!(!f.file("state").exists());
@@ -2524,7 +2890,7 @@ services:info) /bin/cat "$MACOPS_TEST_HOME/service-state" ;;
 services:start|services:stop) printf '%s\n' "$2" >> "$MACOPS_TEST_HOME/service-calls"; /bin/cp "$MACOPS_TEST_HOME/$2-state" "$MACOPS_TEST_HOME/service-state" ;;
 *) exit 8 ;;
 esac"#)?;
-    let (out, v) = f.run(&["service", "start", "postgresql", "--dry-run"])?;
+    let (out, v) = f.run(&["app", "app:postgresql", "start", "--dry-run"])?;
     assert_code(&out, 0);
     assert_eq!(
         v["data"]["plan"]["command"]["args"],
@@ -2532,21 +2898,21 @@ esac"#)?;
     );
     assert!(!f.file("state").exists());
     assert!(!f.home.join("service-calls").exists());
-    let (out, v) = f.run(&["service", "start", "postgresql"])?;
+    let (out, v) = f.run(&["app", "start", "postgresql"])?;
     assert_code(&out, 3);
     assert_eq!(v["error"]["code"], "confirmation_required");
     assert!(!f.file("state").exists());
-    let (out, v) = f.run(&["service", "start", "postgresql", "--yes"])?;
+    let (out, v) = f.run(&["app", "start", "postgresql", "--yes"])?;
     assert_code(&out, 0);
     assert_eq!(v["data"]["phase"], "succeeded");
     assert_eq!(v["data"]["plan"]["action"], "start");
     assert!(!f.file("state/receipts.json").exists());
     let before = fs::read(f.file("state/active.json"))?;
-    let (out, v) = f.run(&["service", "start", "postgresql"])?;
+    let (out, v) = f.run(&["app", "start", "postgresql"])?;
     assert_code(&out, 0);
     assert_eq!(v["data"]["mode"], "no-op");
     assert_eq!(before, fs::read(f.file("state/active.json"))?);
-    let (out, v) = f.run(&["service", "stop", "postgresql", "--yes"])?;
+    let (out, v) = f.run(&["app", "stop", "postgresql", "--yes"])?;
     assert_code(&out, 0);
     assert_eq!(v["data"]["phase"], "succeeded");
     assert_eq!(
@@ -2594,7 +2960,7 @@ fn service_preview_covers_all_states_without_treating_loaded_as_registered() -> 
                 )?;
                 f.script("brew",r#"if [ "$2" = info ]; then /bin/cat "$MACOPS_TEST_HOME/service-state"; else printf 'control\n' >> "$MACOPS_TEST_HOME/service-calls"; fi"#)?;
                 for (verb, wanted) in [("start", true), ("stop", false)] {
-                    let (out, v) = f.run(&["service", verb, "postgresql", "--dry-run"])?;
+                    let (out, v) = f.run(&["app", verb, "postgresql", "--dry-run"])?;
                     assert_code(&out, 0);
                     if running == wanted && loaded == wanted && registered == wanted {
                         assert_eq!(v["data"]["changed"], false);
@@ -2621,11 +2987,11 @@ fn running_without_registration_is_not_a_successful_noop_or_successful_start() -
         &service_row(true, true, false, Some(&service_user()?)),
     )?;
     f.script("brew",r#"if [ "$2" = info ]; then /bin/cat "$MACOPS_TEST_HOME/service-state"; else printf '%s\n' "$2" >> "$MACOPS_TEST_HOME/service-calls"; fi"#)?;
-    let (out, v) = f.run(&["service", "start", "postgresql", "--yes"])?;
+    let (out, v) = f.run(&["app", "start", "postgresql", "--yes"])?;
     assert_code(&out, 3);
     assert_eq!(v["data"]["phase"], "unknown");
     assert_eq!(fs::read_to_string(f.home.join("service-calls"))?, "start\n");
-    let (out, v) = f.run(&["service", "start", "postgresql", "--yes"])?;
+    let (out, v) = f.run(&["app", "start", "postgresql", "--yes"])?;
     assert_code(&out, 3);
     assert_eq!(v["error"]["code"], "recovery_required");
     assert_eq!(fs::read_to_string(f.home.join("service-calls"))?, "start\n");
@@ -2649,7 +3015,7 @@ if [ "$2" = info ]; then /bin/cat "$MACOPS_TEST_HOME/service-state"; else printf
         service_row(false, false, true, Some("another-user")).to_string(),
     ] {
         fs::write(f.home.join("service-state"), body)?;
-        let (out, v) = f.run(&["service", "start", "postgresql", "--yes"])?;
+        let (out, v) = f.run(&["app", "start", "postgresql", "--yes"])?;
         assert_code(&out, 3);
         assert!(!v.to_string().contains("SYNTHETIC_SECRET"));
         assert!(!String::from_utf8(out.stderr)?.contains("SYNTHETIC_SECRET"));
@@ -2659,12 +3025,12 @@ if [ "$2" = info ]; then /bin/cat "$MACOPS_TEST_HOME/service-state"; else printf
     let mut valid = service_row(true, true, true, Some(&service_user()?));
     valid[0]["command"] = json!("SYNTHETIC_SECRET_COMMAND");
     write_json(&f.home.join("service-state"), &valid)?;
-    let (out, v) = f.run(&["service", "start", "postgresql", "--yes"])?;
+    let (out, v) = f.run(&["app", "start", "postgresql", "--yes"])?;
     assert_code(&out, 0);
     assert_eq!(v["data"]["mode"], "no-op");
     assert!(!v.to_string().contains("SYNTHETIC_SECRET"));
     f.script("brew", "printf 'SYNTHETIC_SECRET_STDERR' >&2; exit 2")?;
-    let (out, v) = f.run(&["service", "list"])?;
+    let (out, v) = f.run(&["app", "service", "list"])?;
     assert_code(&out, 1);
     assert!(!v.to_string().contains("SYNTHETIC_SECRET"));
     assert!(!f.file("state").exists());
@@ -2694,20 +3060,13 @@ esac"#)?;
         .command()
         .env("HOME", &f.home)
         .env("HOMEBREW_USER_CONFIG_HOME", f.file("scope-before"))
-        .args([
-            "--timeout-secs",
-            "1",
-            "service",
-            "start",
-            "postgresql",
-            "--yes",
-        ])
+        .args(["--timeout-secs", "1", "app", "start", "postgresql", "--yes"])
         .output()?;
     assert_code(&out, 3);
     let journal = f.read_json("state/active.json")?;
     assert_eq!(journal["phase"], "unknown");
     let id = journal["id"].as_str().ok_or("id")?;
-    let (out, v) = f.run(&["service", "stop", "postgresql", "--yes"])?;
+    let (out, v) = f.run(&["app", "stop", "postgresql", "--yes"])?;
     assert_code(&out, 3);
     assert_eq!(v["error"]["code"], "recovery_required");
     let mut wrong = journal.clone();
@@ -2761,7 +3120,7 @@ query) if [ -f "$MACOPS_TEST_HOME/queried" ]; then /bin/cp "$MACOPS_TEST_HOME/ch
 install) printf 'install\n' >> "$3" ;;
 *) exit 8 ;;
 esac"#)?;
-    let (out, v) = f.run(&["install", "demo", "--version", "1.0.0"])?;
+    let (out, v) = f.run(&["app", "install", "demo", "--version", "1.0.0"])?;
     assert_code(&out, 3);
     assert_eq!(v["error"]["code"], "plan_stale");
     assert!(!f.file("calls").exists());
@@ -2787,7 +3146,7 @@ fn unified_agent_inventory_keeps_custom_profiles_separate_without_running_agents
         "security",
         "printf 'BAD' > \"$MACOPS_TEST_HOME/keychain-executed\"; exit 9",
     )?;
-    let (out, v) = f.run(&["list", "--kind", "agents"])?;
+    let (out, v) = f.run(&["agent", "resources"])?;
     assert_code(&out, 0);
     let entries = v["data"]["resources"]
         .as_array()
@@ -2816,7 +3175,7 @@ fn unified_capabilities_ignore_npx_cache_and_keep_source_and_placements_distinct
         "npx",
         "printf 'BAD' > \"$MACOPS_TEST_HOME/npx-executed\"; exit 9",
     )?;
-    let (out, v) = f.run(&["list", "--kind", "capabilities"])?;
+    let (out, v) = f.run(&["skill", "resources"])?;
     assert_code(&out, 0);
     assert_eq!(
         v["data"]["resources"].as_array().ok_or("resources")?.len(),
@@ -2836,7 +3195,7 @@ fn unified_capabilities_ignore_npx_cache_and_keep_source_and_placements_distinct
     let copied = f.home.join(".claude-glm/skills/demo");
     fs::create_dir(&copied)?;
     fs::write(copied.join("SKILL.md"), "untracked copy")?;
-    let (out, v) = f.run(&["list", "--kind", "capabilities"])?;
+    let (out, v) = f.run(&["skill", "resources"])?;
     assert_code(&out, 0);
     let resources = v["data"]["resources"].as_array().ok_or("resources")?;
     assert_eq!(resources.len(), 2);
@@ -2854,14 +3213,14 @@ fn unified_capabilities_ignore_npx_cache_and_keep_source_and_placements_distinct
         f.home.join(".claude-mi/skills/demo").display().to_string()
     );
     assert_eq!(native["loaded"], serde_json::Value::Null);
-    let (out, v) = f.run(&["info", "skill:demo"])?;
+    let (out, v) = f.run(&["skill", "skill:demo"])?;
     assert_code(&out, 3);
     assert_eq!(v["error"]["code"], "ambiguous");
     write_json(
         &f.home.join(".agents/.skill-lock.json"),
         &json!({"version":1,"skills":{}}),
     )?;
-    let (out, v) = f.run(&["list", "--kind", "capabilities"])?;
+    let (out, v) = f.run(&["skill", "resources"])?;
     assert_code(&out, 3);
     assert_eq!(v["data"]["incomplete"], true);
     assert!(!f.home.join("npx-executed").exists());
@@ -2910,13 +3269,7 @@ esac"#)?;
     fs::create_dir(&p1)?;
     fs::create_dir(&p2)?;
     for (project, version) in [(&p1, "1.0.0"), (&p2, "2.0.0")] {
-        let (out, v) = f.run(&[
-            "list",
-            "--kind",
-            "agents",
-            "--project",
-            project.to_str().ok_or("project")?,
-        ])?;
+        let (out, v) = f.run(&["agent", "--project", project.to_str().ok_or("project")?])?;
         assert_code(&out, 0);
         let profiles = v["data"]["resources"].as_array().ok_or("profiles")?;
         assert_eq!(profiles.len(), 4);
@@ -2984,7 +3337,7 @@ fn unified_software_keeps_manager_prefixes_versions_and_bundles_distinct() -> Te
         &manifest,
         "path\tbundle_id\tversion\towner\tsource\n/Applications/One.app\tcom.same\t1\tvendor\tmanual\n/Applications/Two.app\tcom.same\t2\tvendor\tmanual\n",
     )?;
-    let (out, v) = f.run(&["list", "--kind", "applications"])?;
+    let (out, v) = f.run(&["app", "resources"])?;
     assert_code(&out, 3);
     let items = v["data"]["resources"].as_array().ok_or("resources")?;
     let duplicates: Vec<_> = items.iter().filter(|r| r["name"] == "dup").collect();
@@ -3025,11 +3378,11 @@ fn unified_software_keeps_manager_prefixes_versions_and_bundles_distinct() -> Te
             "missing {manager}"
         );
     }
-    let (out, v) = f.run(&["info", "dup"])?;
+    let (out, v) = f.run(&["app", "dup"])?;
     assert_code(&out, 3);
     assert_eq!(v["error"]["code"], "ambiguous");
     for action in ["adopt", "upgrade", "uninstall"] {
-        let (out, v) = f.run(&[action, "dup", "--yes"])?;
+        let (out, v) = f.run(&["app", action, "dup", "--yes"])?;
         assert_code(&out, 3);
         assert_eq!(v["error"]["code"], "ambiguous");
     }
@@ -3074,13 +3427,7 @@ fn unified_plugin_and_mcp_records_do_not_infer_loaded_state_from_cache() -> Test
         &project.join(".mcp.json"),
         &json!({"mcpServers":{"project":{"command":"uvx","env":{"TOKEN":"SYNTHETIC_SECRET"}}}}),
     )?;
-    let (out, v) = f.run(&[
-        "list",
-        "--kind",
-        "capabilities",
-        "--project",
-        project.to_str().ok_or("project")?,
-    ])?;
+    let (out, v) = f.run(&["skill", "--project", project.to_str().ok_or("project")?])?;
     assert_code(&out, 0);
     let items = v["data"]["resources"].as_array().ok_or("resources")?;
     assert!(items.iter().all(|r| r["loaded"].is_null()));
@@ -3128,7 +3475,7 @@ fn unified_native_failures_and_invalid_sources_are_partial_without_raw_diagnosti
         profile.join("plugins/installed_plugins.json"),
         "{\"version\":99,\"plugins\":{}}",
     )?;
-    let (out, v) = f.run(&["list"])?;
+    let (out, v) = f.run(&["app", "resources"])?;
     assert_code(&out, 3);
     assert_eq!(v["data"]["incomplete"], true);
     assert!(!v.to_string().contains("SYNTHETIC_SECRET"));
@@ -3139,10 +3486,10 @@ fn unified_native_failures_and_invalid_sources_are_partial_without_raw_diagnosti
             .iter()
             .any(|c| c["state"] == "unavailable")
     );
-    let (out, v) = f.run(&["list", "--kind", "not-supported"])?;
-    assert_code(&out, 1);
-    assert_eq!(v["error"]["code"], "invalid_kind");
-    let (out, _) = f.run(&["list", "--project", "/Users/example/job/forbidden"])?;
+    let (out, v) = f.run(&["app", "--kind", "not-supported"])?;
+    assert_code(&out, 2);
+    assert_eq!(v["error"]["code"], "usage");
+    let (out, _) = f.run(&["app", "--project", "/Users/example/job/forbidden"])?;
     assert_code(&out, 1);
     assert!(!f.file("state").exists());
     assert!(!f.file("cache").exists());
@@ -3155,8 +3502,8 @@ fn unified_profile_errors_propagate_to_all_dependent_views_and_excluded_roots() 
     let profile = f.home.join(".claude-bad");
     fs::create_dir(&profile)?;
     fs::write(profile.join("settings.json"), r#"{"model":{}}"#)?;
-    for kind in ["agents", "capabilities", "configs"] {
-        let (out, v) = f.run(&["list", "--kind", kind])?;
+    for noun in ["agent", "skill", "config"] {
+        let (out, v) = f.run(&[noun, "resources"])?;
         assert_code(&out, 3);
         assert_eq!(v["data"]["incomplete"], true);
         assert!(
@@ -3170,10 +3517,10 @@ fn unified_profile_errors_propagate_to_all_dependent_views_and_excluded_roots() 
     fs::remove_file(profile.join("settings.json"))?;
     fs::remove_dir(&profile)?;
     symlink("/Users/example/job/forbidden", &profile)?;
-    let (out, v) = f.run(&["list", "--kind", "capabilities"])?;
+    let (out, v) = f.run(&["skill", "resources"])?;
     assert_code(&out, 3);
     assert_eq!(v["data"]["incomplete"], true);
-    let (out, _) = f.run(&["list", "--kind", "applications"])?;
+    let (out, _) = f.run(&["app", "resources"])?;
     assert_code(&out, 0);
     Ok(())
 }
@@ -3187,14 +3534,14 @@ fn unified_skill_lock_cannot_turn_an_empty_directory_into_a_payload() -> TestRes
         &f.home.join(".agents/.skill-lock.json"),
         &json!({"version":3,"skills":{"empty":{"source":"owner/repo","sourceType":"github"}}}),
     )?;
-    let (out, v) = f.run(&["list", "--kind", "capabilities"])?;
+    let (out, v) = f.run(&["skill", "resources"])?;
     assert_code(&out, 0);
     let items = v["data"]["resources"].as_array().ok_or("resources")?;
     assert_eq!(items.len(), 1);
     assert_eq!(items[0]["status"], "missing");
     assert_eq!(items[0]["contents"][0]["status"], "missing");
     fs::create_dir(skill.join("SKILL.md"))?;
-    let (out, v) = f.run(&["list", "--kind", "capabilities"])?;
+    let (out, v) = f.run(&["skill", "resources"])?;
     assert_code(&out, 0);
     assert_eq!(v["data"]["resources"][0]["status"], "unknown");
     assert!(!f.file("state").exists());
@@ -3220,7 +3567,7 @@ prefix) /bin/cat "$MACOPS_TEST_HOME/npm-prefix" ;;
 *) printf 'MUTATION\n' >> "$MACOPS_TEST_HOME/npm-mutated"; exit 9 ;;
 esac"#,
     )?;
-    let (out, v) = f.run(&["list", "--kind", "applications"])?;
+    let (out, v) = f.run(&["app", "resources"])?;
     assert_code(&out, 0);
     let resource = v["data"]["resources"]
         .as_array()
@@ -3229,7 +3576,7 @@ esac"#,
         .find(|r| r["manager"] == "npm")
         .ok_or("npm resource")?;
     let id = resource["id"].as_str().ok_or("id")?.to_owned();
-    let (out, v) = f.run(&["adopt", &id, "--yes"])?;
+    let (out, v) = f.run(&["app", "adopt", &id, "--yes"])?;
     assert_code(&out, 0);
     assert_eq!(v["data"]["phase"], "succeeded");
     let receipt = f.read_json("state/receipts.json")?;
@@ -3238,7 +3585,7 @@ esac"#,
         receipt["installations"][&id]["observation"]["status"],
         "native-package"
     );
-    let (out, v) = f.run(&["list", "--kind", "applications"])?;
+    let (out, v) = f.run(&["app", "resources"])?;
     assert_code(&out, 0);
     assert_eq!(
         v["data"]["resources"]
@@ -3258,7 +3605,7 @@ esac"#,
             .count(),
         1
     );
-    let (out, v) = f.run(&["upgrade", &id, "--version", "2.0.0"])?;
+    let (out, v) = f.run(&["app", "upgrade", &id, "--version", "2.0.0"])?;
     assert_code(&out, 1);
     assert!(!v.to_string().contains("SYNTHETIC_SECRET"));
     assert!(!f.home.join("npm-mutated").exists());
@@ -3289,7 +3636,7 @@ esac"#)?;
     let mut catalog = f.read_json("catalog.json")?;
     catalog["packages"][0]["provider"] = json!({"type":"npm","package":"demo","prefix":prefix});
     write_json(&f.catalog, &catalog)?;
-    let (out, v) = f.run(&["list", "--kind", "applications"])?;
+    let (out, v) = f.run(&["app", "resources"])?;
     assert_code(&out, 0);
     let rows: Vec<_> = v["data"]["resources"]
         .as_array()
@@ -3300,17 +3647,17 @@ esac"#)?;
     assert_eq!(rows.len(), 1);
     let id = rows[0]["id"].as_str().ok_or("id")?;
     assert_eq!(rows[0]["recipe_ref"], "fixture:demo");
-    let (out, _) = f.run(&["adopt", id, "--yes"])?;
+    let (out, _) = f.run(&["app", "adopt", id, "--yes"])?;
     assert_code(&out, 0);
     let receipts = f.read_json("state/receipts.json")?;
     assert!(receipts["installations"]["fixture:demo"].is_object());
     assert!(receipts["installations"][id].is_null());
     assert!(!f.home.join("writes").exists());
-    let (out, v) = f.run(&["upgrade", id, "--version", "2.0.0"])?;
+    let (out, v) = f.run(&["app", "upgrade", id, "--version", "2.0.0"])?;
     assert_code(&out, 0);
     assert_eq!(v["data"]["plan"]["package"]["id"], "fixture:demo");
     assert_eq!(fs::read_to_string(prefix.join("version"))?, "2.0.0");
-    let (out, v) = f.run(&["list", "--kind", "applications"])?;
+    let (out, v) = f.run(&["app", "resources"])?;
     assert_code(&out, 0);
     let resource = v["data"]["resources"]
         .as_array()
@@ -3320,7 +3667,7 @@ esac"#)?;
         .ok_or("stable id")?;
     assert_eq!(resource["management"], "adopted");
     assert_eq!(resource["releases"][0]["version"], "2.0.0");
-    let (out, _) = f.run(&["uninstall", id, "--yes"])?;
+    let (out, _) = f.run(&["app", "uninstall", id, "--yes"])?;
     assert_code(&out, 0);
     assert!(!prefix.join("version").exists());
     assert_eq!(fs::read_to_string(&other)?, "other installation bytes");
@@ -3389,11 +3736,11 @@ fn npm_owners_are_resolved_across_old_keys_and_multiple_owners_block_writes() ->
     let mut catalog = f.read_json("catalog.json")?;
     catalog["packages"][0]["provider"] = json!({"type":"npm","package":"demo","prefix":prefix});
     write_json(&f.catalog, &catalog)?;
-    let (out, _) = f.run(&["adopt", "fixture:demo", "--yes"])?;
+    let (out, _) = f.run(&["app", "adopt", "fixture:demo", "--yes"])?;
     assert_code(&out, 0);
     catalog["packages"] = json!([]);
     write_json(&f.catalog, &catalog)?;
-    let (out, v) = f.run(&["list", "--kind", "applications"])?;
+    let (out, v) = f.run(&["app", "resources"])?;
     assert_code(&out, 0);
     let resource = v["data"]["resources"]
         .as_array()
@@ -3402,7 +3749,7 @@ fn npm_owners_are_resolved_across_old_keys_and_multiple_owners_block_writes() ->
         .find(|r| r["manager"] == "npm")
         .ok_or("npm")?;
     let id = resource["id"].as_str().ok_or("id")?;
-    let (out, _) = f.run(&["adopt", id, "--yes"])?;
+    let (out, _) = f.run(&["app", "adopt", id, "--yes"])?;
     assert_code(&out, 0);
     let mut receipts = f.read_json("state/receipts.json")?;
     assert_eq!(
@@ -3419,7 +3766,7 @@ fn npm_owners_are_resolved_across_old_keys_and_multiple_owners_block_writes() ->
     let before = fs::read(f.file("state/receipts.json"))?;
     let active = fs::read(f.file("state/active.json"))?;
     for key in [id, "fixture:demo", "old:other-owner"] {
-        let (out, v) = f.run(&["adopt", key, "--yes"])?;
+        let (out, v) = f.run(&["app", "adopt", key, "--yes"])?;
         assert_code(&out, 3);
         assert_eq!(v["error"]["code"], "owner_conflict");
     }
@@ -3442,7 +3789,7 @@ fn discovered_npm_probe_preserves_proxy_invocation_name() -> TestResult {
 case "$1" in prefix) /bin/cat "$MACOPS_TEST_HOME/npm-prefix" ;; ls) exit 98 ;; *) exit 9 ;; esac"#,
     )?;
     std::os::unix::fs::symlink(proxy, f.home.join("bin/npm"))?;
-    let (out, v) = f.run(&["adopt", "native-demo", "--yes"])?;
+    let (out, v) = f.run(&["app", "adopt", "native-demo", "--yes"])?;
     assert_code(&out, 0);
     assert_eq!(v["data"]["phase"], "succeeded");
     Ok(())
@@ -3465,7 +3812,7 @@ fn conflicting_npm_declarations_cannot_silently_fall_back_to_a_new_observer() ->
         .ok_or("packages")?
         .push(other);
     write_json(&f.catalog, &catalog)?;
-    let (out, v) = f.run(&["list", "--kind", "applications"])?;
+    let (out, v) = f.run(&["app", "resources"])?;
     assert_code(&out, 3);
     let resource = v["data"]["resources"]
         .as_array()
@@ -3474,7 +3821,12 @@ fn conflicting_npm_declarations_cannot_silently_fall_back_to_a_new_observer() ->
         .find(|r| r["manager"] == "npm")
         .ok_or("npm")?;
     assert_eq!(resource["status"], "unknown");
-    let (out, v) = f.run(&["adopt", resource["id"].as_str().ok_or("id")?, "--yes"])?;
+    let (out, v) = f.run(&[
+        "app",
+        "adopt",
+        resource["id"].as_str().ok_or("id")?,
+        "--yes",
+    ])?;
     assert_code(&out, 3);
     assert_eq!(v["error"]["code"], "owner_conflict");
     assert!(!f.file("state/receipts.json").exists());
@@ -3497,10 +3849,10 @@ fn duplicate_native_keys_and_generic_native_observations_cannot_be_adopted_as_wr
         "npm",
         r#"case "$1" in prefix) /bin/cat "$MACOPS_TEST_HOME/npm-prefix" ;; *) exit 98 ;; esac"#,
     )?;
-    let (out, v) = f.run(&["adopt", "native-demo", "--yes"])?;
+    let (out, v) = f.run(&["app", "adopt", "native-demo", "--yes"])?;
     assert_code(&out, 3);
     assert!(v["error"]["code"].is_string());
-    let (out, v) = f.run(&["list", "--kind", "applications"])?;
+    let (out, v) = f.run(&["app", "resources"])?;
     assert_code(&out, 3);
     assert!(
         v["data"]["coverage"]
@@ -3522,7 +3874,7 @@ fn duplicate_native_keys_and_generic_native_observations_cannot_be_adopted_as_wr
     catalog["packages"][0]["provider"] = json!({"type":"command","query":{"program":program,"args":["query"]},"install":{"program":program,"args":["write"]},"upgrade":{"program":program,"args":["write"]},"uninstall":{"program":program,"args":["write"]},"synchronous":true});
     write_json(&f.catalog, &catalog)?;
     for action in ["adopt", "upgrade", "uninstall"] {
-        let (out, v) = f.run(&[action, "fixture:demo", "--yes"])?;
+        let (out, v) = f.run(&["app", action, "fixture:demo", "--yes"])?;
         assert_code(&out, 1);
         assert_eq!(v["error"]["code"], "operation_unsupported");
     }
@@ -3542,14 +3894,14 @@ fn adopted_native_baseline_drift_is_visible_without_rewriting_receipts() -> Test
         "npm",
         r#"case "$1" in prefix) /bin/cat "$MACOPS_TEST_HOME/npm-prefix" ;; *) exit 98 ;; esac"#,
     )?;
-    let (out, _) = f.run(&["adopt", "native-demo", "--yes"])?;
+    let (out, _) = f.run(&["app", "adopt", "native-demo", "--yes"])?;
     assert_code(&out, 0);
     let receipt = fs::read(f.file("state/receipts.json"))?;
-    let (out, v) = f.run(&["info", "native-demo"])?;
+    let (out, v) = f.run(&["app", "native-demo"])?;
     assert_code(&out, 0);
     assert_eq!(v["data"]["resource"]["baseline"]["comparison"], "same");
     npm_manifest(&prefix, "native-demo", "2.0.0")?;
-    let (out, v) = f.run(&["info", "native-demo"])?;
+    let (out, v) = f.run(&["app", "native-demo"])?;
     assert_code(&out, 3);
     assert_eq!(v["data"]["resource"]["baseline"]["comparison"], "different");
     assert_eq!(
@@ -3560,7 +3912,7 @@ fn adopted_native_baseline_drift_is_visible_without_rewriting_receipts() -> Test
         v["data"]["resource"]["baseline"]["current"]["version"],
         "2.0.0"
     );
-    let (out, v) = f.run(&["list", "--kind", "applications"])?;
+    let (out, v) = f.run(&["app", "resources"])?;
     assert_code(&out, 3);
     assert!(
         v["data"]["coverage"]
@@ -3576,7 +3928,7 @@ fn adopted_native_baseline_drift_is_visible_without_rewriting_receipts() -> Test
         .keys()
         .next()
         .ok_or("key")?;
-    let (out, v) = f.run(&["doctor", id])?;
+    let (out, v) = f.run(&["app", "doctor", id])?;
     assert_code(&out, 3);
     assert_eq!(v["data"][0]["baseline"]["comparison"], "different");
     assert_eq!(fs::read(f.file("state/receipts.json"))?, receipt);
@@ -3613,10 +3965,10 @@ fn config_candidate_queries_never_execute_hooks_templates_externals_or_chezmoi()
         "printf CALLED > \"$MACOPS_TEST_HOME/chezmoi-called\"; exit 9",
     )?;
     let before = fs::read(&config)?;
-    for args in [vec!["config", "list"], vec!["list", "--kind", "configs"]] {
+    for (args, expected) in [(["config", "list"], 3), (["config", "resources"], 0)] {
         let (out, value) = f.run(&args)?;
-        assert_code(&out, if args[0] == "config" { 3 } else { 0 });
-        if args[0] == "config" {
+        assert_code(&out, expected);
+        if expected == 3 {
             assert_eq!(value["data"]["coverage"], "unresolved");
         } else {
             assert!(
@@ -3653,7 +4005,7 @@ printf '%s' '{"name":"demo","version":"1.0.0"}' > "$4/lib/node_modules/demo/pack
 printf 'install\n' >> "$MACOPS_TEST_HOME/write-calls"
 "#,
         )?;
-        let (out, result) = f.run(&["install", "fixture:demo", "--version", "1.0.0"])?;
+        let (out, result) = f.run(&["app", "install", "fixture:demo", "--version", "1.0.0"])?;
         assert_code(&out, 0);
         let receipt = fs::read(f.file("state/receipts.json"))?;
         let mut journal = result["data"].clone();
@@ -3694,12 +4046,12 @@ fn npm_known_prefix_queries_do_not_launch_ls_or_require_an_npm_binary() -> TestR
 esac"#,
     )?;
     for args in [
-        vec!["discover", "npm"],
-        vec!["discover"],
-        vec!["toolchain", "info", "npm"],
-        vec!["toolchain", "list", "npm"],
-        vec!["list", "--kind", "applications"],
-        vec!["doctor", "fixture:demo"],
+        vec!["app", "discover", "npm"],
+        vec!["app", "discover"],
+        vec!["app", "discover", "npm"],
+        vec!["app", "discover", "npm"],
+        vec!["app", "resources"],
+        vec!["app", "doctor", "fixture:demo"],
     ] {
         let (out, value) = f.run(&args)?;
         assert!(
@@ -3710,7 +4062,7 @@ esac"#,
         assert!(!f.home.join("forbidden-npm").exists());
     }
     fs::remove_file(f.home.join("bin/npm"))?;
-    let (out, value) = f.run(&["adopt", "@scope/other", "--yes"])?;
+    let (out, value) = f.run(&["app", "adopt", "@scope/other", "--yes"])?;
     assert_code(&out, 0);
     assert_eq!(
         value["data"]["plan"]["package"]["provider"]["type"],
@@ -3732,14 +4084,14 @@ fn npm_receipt_discovery_keeps_frozen_prefix_and_truthful_provenance() -> TestRe
     let mut catalog = f.read_json("catalog.json")?;
     catalog["packages"][0]["provider"] = json!({"type":"npm","package":"demo","prefix":alias});
     write_json(&f.catalog, &catalog)?;
-    let (out, _) = f.run(&["adopt", "fixture:demo", "--yes"])?;
+    let (out, _) = f.run(&["app", "adopt", "fixture:demo", "--yes"])?;
     assert_code(&out, 0);
     let baseline = fs::read(f.file("state/receipts.json"))?;
     catalog["packages"] = json!([]);
     write_json(&f.catalog, &catalog)?;
     fs::remove_file(&alias)?;
     symlink(&replacement, &alias)?;
-    let (out, result) = f.run(&["discover", "npm"])?;
+    let (out, result) = f.run(&["app", "discover", "npm"])?;
     assert_code(&out, 3);
     assert_eq!(
         result["data"]["namespaces"],
@@ -3749,10 +4101,10 @@ fn npm_receipt_discovery_keeps_frozen_prefix_and_truthful_provenance() -> TestRe
         result["data"]["packages"][0]["releases"][0]["version"],
         "1.0.0"
     );
-    let (out, result) = f.run(&["doctor", "fixture:demo"])?;
+    let (out, result) = f.run(&["app", "doctor", "fixture:demo"])?;
     assert_code(&out, 3);
     assert_eq!(result["data"][0]["observation"]["status"], "unknown");
-    let (out, result) = f.run(&["adopt", "fixture:demo", "--yes"])?;
+    let (out, result) = f.run(&["app", "adopt", "fixture:demo", "--yes"])?;
     assert_code(&out, 3);
     assert_eq!(result["error"]["code"], "manager_scope_changed");
     assert_eq!(fs::read(f.file("state/receipts.json"))?, baseline);
@@ -3765,11 +4117,11 @@ fn npm_inventory_keeps_invalid_root_errors_and_accepts_maximum_scoped_name() -> 
     let mut catalog = f.read_json("catalog.json")?;
     catalog["packages"][0]["provider"] = json!({"type":"npm","package":"demo","prefix":"relative"});
     write_json(&f.catalog, &catalog)?;
-    let (out, result) = f.run(&["discover", "npm"])?;
+    let (out, result) = f.run(&["app", "discover", "npm"])?;
     assert_code(&out, 3);
     assert_eq!(result["data"]["coverage"]["state"], "invalid");
     assert_eq!(result["data"]["incomplete"], true);
-    let (out, result) = f.run(&["discover"])?;
+    let (out, result) = f.run(&["app", "discover"])?;
     assert_code(&out, 3);
     assert!(
         result["data"]
@@ -3785,7 +4137,7 @@ fn npm_inventory_keeps_invalid_root_errors_and_accepts_maximum_scoped_name() -> 
     npm_manifest(&prefix, &name, "1.2.3")?;
     catalog["packages"][0]["provider"] = json!({"type":"npm","package":name,"prefix":prefix});
     write_json(&f.catalog, &catalog)?;
-    let (out, result) = f.run(&["discover", "npm"])?;
+    let (out, result) = f.run(&["app", "discover", "npm"])?;
     assert_code(&out, 3);
     assert_eq!(result["data"]["packages"][0]["name"], name);
     assert_eq!(result["data"]["packages"][0]["status"], "present");
@@ -3796,10 +4148,10 @@ fn npm_inventory_keeps_invalid_root_errors_and_accepts_maximum_scoped_name() -> 
             .join("package.json"),
         serde_json::to_vec(&json!([name, "1.2.3"]))?,
     )?;
-    let (out, result) = f.run(&["doctor", "fixture:demo"])?;
+    let (out, result) = f.run(&["app", "doctor", "fixture:demo"])?;
     assert_code(&out, 3);
     assert_eq!(result["data"][0]["observation"]["status"], "unknown");
-    let (out, result) = f.run(&["discover", "npm"])?;
+    let (out, result) = f.run(&["app", "discover", "npm"])?;
     assert_code(&out, 3);
     assert_eq!(result["data"]["packages"][0]["status"], "unknown");
     Ok(())
@@ -3813,7 +4165,7 @@ fn npm_inventory_does_not_drop_an_independent_source_when_a_receipt_is_stale() -
     let mut catalog = f.read_json("catalog.json")?;
     catalog["packages"][0]["provider"] = json!({"type":"npm","package":"demo","prefix":prefix});
     write_json(&f.catalog, &catalog)?;
-    let (out, _) = f.run(&["adopt", "fixture:demo", "--yes"])?;
+    let (out, _) = f.run(&["app", "adopt", "fixture:demo", "--yes"])?;
     assert_code(&out, 0);
     let receipt = fs::read(f.file("state/receipts.json"))?;
     fs::rename(&prefix, f.home.join("retired-prefix"))?;
@@ -3823,7 +4175,7 @@ fn npm_inventory_does_not_drop_an_independent_source_when_a_receipt_is_stale() -
         r#"[ "$1" = prefix ] || exit 98
 printf '%s' "$MACOPS_TEST_HOME/prefix""#,
     )?;
-    let (out, result) = f.run(&["discover", "npm"])?;
+    let (out, result) = f.run(&["app", "discover", "npm"])?;
     assert_code(&out, 3);
     assert_eq!(
         result["data"]["namespaces"],
@@ -3855,7 +4207,7 @@ fn npm_inventory_budget_orders_canonical_roots_before_filling_slots() -> TestRes
         packages.push(json!({"id":format!("demo:{index}"),"name":"demo","kind":"cli","official_url":"https://example.org","provider":{"type":"npm","package":"demo","prefix":declared}}));
     }
     write_json(&f.catalog, &json!({"schema_version":1,"packages":packages}))?;
-    let (out, result) = f.run(&["discover", "npm"])?;
+    let (out, result) = f.run(&["app", "discover", "npm"])?;
     assert_code(&out, 3);
     let roots = result["data"]["namespaces"]
         .as_array()
@@ -3930,14 +4282,14 @@ exit 97"#,
         )?;
     }
 
-    let (out, ambig) = f.run(&["adopt", "plugin:code-review@official", "--yes"])?;
+    let (out, ambig) = f.run(&["app", "adopt", "plugin:code-review@official", "--yes"])?;
     assert_code(&out, 3);
     assert_eq!(ambig["error"]["code"], "ambiguous");
 
     let recipe = fixed_native_recipe(&f, "tdd")?;
     let recipe = recipe.to_str().ok_or("recipe path")?;
     let (out, preview) = f.run(&[
-        "skills",
+        "skill",
         "adopt",
         "skill:tdd",
         "--recipe",
@@ -3948,7 +4300,7 @@ exit 97"#,
     assert_eq!(preview["data"]["persistentWrites"], false);
     assert!(!preview.to_string().contains("SYNTHETIC_SECRET"));
 
-    let (out, adopted) = f.run(&["skills", "adopt", "skill:tdd", "--recipe", recipe, "--yes"])?;
+    let (out, adopted) = f.run(&["skill", "adopt", "skill:tdd", "--recipe", recipe, "--yes"])?;
     assert_code(&out, 0);
     let skill_id = adopted["data"]["journal"]["plan"]["package"]["id"]
         .as_str()
@@ -3960,19 +4312,19 @@ exit 97"#,
         .to_owned();
     let receipt_bytes = fs::read(f.file("state/receipts.json"))?;
 
-    let (out, err) = f.run(&["install", &skill_id, "--yes"])?;
+    let (out, err) = f.run(&["app", "install", &skill_id, "--yes"])?;
     assert_code(&out, 1);
     assert_eq!(err["error"]["code"], "operation_unsupported");
 
     fs::write(canonical.join(".in_use"), "lease")?;
-    let (out, doc_clean) = f.run(&["doctor", &skill_id])?;
+    let (out, doc_clean) = f.run(&["app", "doctor", &skill_id])?;
     assert_code(&out, 0);
     assert_eq!(doc_clean["data"][0]["baseline"]["comparison"], "same");
     fs::remove_file(canonical.join(".in_use"))?;
 
     assert_capability_lease_conflicts(&f, &canonical, &skill_id)?;
     fs::write(canonical.join("SKILL.md"), "---\nname: tdd\n---\nedited\n")?;
-    let (out, doc_drift) = f.run(&["doctor", &skill_id])?;
+    let (out, doc_drift) = f.run(&["app", "doctor", &skill_id])?;
     assert_code(&out, 3);
     assert_eq!(doc_drift["data"][0]["baseline"]["comparison"], "different");
     assert_eq!(fs::read(f.file("state/receipts.json"))?, receipt_bytes);
@@ -3989,7 +4341,7 @@ fn observed_npm_binding_fixture(
     prefix: &std::path::Path,
 ) -> Result<String, Box<dyn std::error::Error>> {
     write_json(&f.catalog, &json!({"schema_version":1,"packages":[]}))?;
-    let (out, data) = f.run(&["discover", "npm"])?;
+    let (out, data) = f.run(&["app", "discover", "npm"])?;
     assert_code(&out, 0);
     let target = data["data"]["packages"]
         .as_array()
@@ -3998,7 +4350,7 @@ fn observed_npm_binding_fixture(
         .find(|row| row["native_id"] == "@scope/demo")
         .ok_or("observed installation")?;
     let id = target["id"].as_str().ok_or("identity")?.to_owned();
-    assert_code(&f.run(&["adopt", &id, "--yes"])?.0, 0);
+    assert_code(&f.run(&["app", "adopt", &id, "--yes"])?.0, 0);
     write_authorized_npm_catalog(f, prefix, true, true)?;
     let mut explicit = f.read_json("catalog.json")?;
     explicit["packages"][0]["id"] = json!(id);
@@ -4047,21 +4399,24 @@ esac"#,
         initial["installations"][id]["package"]["provider"]["type"],
         "npm-observed"
     );
-    let (out, unbound) = f.run(&["upgrade", id, "--version", "2.0.0"])?;
+    let (out, unbound) = f.run(&["app", "upgrade", id, "--version", "2.0.0"])?;
     assert_code(&out, 3);
     assert_eq!(unbound["error"]["code"], "manager_scope_changed");
     assert!(!f.home.join("native-writes").exists());
 
-    let (ordinary, rejected) = f.run(&["adopt", id, "--yes"])?;
+    let (ordinary, rejected) = f.run(&["app", "adopt", id, "--yes"])?;
     assert_code(&ordinary, 3);
     assert_eq!(rejected["error"]["code"], "manager_scope_changed");
     let original_receipts = fs::read(f.file("state/receipts.json"))?;
-    let (out, preview) = f.run(&["--dry-run", "adopt", id, "--bind-recipe"])?;
+    let (out, preview) = f.run(&["--dry-run", "app", "adopt", id, "--bind-recipe"])?;
     assert_code(&out, 0);
     assert_eq!(preview["data"]["mode"], "dry-run");
     assert_eq!(preview["data"]["persistentWrites"], false);
     assert_eq!(fs::read(f.file("state/receipts.json"))?, original_receipts);
-    assert_code(&f.run(&["adopt", id, "--bind-recipe", "--yes"])?.0, 0);
+    assert_code(
+        &f.run(&["app", "adopt", id, "--bind-recipe", "--yes"])?.0,
+        0,
+    );
     let enrolled = f.read_json("state/receipts.json")?;
     assert_eq!(
         enrolled["installations"]
@@ -4076,10 +4431,10 @@ esac"#,
     );
     assert!(!f.home.join("native-writes").exists());
 
-    let (out, upgraded) = f.run(&["upgrade", id, "--version", "2.0.0"])?;
+    let (out, upgraded) = f.run(&["app", "upgrade", id, "--version", "2.0.0"])?;
     assert_code(&out, 0);
     assert_eq!(upgraded["data"]["plan"]["package"]["id"], id);
-    let (_, observed) = f.run(&["discover", "npm"])?;
+    let (_, observed) = f.run(&["app", "discover", "npm"])?;
     let row = observed["data"]["packages"]
         .as_array()
         .ok_or("packages")?
@@ -4087,7 +4442,7 @@ esac"#,
         .find(|row| row["id"] == id)
         .ok_or("stable id")?;
     assert_eq!(row["releases"][0]["version"], "2.0.0");
-    assert_code(&f.run(&["uninstall", id, "--yes"])?.0, 0);
+    assert_code(&f.run(&["app", "uninstall", id, "--yes"])?.0, 0);
     assert_eq!(fs::read(preserved)?, original);
     let log = fs::read_to_string(f.home.join("native-writes"))?;
     assert_eq!(log.lines().count(), 2);
@@ -4123,7 +4478,7 @@ fn npm_binding_recovers_only_exact_old_or_new_receipts() -> TestResult {
         let receipt = f.file("state/receipts.json");
         let original = fs::read(&receipt)?;
         fs::remove_file(f.home.join("bin/npm"))?;
-        let (out, result) = f.run(&["adopt", &package, "--bind-recipe", "--yes"])?;
+        let (out, result) = f.run(&["app", "adopt", &package, "--bind-recipe", "--yes"])?;
         assert_code(&out, 0);
         let mut journal = result["data"].clone();
         let id = journal["id"].as_str().ok_or("operation id")?.to_owned();
@@ -4261,7 +4616,7 @@ fn npm_binding_rejects_a_missing_recipe_changed_scope_and_installation_drift() -
         let old_receipt = fs::read(&receipt).ok();
         let old_active = fs::read(f.file("state/active.json"))?;
         fs::remove_file(f.home.join("bin/npm"))?;
-        let (out, data) = f.run(&["adopt", &id, "--bind-recipe", "--yes"])?;
+        let (out, data) = f.run(&["app", "adopt", &id, "--bind-recipe", "--yes"])?;
         assert_code(&out, 3);
         assert_eq!(data["error"]["code"], code, "{case}");
         assert_eq!(fs::read(&receipt).ok(), old_receipt, "{case}");
@@ -4271,6 +4626,7 @@ fn npm_binding_rejects_a_missing_recipe_changed_scope_and_installation_drift() -
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn npm_write_authority_enforces_remove_registry_and_env_sanitization() -> TestResult {
     let f = Fixture::new()?;
     let prefix = f.home.join("npm-auth-root");
@@ -4298,19 +4654,33 @@ esac"#,
     )?;
 
     write_authorized_npm_catalog(&f, &prefix, false, false)?;
-    assert_code(&f.run(&["adopt", "npm:scoped-demo", "--yes"])?.0, 0);
+    assert_code(&f.run(&["app", "adopt", "npm:scoped-demo", "--yes"])?.0, 0);
     assert_eq!(
-        f.run(&["uninstall", "npm:scoped-demo", "--yes"])?.1["error"]["code"],
+        f.run(&["app", "uninstall", "npm:scoped-demo", "--yes"])?.1["error"]["code"],
         "remove_authority_required"
     );
     assert_eq!(
-        f.run(&["upgrade", "npm:scoped-demo", "--version", "1.2.0", "--yes"])?
-            .1["error"]["code"],
+        f.run(&[
+            "app",
+            "upgrade",
+            "npm:scoped-demo",
+            "--version",
+            "1.2.0",
+            "--yes"
+        ])?
+        .1["error"]["code"],
         "registry_authority_required"
     );
 
     write_authorized_npm_catalog(&f, &prefix, true, true)?;
-    let (out, drift) = f.run(&["upgrade", "npm:scoped-demo", "--version", "1.2.0", "--yes"])?;
+    let (out, drift) = f.run(&[
+        "app",
+        "upgrade",
+        "npm:scoped-demo",
+        "--version",
+        "1.2.0",
+        "--yes",
+    ])?;
     assert_code(&out, 3);
     assert_eq!(drift["error"]["code"], "installation_drift");
     assert!(
@@ -4320,11 +4690,11 @@ esac"#,
             .contains("写权限")
     );
 
-    let (out, adopted) = f.run(&["adopt", "npm:scoped-demo", "--yes"])?;
+    let (out, adopted) = f.run(&["app", "adopt", "npm:scoped-demo", "--yes"])?;
     assert_code(&out, 0);
     assert!(!adopted.to_string().contains("SYNTHETIC_NPM_SECRET"));
     assert_eq!(
-        f.run(&["update", "npm:scoped-demo"])?.1["data"]["results"][0]["version"],
+        f.run(&["app", "refresh", "npm:scoped-demo"])?.1["data"]["results"][0]["version"],
         "1.2.0"
     );
 
@@ -4332,7 +4702,14 @@ esac"#,
         .command()
         .env("NODE_OPTIONS", "--require=/evil.js")
         .env("NPM_Config_Registry", "https://evil.invalid")
-        .args(["upgrade", "npm:scoped-demo", "--version", "1.2.0", "--yes"])
+        .args([
+            "app",
+            "upgrade",
+            "npm:scoped-demo",
+            "--version",
+            "1.2.0",
+            "--yes",
+        ])
         .output()?;
     assert_code(&raw, 0);
     assert!(!f.home.join("npm-env-leak").exists());
@@ -4345,7 +4722,7 @@ esac"#,
     let moved_nm = prefix.join("lib/node_modules_real");
     fs::rename(&real_nm, &moved_nm)?;
     symlink(&moved_nm, &real_nm)?;
-    let (out, link_err) = f.run(&["uninstall", "npm:scoped-demo", "--yes"])?;
+    let (out, link_err) = f.run(&["app", "uninstall", "npm:scoped-demo", "--yes"])?;
     assert_code(&out, 3);
     assert!(matches!(
         link_err["error"]["code"].as_str(),
@@ -4358,7 +4735,7 @@ esac"#,
     fs::remove_file(&real_nm)?;
     fs::rename(&moved_nm, &real_nm)?;
 
-    let (out, removed) = f.run(&["uninstall", "npm:scoped-demo", "--yes"])?;
+    let (out, removed) = f.run(&["app", "uninstall", "npm:scoped-demo", "--yes"])?;
     assert_code(&out, 0);
     assert_eq!(removed["data"]["phase"], "succeeded");
     assert!(
@@ -4422,7 +4799,7 @@ exit 97"#,
     let env_blocked = f
         .command()
         .env("MISE_ENV", "staging")
-        .args(["ai", "reconcile"])
+        .args(["agent", "upgrade"])
         .output()?;
     assert_code(&env_blocked, 3);
 
@@ -4443,8 +4820,8 @@ exit 97"#,
         src_arg,
         "--chezmoi-destination",
         dst_arg,
-        "ai",
-        "reconcile",
+        "agent",
+        "upgrade",
     ])?;
     assert_code(&out, 0);
     assert_eq!(clean["data"]["reconcile_state"], "in_sync");
@@ -4484,7 +4861,7 @@ fn invalid_typed_json_never_echoes_configuration_values_in_diagnostics() -> Test
         &f.catalog,
         &json!({"schema_version":"SYNTHETIC_SECRET_VALUE_0014", "packages":[]}),
     )?;
-    let (out, value) = f.run(&["list"])?;
+    let (out, value) = f.run(&["app", "resources"])?;
     assert_code(&out, 1);
     assert_eq!(value["error"]["code"], "invalid_json");
     assert!(!String::from_utf8_lossy(&out.stdout).contains("SYNTHETIC_SECRET_VALUE_0014"));
@@ -4504,12 +4881,12 @@ fn native_skills_readonly_and_no_pending_recovery_never_execute_installers_or_wr
         )?;
     }
     for args in [
-        vec!["skills", "list"],
-        vec!["skills", "check", "demo"],
-        vec!["skills", "status", "demo"],
-        vec!["skills", "policy", "check"],
-        vec!["skills", "policy", "recover"],
-        vec!["skills", "policy", "recover", "--change-id", "CASE-1"],
+        vec!["skill"],
+        vec!["skill", "doctor", "demo"],
+        vec!["skill", "doctor", "demo"],
+        vec!["skill", "policy", "check"],
+        vec!["skill", "policy", "recover"],
+        vec!["skill", "policy", "recover", "--change-id", "CASE-1"],
     ] {
         let (out, value) = f.run(&args)?;
         assert_code(&out, 0);
@@ -4521,7 +4898,7 @@ fn native_skills_readonly_and_no_pending_recovery_never_execute_installers_or_wr
     }
     let pending = f.home.join(".agents/invocation-policy.pending.json");
     fs::write(&pending, "{\"schema_version\":1}")?;
-    let (out, value) = f.run(&["skills", "policy", "recover"])?;
+    let (out, value) = f.run(&["skill", "policy", "recover"])?;
     assert_code(&out, 3);
     assert_eq!(value["error"]["code"], "capability_recovery_required");
     assert_eq!(fs::read_to_string(pending)?, "{\"schema_version\":1}");
@@ -4538,11 +4915,11 @@ fn pending_capability_transactions_block_health_queries_without_mutating_pending
     let before = b"{\"schema_version\":1,\"phase\":\"running\"}";
     fs::write(&path, before)?;
     for args in [
-        vec!["skills", "list"],
-        vec!["skills", "status", "demo"],
-        vec!["skills", "check", "demo"],
-        vec!["skills", "policy", "check"],
-        vec!["list", "--kind", "capabilities"],
+        vec!["skill"],
+        vec!["skill", "doctor", "demo"],
+        vec!["skill", "doctor", "demo"],
+        vec!["skill", "policy", "check"],
+        vec!["skill", "resources"],
     ] {
         let (out, value) = f.run(&args)?;
         assert_code(&out, 3);
@@ -4564,7 +4941,7 @@ fn missing_policy_targets_and_duplicate_native_lock_keys_are_attention_not_healt
         &rules,
         &json!({"schema_version":1,"standalone_manual_only":["absent"]}),
     )?;
-    let (out, value) = f.run(&["skills", "policy", "check"])?;
+    let (out, value) = f.run(&["skill", "policy", "check"])?;
     assert_code(&out, 3);
     assert_eq!(value["data"]["status"], "drift");
     assert_eq!(value["data"]["missing"], json!(["absent"]));
@@ -4575,7 +4952,7 @@ fn missing_policy_targets_and_duplicate_native_lock_keys_are_attention_not_healt
         f.home.join(".agents/.skill-lock.json"),
         format!("{{\"version\":3,\"skills\":{{\"demo\":{record},\"demo\":{record}}}}}"),
     )?;
-    let (out, value) = f.run(&["skills", "check"])?;
+    let (out, value) = f.run(&["skill", "doctor"])?;
     assert_code(&out, 3);
     assert_eq!(value["data"]["incomplete"], true);
     assert!(
@@ -4607,10 +4984,7 @@ fn native_capability_queries_reject_array_shaped_lock_roots_and_records_with_or_
             r#"{"version":3,"skills":{"demo":["owner/repo","github",null,null,null,null]}}"#,
         ] {
             fs::write(f.home.join(".agents/.skill-lock.json"), invalid)?;
-            for args in [
-                vec!["skills", "check"],
-                vec!["list", "--kind", "capabilities"],
-            ] {
+            for args in [vec!["skill", "doctor"], vec!["skill", "resources"]] {
                 let (out, value) = f.run(&args)?;
                 assert_code(&out, 3);
                 assert_eq!(value["data"]["incomplete"], true);
@@ -4624,7 +4998,7 @@ fn native_capability_queries_reject_array_shaped_lock_roots_and_records_with_or_
 fn seed_legacy_policy_receipt(f: &Fixture) -> Result<String, Box<dyn std::error::Error>> {
     let recipe = fixed_native_recipe(f, "demo")?;
     let recipe = recipe.to_str().ok_or("recipe path")?;
-    let (out, adopted) = f.run(&["--yes", "skills", "adopt", "skill:demo", "--recipe", recipe])?;
+    let (out, adopted) = f.run(&["--yes", "skill", "adopt", "skill:demo", "--recipe", recipe])?;
     assert_code(&out, 0);
     let skill_id = adopted["data"]["journal"]["plan"]["package"]["id"]
         .as_str()
@@ -4657,19 +5031,12 @@ fn native_policy_sync_commits_and_retires_overlays_without_legacy_execution_or_r
             r#"printf 'called' > "$MACOPS_TEST_HOME/installer-poison"; exit 97"#,
         )?;
     }
-    let (out, value) = f.run(&[
-        "--dry-run",
-        "skills",
-        "policy",
-        "sync",
-        "--change-id",
-        "DRY",
-    ])?;
+    let (out, value) = f.run(&["--dry-run", "skill", "policy", "sync", "--change-id", "DRY"])?;
     assert_code(&out, 0);
     assert_eq!(value["data"]["persistentWrites"], false);
     assert!(!f.file("state").exists());
     assert!(!f.file("cache").exists());
-    let (out, value) = f.run(&["skills", "policy", "sync"])?;
+    let (out, value) = f.run(&["skill", "policy", "sync"])?;
     assert_code(&out, 3);
     assert_eq!(value["error"]["code"], "confirmation_required");
     assert!(!f.file("state").exists());
@@ -4688,7 +5055,7 @@ fn native_policy_sync_commits_and_retires_overlays_without_legacy_execution_or_r
     );
     let codex_policy = skill.parent().ok_or("payload")?.join("agents/openai.yaml");
     assert!(!codex_policy.exists());
-    let (out, value) = f.run(&["--yes", "skills", "policy", "sync", "--change-id", "POLICY"])?;
+    let (out, value) = f.run(&["--yes", "skill", "policy", "sync", "--change-id", "POLICY"])?;
     assert_code(&out, 0);
     assert_eq!(value["data"]["status"], "succeeded");
     assert_ne!(fs::read(&skill)?, original);
@@ -4705,10 +5072,10 @@ fn native_policy_sync_commits_and_retires_overlays_without_legacy_execution_or_r
             receipt["observation"]["pack"][key]
         );
     }
-    let (out, value) = f.run(&["doctor", &skill_id])?;
+    let (out, value) = f.run(&["app", "doctor", &skill_id])?;
     assert_code(&out, 0);
     assert_eq!(value["data"][0]["baseline"]["comparison"], "same");
-    let (out, value) = f.run(&["skills", "policy", "recover"])?;
+    let (out, value) = f.run(&["skill", "policy", "recover"])?;
     assert_code(&out, 0);
     assert_eq!(value["data"]["persistentWrites"], false);
     assert_eq!(fs::read(&receipt_path)?, applied_bytes);
@@ -4716,7 +5083,7 @@ fn native_policy_sync_commits_and_retires_overlays_without_legacy_execution_or_r
         &rules,
         &json!({"schema_version":1,"standalone_manual_only":[]}),
     )?;
-    let (out, value) = f.run(&["--yes", "skills", "policy", "sync", "--change-id", "RETIRE"])?;
+    let (out, value) = f.run(&["--yes", "skill", "policy", "sync", "--change-id", "RETIRE"])?;
     assert_code(&out, 0);
     assert_eq!(fs::read(&skill)?, original);
     assert!(!codex_policy.exists());
@@ -4730,7 +5097,7 @@ fn native_policy_sync_commits_and_retires_overlays_without_legacy_execution_or_r
             assert_eq!(current[key], receipt[key]);
         }
     }
-    let (out, value) = f.run(&["doctor", &skill_id])?;
+    let (out, value) = f.run(&["app", "doctor", &skill_id])?;
     assert_code(&out, 0);
     assert_eq!(value["data"][0]["baseline"]["comparison"], "same");
     assert_eq!(fs::read(&receipt_path)?, retired_bytes);
@@ -4755,7 +5122,7 @@ fn brew_positional_records_are_reported_invalid_without_creating_management_stat
         json!({"formulae":[{"name":"demo","installed":[["1.0.0"]]}],"casks":[]}),
     ] {
         write_json(&f.home.join("brew-data"), &positional)?;
-        let (out, value) = f.run(&["list", "--kind", "applications"])?;
+        let (out, value) = f.run(&["app", "resources"])?;
         assert_code(&out, 3);
         let report = value["data"]["coverage"]
             .as_array()
@@ -4807,18 +5174,18 @@ fn native_profile_sync_is_scoped_preserves_models_and_reports_unfinished_configu
             r#"printf called > "$MACOPS_TEST_HOME/poison-sync"; exit 97"#,
         )?;
     }
-    let (out, unknown) = f.run(&["--dry-run", "skills", "sync", "--all"])?;
+    let (out, unknown) = f.run(&["--dry-run", "skill", "sync", "--all"])?;
     assert_code(&out, 3);
     assert_eq!(unknown["error"]["code"], "unverified_profile_configuration");
     assert!(!profile.join("skills").exists());
-    let (out, plan) = f.run(&["--dry-run", "skills", "sync", "--only", "alpha"])?;
+    let (out, plan) = f.run(&["--dry-run", "skill", "sync", "--only", "alpha"])?;
     assert_code(&out, 3);
     assert_eq!(plan["data"]["backend"], "rust");
     assert_eq!(plan["data"]["incomplete"], true);
     assert!(!f.file("state").exists());
     let (out, synced) = f.run(&[
         "--yes",
-        "skills",
+        "skill",
         "sync",
         "--only",
         "alpha",
@@ -4838,7 +5205,7 @@ fn native_profile_sync_is_scoped_preserves_models_and_reports_unfinished_configu
     assert!(f.home.join(".cursor/skills/alpha").is_dir());
     assert!(!f.home.join("poison-sync").exists());
     assert!(!f.file("cache").exists());
-    let (out, noop) = f.run(&["--yes", "skills", "sync", "--only", "alpha"])?;
+    let (out, noop) = f.run(&["--yes", "skill", "sync", "--only", "alpha"])?;
     assert_code(&out, 3);
     assert_eq!(noop["data"]["persistentWrites"], false);
     Ok(())
@@ -4858,7 +5225,7 @@ fn different_native_sources_cannot_silently_share_a_source_selector() -> TestRes
         &f.file("settings/manifests/agent-source-channels.json"),
         &json!({"schema_version":1,"source_ids":{"owner/alpha":"shared","owner/beta":"shared"}}),
     )?;
-    let (out, value) = f.run(&["--yes", "skills", "sync", "--only", "shared"])?;
+    let (out, value) = f.run(&["--yes", "skill", "sync", "--only", "shared"])?;
     assert_code(&out, 3);
     assert_eq!(value["error"]["code"], "ambiguous_link_source_alias");
     assert!(!f.home.join(".claude-mi/skills").exists());
@@ -4896,7 +5263,7 @@ fn configuration_profile_selector_accepts_explicit_static_roots_without_requirin
     ];
     let args: Vec<_> = scope
         .into_iter()
-        .chain(["--dry-run", "skills", "sync", "--only", "profile:mi"])
+        .chain(["--dry-run", "skill", "sync", "--only", "profile:mi"])
         .collect();
     let (out, dry) = f.run(&args)?;
     assert_code(&out, 0);
@@ -4906,7 +5273,7 @@ fn configuration_profile_selector_accepts_explicit_static_roots_without_requirin
     assert!(!f.file("cache").exists());
     let args: Vec<_> = scope
         .into_iter()
-        .chain(["--yes", "skills", "sync", "--only", "profile:mi"])
+        .chain(["--yes", "skill", "sync", "--only", "profile:mi"])
         .collect();
     let (out, applied) = f.run(&args)?;
     assert_code(&out, 0);
@@ -4937,7 +5304,7 @@ fn declared_github_source_selector_cannot_claim_a_different_native_repository() 
         &f.file("settings/manifests/managed-agent-assets.json"),
         &json!({"schema_version":1,"assets":{"alpha":{"kind":"github-skill","repository":"expected/declared-repo","revision":"b".repeat(40),"path":"skills/alpha"}}}),
     )?;
-    let (out, value) = f.run(&["--yes", "skills", "sync", "--only", "source:alpha"])?;
+    let (out, value) = f.run(&["--yes", "skill", "sync", "--only", "source:alpha"])?;
     assert_code(&out, 3);
     assert_eq!(value["error"]["code"], "declared_link_source_mismatch");
     assert!(!f.home.join(".claude-mi/skills").exists());
@@ -4964,7 +5331,7 @@ fn fixed_native_recipe_adoption_preserves_native_owned_payload_and_raw_documents
     let recipe = recipe.to_str().ok_or("recipe path")?;
     let (out, value) = f.run(&[
         "--dry-run",
-        "skills",
+        "skill",
         "adopt",
         "skill:demo",
         "--recipe",
@@ -4974,7 +5341,7 @@ fn fixed_native_recipe_adoption_preserves_native_owned_payload_and_raw_documents
     assert_eq!(value["data"]["recipe"]["scope"], "global");
     assert!(!f.file("state").exists());
     assert!(!f.home.join(".agents/backups").exists());
-    let (out, value) = f.run(&["--yes", "skills", "adopt", "skill:demo", "--recipe", recipe])?;
+    let (out, value) = f.run(&["--yes", "skill", "adopt", "skill:demo", "--recipe", recipe])?;
     assert_code(&out, 0);
     assert_eq!(value["data"]["journal"]["phase"], "succeeded");
     let member = value["data"]["journal"]["plan"]["package"]["id"]
@@ -5015,13 +5382,13 @@ fn malformed_native_recipe_adoption_and_chezmoi_override_cannot_reach_legacy_rou
         let recipe = fixed_native_recipe(&f, "demo")?;
         let recipe = recipe.to_str().ok_or("recipe path")?;
         let args = if malformed {
-            vec!["--yes", "skills", "adopt", "skill:demo", "--recipe", recipe]
+            vec!["--yes", "skill", "adopt", "skill:demo", "--recipe", recipe]
         } else {
             vec![
                 "--yes",
                 "--chezmoi-source",
                 "/private/tmp/macops-unused-source",
-                "skills",
+                "skill",
                 "adopt",
                 "skill:demo",
                 "--recipe",
@@ -5050,7 +5417,7 @@ fn assert_capability_lease_conflicts(
     skill_id: &str,
 ) -> TestResult {
     symlink("/bin/sh", canonical.join(".in_use"))?;
-    let (out, doc_link_lease) = f.run(&["doctor", skill_id])?;
+    let (out, doc_link_lease) = f.run(&["app", "doctor", skill_id])?;
     assert_code(&out, 3);
     assert_eq!(
         doc_link_lease["data"][0]["baseline"]["comparison"],
@@ -5060,7 +5427,7 @@ fn assert_capability_lease_conflicts(
 
     fs::create_dir_all(canonical.join(".in_use"))?;
     fs::write(canonical.join(".in_use/run.sh"), "echo bad")?;
-    let (out, doc_dir_lease) = f.run(&["doctor", skill_id])?;
+    let (out, doc_dir_lease) = f.run(&["app", "doctor", skill_id])?;
     assert_code(&out, 3);
     assert_eq!(
         doc_dir_lease["data"][0]["baseline"]["comparison"],
@@ -5193,7 +5560,7 @@ fn recommend_previews_public_and_remote_evidence_without_a_model_or_network_requ
 fn manifest_export_and_plan_compare_baselines_without_writing_or_embedded_commands() -> TestResult {
     let f = Fixture::new()?;
     fs::write(f.file("version"), "1.0.0")?;
-    let (out, _) = f.run(&["adopt", "fixture:demo", "--yes"])?;
+    let (out, _) = f.run(&["app", "adopt", "fixture:demo", "--yes"])?;
     assert_code(&out, 0);
     let receipts = fs::read(f.file("state/receipts.json"))?;
     let before = fs::read(f.file("state/active.json"))?;
@@ -5307,7 +5674,7 @@ fn manifest_replay_refuses_pending_scope_and_withdrawn_recipe_even_for_a_known_v
         r#"printf 'called' > "$MACOPS_TEST_HOME/never-called"; exit 14"#,
     )?;
     let id = "npm:scoped-demo";
-    let (out, adopted) = f.run(&["adopt", id, "--yes"])?;
+    let (out, adopted) = f.run(&["app", "adopt", id, "--yes"])?;
     assert_code(&out, 0);
     let (_, export) = f.run(&["manifest", "export"])?;
     let mut intent = export["data"]["manifest"].clone();
@@ -5482,7 +5849,7 @@ fn manifest_maximum_roster_can_be_exported_and_read_back() -> TestResult {
 fn manifest_export_includes_native_registered_skills_under_the_same_identity() -> TestResult {
     let f = Fixture::new()?;
     native_skill_fixture(&f, &["fixture-manifest-skill"])?;
-    let (out, skills) = f.run(&["skills", "list", "--details"])?;
+    let (out, skills) = f.run(&["skill", "--details"])?;
     assert_code(&out, 0);
     let record = skills["data"]["resources"]
         .as_array()
@@ -5513,7 +5880,7 @@ fn manifest_preview_and_replay_both_reject_a_linked_active_record() -> TestResul
     npm_manifest(&prefix, "@scope/demo", "1.0.0")?;
     write_authorized_npm_catalog(&f, &prefix, false, true)?;
     let id = "npm:scoped-demo";
-    assert_code(&f.run(&["adopt", id, "--yes"])?.0, 0);
+    assert_code(&f.run(&["app", "adopt", id, "--yes"])?.0, 0);
     let (out, exported) = f.run(&["manifest", "export"])?;
     assert_code(&out, 0);
     let doc = f.file("manifest.json");
@@ -5652,7 +6019,7 @@ fn manifest_plan_uses_the_selected_scope_even_when_the_old_receipt_matches() -> 
         Ok((out, data))
     };
     let id = "npm:scoped-demo";
-    assert_code(&invoke(&["adopt", id, "--yes"], false)?.0, 0);
+    assert_code(&invoke(&["app", "adopt", id, "--yes"], false)?.0, 0);
     let (_, exported) = invoke(&["manifest", "export"], false)?;
     let file = f.file("record.json");
     write_json(&file, &exported["data"]["manifest"])?;
@@ -5676,7 +6043,7 @@ fn manifest_preserves_missing_legacy_scope_without_treating_it_as_current_author
     npm_manifest(&prefix, "@scope/demo", "1.0.0")?;
     write_authorized_npm_catalog(&f, &prefix, false, true)?;
     let id = "npm:scoped-demo";
-    assert_code(&f.run(&["adopt", id, "--yes"])?.0, 0);
+    assert_code(&f.run(&["app", "adopt", id, "--yes"])?.0, 0);
     let mut receipts = f.read_json("state/receipts.json")?;
     receipts["installations"][id]
         .as_object_mut()
@@ -5712,7 +6079,7 @@ fn operation_history_browses_newest_pending_record_without_mutating_state() -> T
     let f = Fixture::new()?;
     chezmoi_native::run_browser_pty(&f, &["history"], "history-empty", &f.home, "78", "0")?;
     assert!(!f.file("state").exists());
-    let (out, result) = f.run(&["install", "demo", "--version", "1.0.0", "--yes"])?;
+    let (out, result) = f.run(&["app", "install", "demo", "--version", "1.0.0", "--yes"])?;
     assert_code(&out, 0);
     let mut pending = result["data"].clone();
     assert_eq!(pending["phase"], "succeeded");
@@ -5726,7 +6093,7 @@ fn operation_history_browses_newest_pending_record_without_mutating_state() -> T
     let active = fs::read(f.file("state/active.json"))?;
     let receipts = fs::read(f.file("state/receipts.json"))?;
     chezmoi_native::run_browser_pty(&f, &["history"], "history-direct", &f.home, "78", "0")?;
-    chezmoi_native::run_browser_pty(&f, &["list"], "history-unified", &f.home, "96", "0")?;
+    chezmoi_native::run_browser_pty(&f, &["app"], "history-unified", &f.home, "96", "0")?;
     let (out, json) = f.run(&["history", "fixture:demo"])?;
     assert_code(&out, 0);
     let rows = json["data"].as_array().ok_or("journal response")?;
@@ -5741,10 +6108,10 @@ fn operation_history_browses_newest_pending_record_without_mutating_state() -> T
 #[test]
 fn codex_launch_json_and_unknown_profiles_never_dispatch() -> TestResult {
     let f = Fixture::new()?;
-    let (result, value) = f.run(&["launch", "codex:default"])?;
+    let (result, value) = f.run(&["agent", "launch", "codex:default"])?;
     assert_code(&result, 1);
     assert_eq!(value["error"]["code"], "launch_json_requires_preview");
-    let (result, value) = f.run(&["launch", "codex:default", "--dry-run"])?;
+    let (result, value) = f.run(&["agent", "launch", "codex:default", "--dry-run"])?;
     assert_code(&result, 3);
     assert_eq!(value["error"]["code"], "codex_session_profile_unavailable");
     assert!(!f.file("state").exists());
@@ -5754,7 +6121,7 @@ fn codex_launch_json_and_unknown_profiles_never_dispatch() -> TestResult {
 #[test]
 fn history_recovery_requires_confirmation_of_the_same_original_record() -> TestResult {
     let f = Fixture::new()?;
-    let (out, installed) = f.run(&["install", "demo", "--version", "1.0.0", "--yes"])?;
+    let (out, installed) = f.run(&["app", "install", "demo", "--version", "1.0.0", "--yes"])?;
     assert_code(&out, 0);
     let mut pending = installed["data"].clone();
     pending["id"] = json!("OP-fixture-recovery");
@@ -5819,7 +6186,7 @@ fn skills_inventory_confirms_exact_maintenance_recipe_and_rejects_changed_book()
     let recipe = fixed_native_recipe(&f, name)?;
     let recipe = recipe.to_str().ok_or("recipe")?;
     let (out, value) = f.run(&[
-        "skills",
+        "skill",
         "adopt",
         "skill:fixture-skill",
         "--recipe",
@@ -5833,7 +6200,7 @@ fn skills_inventory_confirms_exact_maintenance_recipe_and_rejects_changed_book()
     let book = f.home.join(".config/macops/native-skills-recipes.json");
     let book_before = fs::read(&book)?;
     for scenario in ["skill-maintenance-cancel", "skill-maintenance-stale"] {
-        chezmoi_native::run_browser_pty(&f, &["skills"], scenario, &book, "104", "0")?;
+        chezmoi_native::run_browser_pty(&f, &["skill"], scenario, &book, "104", "0")?;
         assert_eq!(fs::read(f.file("state/receipts.json"))?, receipts);
         assert_eq!(fs::read(f.file("state/active.json"))?, before);
         assert!(
@@ -5874,7 +6241,7 @@ printf '{"version":3,"skills":{}}\n' > "$HOME/.agents/.skill-lock.json"
 "#,
     )?;
     let (out, adopted) = f.run(&[
-        "skills",
+        "skill",
         "adopt",
         "skill:fixture-skill",
         "--recipe",
@@ -5885,7 +6252,7 @@ printf '{"version":3,"skills":{}}\n' > "$HOME/.agents/.skill-lock.json"
     assert_eq!(adopted["data"]["journal"]["phase"], "succeeded");
     chezmoi_native::run_browser_pty(
         &f,
-        &["skills"],
+        &["skill"],
         "skill-maintenance-removed",
         &f.home,
         "104",
@@ -5939,7 +6306,7 @@ fn recommend_skill_chooses_fixed_registered_scope_and_refuses_changed_recipe() -
 #[test]
 fn empty_claude_resume_preview_does_not_create_state() -> TestResult {
     let f = Fixture::new()?;
-    let (result, value) = f.run(&["resume", "OP-fixture", "--dry-run"])?;
+    let (result, value) = f.run(&["agent", "resume", "OP-fixture", "--dry-run"])?;
     assert_ne!(result.status.code(), Some(0));
     assert!(value["data"].is_null());
     assert!(!f.file("state").exists());
@@ -5984,8 +6351,8 @@ use) [ "$2 $3 $4" = '--global --pin demo@2.0.0' ]; printf 2.0.0 > "$HOME/native-
 *) exit 98;;
 esac"#,
         )?;
-        assert_code(&f.run(&["adopt", "demo", "--yes"])?.0, 0);
-        let (out, result) = f.run(&["upgrade", "demo", "--version", "2.0.0"])?;
+        assert_code(&f.run(&["app", "adopt", "demo", "--yes"])?.0, 0);
+        let (out, result) = f.run(&["app", "upgrade", "demo", "--version", "2.0.0"])?;
         if owned {
             assert_code(&out, 3);
             assert_eq!(
@@ -6065,7 +6432,7 @@ use) [ "$2 $3 $4" = '--global --pin demo@2.0.0' ] || exit 93
 *) exit 94;;
 esac"#,
     )?;
-    let (out, data) = f.run(&["list", "--kind", "applications"])?;
+    let (out, data) = f.run(&["app", "resources"])?;
     assert_code(&out, 0);
     let resources = data["data"]["resources"]
         .as_array()
@@ -6094,7 +6461,7 @@ esac"#,
     ] {
         chezmoi_native::run_browser_pty(
             &f,
-            &["apps"],
+            &["app"],
             scenario,
             std::path::Path::new("demo"),
             "110",
@@ -6148,11 +6515,11 @@ esac"#,
             .args(arguments)
             .output()
     };
-    assert_code(&run(&["adopt", "demo", "--yes"])?, 0);
+    assert_code(&run(&["app", "adopt", "demo", "--yes"])?, 0);
     let adopted = fs::read(f.file("state/receipts.json"))?;
     fs::remove_file(&alias)?;
     symlink(&b, &alias)?;
-    let out = run(&["upgrade", "demo", "--version", "2.0.0"])?;
+    let out = run(&["app", "upgrade", "demo", "--version", "2.0.0"])?;
     assert_code(&out, 3);
     let value: serde_json::Value = serde_json::from_slice(&out.stdout)?;
     assert_eq!(value["error"]["code"], "manager_identity_changed");
@@ -6164,14 +6531,14 @@ esac"#,
     let original = f.home.join("original-data");
     fs::rename(&a, &original)?;
     fs::rename(&b, &a)?;
-    let replaced = run(&["upgrade", "demo", "--version", "2.0.0"])?;
+    let replaced = run(&["app", "upgrade", "demo", "--version", "2.0.0"])?;
     assert_code(&replaced, 3);
     assert_eq!(fs::read(a.join("version"))?, b"1.2.3");
     assert_eq!(fs::read(original.join("version"))?, b"1.2.3");
     assert_eq!(fs::read(f.file("state/receipts.json"))?, adopted);
     fs::rename(&a, &b)?;
     fs::rename(&original, &a)?;
-    assert_code(&run(&["upgrade", "demo", "--version", "2.0.0"])?, 0);
+    assert_code(&run(&["app", "upgrade", "demo", "--version", "2.0.0"])?, 0);
     assert_eq!(fs::read(a.join("version"))?, b"2.0.0");
     assert_eq!(fs::read(b.join("version"))?, b"1.2.3");
     Ok(())
@@ -6206,7 +6573,7 @@ use) [ "$2 $3 $4" = '--global --pin demo@1.2.3' ] || exit 93
 *) exit 94;;
 esac"#,
     )?;
-    let (out, initial) = f.run(&["install", "demo", "--version", "1.2.3"])?;
+    let (out, initial) = f.run(&["app", "install", "demo", "--version", "1.2.3"])?;
     assert_code(&out, 3);
     assert_eq!(initial["data"]["phase"], "unknown");
     let id = initial["data"]["id"]
@@ -6268,7 +6635,7 @@ uninstall) [ "$#" = 2 ] && [ "$2" = 'demo@1.2.3' ]
 *) exit 94;;
 esac"#,
     )?;
-    assert_code(&f.run(&["adopt", "demo", "--yes"])?.0, 0);
+    assert_code(&f.run(&["app", "adopt", "demo", "--yes"])?.0, 0);
     Ok((f, payload))
 }
 
@@ -6286,7 +6653,7 @@ fn mise_retirement_rejects_unproved_release_evidence_without_a_native_writer() -
         json!({"failed":"unexpected native format"}),
     ] {
         write_json(&proof, &rows)?;
-        let (out, data) = f.run(&["uninstall", "demo", "--yes"])?;
+        let (out, data) = f.run(&["app", "uninstall", "demo", "--yes"])?;
         assert_code(&out, 3);
         assert_eq!(data["error"]["code"], "consumer_review_required");
         assert!(payload.join("tool").exists());
@@ -6296,7 +6663,7 @@ fn mise_retirement_rejects_unproved_release_evidence_without_a_native_writer() -
     let other_backend = f.home.join(".local/share/mise/installs/other-demo/1.2.3");
     fs::create_dir_all(&other_backend)?;
     write_json(&proof, &json!([version(false, &other_backend)]))?;
-    let (out, mismatch) = f.run(&["uninstall", "demo", "--yes"])?;
+    let (out, mismatch) = f.run(&["app", "uninstall", "demo", "--yes"])?;
     assert_code(&out, 3);
     assert_eq!(mismatch["error"]["code"], "mise_release_changed");
     assert!(other_backend.exists() && payload.exists());
@@ -6309,7 +6676,7 @@ fn mise_retirement_recovery_requires_the_original_absence_proof_and_preserves_ne
 -> TestResult {
     let (f, payload) = inactive_mise_fixture()?;
     let known = f.read_json("state/receipts.json")?;
-    let (out, removed) = f.run(&["uninstall", "demo", "--yes"])?;
+    let (out, removed) = f.run(&["app", "uninstall", "demo", "--yes"])?;
     assert_code(&out, 0);
     assert_eq!(removed["data"]["phase"], "succeeded");
     assert!(!payload.exists());
@@ -6356,12 +6723,12 @@ fn direct_apps_confirms_inactive_mise_retirement_and_refuses_replaced_payload() 
         let config = f.home.join(".config/mise/config.toml");
         fs::create_dir_all(config.parent().ok_or("mise configuration root")?)?;
         fs::write(&config, b"[env]\nFIXTURE = 'retained'\n")?;
-        assert_code(&f.run(&["adopt", "demo", "--yes"])?.0, 0);
+        assert_code(&f.run(&["app", "adopt", "demo", "--yes"])?.0, 0);
         assert_ne!(fs::read(f.file("state/receipts.json"))?, original);
         let bound = fs::read(f.file("state/receipts.json"))?;
         chezmoi_native::run_browser_pty(
             &f,
-            &["apps"],
+            &["app"],
             scenario,
             std::path::Path::new("demo"),
             "150",
@@ -6395,12 +6762,12 @@ fn mise_installs_override_does_not_invalidate_an_existing_other_provider_receipt
         command
     };
     let before = command()
-        .args(["install", "demo", "--version", "1.2.3"])
+        .args(["app", "install", "demo", "--version", "1.2.3"])
         .output()?;
     assert_code(&before, 0);
     let report = command()
         .env("MISE_INSTALLS_DIR", scope)
-        .args(["upgrade", "demo", "--version", "2.0.0"])
+        .args(["app", "upgrade", "demo", "--version", "2.0.0"])
         .output()?;
     assert_code(&report, 0);
     assert_eq!(fs::read(f.file("version"))?, b"2.0.0");
@@ -6425,7 +6792,7 @@ fn cursor_project_plugin_observation_preserves_declared_scope_and_native_authori
         }}),
     )?;
     let project = project.to_str().ok_or("fixture project")?;
-    let commands = ["list", "--kind", "capabilities", "--project", project];
+    let commands = ["skill", "--project", project];
     let (output, snapshot) = f.run(&commands)?;
     assert_code(&output, 0);
     let items = snapshot["data"]["resources"]
@@ -6455,10 +6822,10 @@ fn cursor_project_plugin_observation_preserves_declared_scope_and_native_authori
     assert!(private["configured_enabled"].is_null());
     assert!(!String::from_utf8(output.stdout)?.contains("fixture-private"));
     let id = selected["id"].as_str().ok_or("resource identity")?;
-    let (output, detail) = f.run(&["info", id, "--project", project])?;
+    let (output, detail) = f.run(&["skill", "--project", project, id])?;
     assert_code(&output, 0);
     assert_eq!(detail["data"]["resource"]["id"], id);
-    let (output, _) = f.run(&["adopt", id, "--yes"])?;
+    let (output, _) = f.run(&["app", "adopt", id, "--yes"])?;
     assert_code(&output, 3);
     assert!(!f.file("state").exists());
     Ok(())
@@ -6472,7 +6839,7 @@ fn cursor_project_plugin_coverage_reports_malformed_and_unbound_settings() -> Te
     fs::create_dir_all(&cursor)?;
     let settings = cursor.join("settings.json");
     let project = project.to_str().ok_or("fixture project")?;
-    let commands = ["list", "--kind", "capabilities", "--project", project];
+    let commands = ["skill", "--project", project];
     let status = || -> Result<serde_json::Value, Box<dyn std::error::Error>> {
         let (_, snapshot) = f.run(&commands)?;
         let observed = snapshot["data"]["coverage"]

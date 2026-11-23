@@ -18,6 +18,7 @@ fn native_adoption_rechecks_source_version_links_and_canonical_declarations() ->
             home.to_str().ok_or("home")?,
             "--catalog",
             catalog.to_str().ok_or("catalog")?,
+            "app",
             "adopt",
             "demo",
         ])?;

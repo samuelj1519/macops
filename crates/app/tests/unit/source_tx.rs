@@ -16,6 +16,7 @@ fn context(home: &std::path::Path) -> Result<Context> {
         "macops",
         "--home",
         home.to_str().ok_or_else(|| Error::new("utf8", "home"))?,
+        "app",
         "adopt",
         "asset:alpha",
     ])

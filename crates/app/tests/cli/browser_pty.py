@@ -187,7 +187,7 @@ try:
             member = "two"
         elif scenario == "market-entry":
             expect("cursor:default")
-            member = "mo plugins cursor --online"
+            member = "mo skill market cursor --online"
         elif scenario == "market-partial":
             expect("部分市场无法核验")
             member = "市场状态未知"
@@ -383,8 +383,27 @@ try:
         expect("fixture-skill")
         offset = type_key(b"\r")
         expect("安装状态 在磁盘上", offset)
-        expect("可发现 cursor:default · 共享目录", offset)
+        expect("可发现 cursor:default · 共享目录 · " + target + "/.agents/skills/fixture-skill", offset)
+        expect("可发现 claude:mi · 档案目录 · " + target + "/.claude-mi/skills/fixture-skill", offset)
+        expect("载荷 在磁盘上 · " + target + "/.agents/skills/fixture-skill", offset)
         expect("会话载入 未知", offset)
+        expect("可发现 codex:default", offset)
+        type_key(b"q")
+    elif scenario in ("skill-claude-import", "skill-codex-import"):
+        name = scenario.removeprefix("skill-")
+        expect("全部发现")
+        expect(name)
+        type_key(f"/{name}\r".encode())
+        offset = type_key(b"\r")
+        expect("可发现 cursor:default", offset)
+        if name == "claude-import":
+            expect("可发现 claude:default", offset)
+        type_key(b"q")
+    elif scenario == "skill-partial":
+        expect("能力盘点不完整")
+        offset = type_key(b"/fixture-skill\r\r")
+        expect("可发现 codex:default", offset)
+        expect("可发现 cursor:default", offset)
         type_key(b"q")
     elif scenario in ("skill-maintenance-cancel", "skill-maintenance-stale", "skill-maintenance-removed"):
         expect("fixture-skill")

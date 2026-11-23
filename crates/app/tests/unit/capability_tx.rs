@@ -20,8 +20,11 @@ fn constructed_policy_commands_validate_change_id_before_missing_pending_or_noop
             change_id: Some("../outside".into()),
         },
     ] {
-        let request = crate::cli::Command::Skills {
-            command: Some(crate::cli::Skills::Policy { command }),
+        let request = crate::cli::Command::Skill {
+            project: None,
+            details: false,
+            only: vec![],
+            command: Some(crate::cli::SkillCmd::Policy { command }),
         };
         assert!(write(&f.ctx, &request, false, true).is_err());
         assert!(!f.ctx.state.exists());
@@ -43,7 +46,7 @@ impl Fixture {
             "macops",
             "--home",
             home.to_str().ok_or("utf8")?,
-            "skills",
+            "skill",
             "policy",
             "sync",
         ])?;

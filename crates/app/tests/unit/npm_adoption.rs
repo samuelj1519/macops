@@ -31,6 +31,7 @@ fn last_commit_check_fences_recipe_namespace_and_receipt_changes() -> TestResult
             home.to_str().ok_or("home")?,
             "--catalog",
             catalog.to_str().ok_or("catalog")?,
+            "app",
             "adopt",
             "demo",
         ])?;

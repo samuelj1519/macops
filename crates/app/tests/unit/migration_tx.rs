@@ -45,7 +45,7 @@ fn fixture() -> std::result::Result<(tempfile::TempDir, Context), Box<dyn std::e
     for (relative, bytes) in data {
         disk::write(home.join(relative), bytes)?;
     }
-    let cli = Cli::try_parse_from(["macops", "--home", home.to_str().ok_or("home")?, "list"])?;
+    let cli = Cli::try_parse_from(["macops", "--home", home.to_str().ok_or("home")?, "app"])?;
     let ctx = Context::from_cli(&cli, &mut vec![])?;
     Ok((temp, ctx))
 }

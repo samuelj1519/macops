@@ -112,7 +112,7 @@ fn isolated_codex_offer_uses_explicit_confirmation_and_the_selected_commit() -> 
         "macops",
         "--home",
         home.path().to_str().ok_or("fixture home")?,
-        "list",
+        "app",
     ])?;
     let ctx = Context::from_cli(&cli, &mut vec![])?;
     let data = json!({

@@ -419,7 +419,7 @@ pub(crate) fn run(ctx: &Context, json: bool, dry_run: bool) -> Result<Value> {
     if !crate::browser::interactive_terminal() {
         return Err(Error::attention(
             "model_setup_terminal_required",
-            "在终端运行 mo setup，或加 --json 查看状态",
+            "在终端运行 mo recommend --setup，或加 --json 查看状态",
         ));
     }
     let keys = NativeKeychain((!ctx.isolated).then_some(ctx.config.as_path()));

@@ -1,11 +1,10 @@
 use crate::{
     chezmoi_native::ConfigBrowser,
-    cli::{Cli, Command},
+    cli::{Cli, Command, SkillCmd},
     context::Context,
     error::{Error, Result},
 };
 use serde::Serialize;
-use serde_json::json;
 use std::{
     io::{IsTerminal, Write},
     path::PathBuf,
@@ -111,11 +110,11 @@ impl Session {
             Self::Skills => crate::capabilities::browse(ctx, false),
             Self::Capabilities => crate::capabilities::browse(ctx, true),
             Self::Apps => resource_view(ctx, "applications"),
-            Self::Agents => resource_view(ctx, "agents"),
+            Self::Agents => agent_view(ctx),
             Self::History => history_view(ctx),
             Self::Marketplaces => Err(Error::attention(
                 "marketplace_snapshot",
-                "请重新运行 mo plugins 查看最新市场信息",
+                "请重新运行 mo skill market 查看最新市场信息",
             )),
         }
     }
@@ -139,8 +138,15 @@ pub(crate) fn interactive_terminal() -> bool {
 }
 
 pub(crate) fn interactive_marketplaces(cli: &Cli) -> bool {
-    matches!(cli.command, Command::Plugins { .. })
-        && !cli.json
+    matches!(
+        cli.command,
+        Command::Skill {
+            project: _,
+            details: _,
+            only: _,
+            command: Some(SkillCmd::Market { .. })
+        }
+    ) && !cli.json
         && !cli.dry_run
         && !cli.yes
         && interactive_terminal()
@@ -158,47 +164,51 @@ pub(crate) fn browse_marketplaces(ctx: &Context, data: &serde_json::Value) -> Re
 }
 
 pub(crate) fn entry(cli: &Cli) -> Option<ExitCode> {
-    let interactive = !cli.json && !cli.dry_run && interactive_terminal();
-    let unified = interactive
-        && !cli.yes
-        && matches!(
-            cli.command,
-            Command::List {
-                kind: None,
-                project: None
-            }
-        );
+    if cli.json {
+        return None;
+    }
+    let interactive = !cli.dry_run && !cli.yes && interactive_terminal();
     let kind = match &cli.command {
-        Command::List { .. } if unified => Kind::Apps,
-        Command::Config { command: None } => Kind::Config,
-        Command::Skills { command: None } => Kind::Skills,
-        Command::Apps => Kind::Apps,
-        Command::Agents => Kind::Agents,
-        Command::History { id: None } if interactive && !cli.yes => Kind::History,
+        Command::App {
+            command: None,
+            project: None,
+        } => Kind::Apps,
+        Command::Config {
+            command: None,
+            project: None,
+        } => Kind::Config,
+        Command::Skill {
+            command: None,
+            project: None,
+            details: false,
+            only,
+        } if only.is_empty() => Kind::Skills,
+        Command::Agent {
+            command: None,
+            project: None,
+        } => Kind::Agents,
+        Command::History { query: None } if interactive => Kind::History,
         _ => return None,
     };
     let mut warnings = Vec::new();
-    let result = execute(cli, kind, &mut warnings, interactive, unified);
-    if !cli.json {
-        for warning in &warnings {
-            eprintln!("macops: {warning}");
-        }
+    let result = execute(
+        cli,
+        kind,
+        &mut warnings,
+        interactive,
+        interactive && kind == Kind::Apps,
+    );
+    for warning in &warnings {
+        eprintln!("macops: {warning}");
     }
     let code = match result {
         Ok(view) => {
-            let output = if cli.json {
-                crate::emit(
-                    &json!({"schemaVersion":1,"status":if view.incomplete {"attention"} else {"ok"},
-                    "data":view,"warnings":warnings}),
-                )
-            } else if interactive {
-                Ok(())
-            } else {
-                std::io::stdout()
+            if !interactive
+                && std::io::stdout()
                     .lock()
                     .write_all(plain(&view, kind).as_bytes())
-            };
-            if output.is_err() {
+                    .is_err()
+            {
                 1
             } else if view.incomplete {
                 3
@@ -207,13 +217,7 @@ pub(crate) fn entry(cli: &Cli) -> Option<ExitCode> {
             }
         }
         Err(error) => {
-            if cli.json {
-                let _ = crate::emit(
-                    &json!({"schemaVersion":1,"status":"failed","data":null,"error":error,"warnings":warnings}),
-                );
-            } else {
-                eprintln!("macops: {error}");
-            }
+            eprintln!("macops: {error}");
             error.exit
         }
     };
@@ -365,6 +369,54 @@ fn resource_view(ctx: &Context, filter: &str) -> Result<View> {
         crate::resource_inventory::snapshot(ctx, Some(filter), None)?,
         false,
     ))
+}
+
+fn agent_view(ctx: &Context) -> Result<View> {
+    let mut view = resource_view(ctx, "agents")?;
+    let tools = crate::ai::list(ctx)?;
+    view.items.extend(
+        tools["tools"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|tool| {
+                let name = tool["tool"].as_str()?;
+                let binary = tool["binary"].as_str()?;
+                let version = tool["version"].as_str().unwrap_or("未知");
+                Some(Item {
+                    id: format!("ai:{name}"),
+                    name: name.into(),
+                    summary: format!("CLI · {version}"),
+                    managed: true,
+                    management: crate::resource::Management::Native,
+                    directory: false,
+                    path: Some(PathBuf::from(binary)),
+                    source: None,
+                    agents: vec![],
+                    loaded: None,
+                    details: vec![
+                        format!("程序 {binary}"),
+                        format!("版本 {version}"),
+                        format!(
+                            "本机固定版本 {}",
+                            tool["live_pin"].as_str().unwrap_or("未知")
+                        ),
+                        format!(
+                            "源配置固定版本 {}",
+                            tool["declared_pin"].as_str().unwrap_or("未知")
+                        ),
+                    ],
+                })
+            }),
+    );
+    view.items
+        .sort_by(|a, b| a.name.cmp(&b.name).then(a.id.cmp(&b.id)));
+    if tools["incomplete"] == true {
+        view.incomplete = true;
+        view.coverage = "partial";
+        view.note = "Agent CLI 版本或档案证据不完整".into();
+    }
+    Ok(view)
 }
 
 pub(crate) fn adoption_view(ctx: &Context, name: Option<&str>) -> Result<View> {

@@ -24,7 +24,7 @@ fn a_prepared_generic_worker_uses_only_its_original_scope_program_and_actor_reco
     let root = tempfile::tempdir_in("/private/tmp")?;
     let home = root.path().join("home");
     fs::create_dir(&home)?;
-    let cli = Cli::try_parse_from(["macops", "--home", home.to_str().ok_or("home")?, "list"])?;
+    let cli = Cli::try_parse_from(["macops", "--home", home.to_str().ok_or("home")?, "app"])?;
     let context = Context::from_cli(&cli, &mut vec![])?;
     let program = home.join("fixture-program");
     fs::write(&program, b"#!/bin/sh\nexit 97\n")?;
@@ -93,7 +93,7 @@ fn an_npm_worker_rechecks_installed_package_evidence_before_uninstall() -> TestR
     fs::write(&manifest, br#"{"name":"@scope/tool","version":"1.0.0"}"#)?;
     let npmrc = home.join(".npmrc");
     fs::write(&npmrc, b"fund=false\n")?;
-    let cli = Cli::try_parse_from(["macops", "--home", home.to_str().ok_or("home")?, "list"])?;
+    let cli = Cli::try_parse_from(["macops", "--home", home.to_str().ok_or("home")?, "app"])?;
     let ctx = Context::from_cli(&cli, &mut vec![])?;
     let mut package = crate::test_support::package();
     let authority = NpmWriteAuthority {
@@ -247,7 +247,7 @@ fn mise_worker_refuses_a_configuration_owner_discovered_after_planning() -> Test
         "macops",
         "--home",
         home.path().to_str().ok_or("fixture home")?,
-        "list",
+        "app",
     ])?;
     let ctx = Context::from_cli(&cli, &mut vec![])?;
     assert!(!crate::mise_owner::declared_owner(&ctx)?);

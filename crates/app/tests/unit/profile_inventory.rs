@@ -13,7 +13,7 @@ fn profile_assessment_builds_owned_changes_without_writing_configs_or_exposing_c
         "macops",
         "--home",
         home.to_str().ok_or("utf8")?,
-        "skills",
+        "skill",
         "sync",
         "--all",
     ])?;
@@ -58,7 +58,7 @@ fn fixture() -> std::result::Result<(tempfile::TempDir, Context), Box<dyn std::e
         "macops",
         "--home",
         home.to_str().ok_or("utf8")?,
-        "skills",
+        "skill",
         "sync",
         "--only",
         "profile:mi",

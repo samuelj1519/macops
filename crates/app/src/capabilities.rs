@@ -1,6 +1,6 @@
 use crate::policy::skills::matches_resource;
 use crate::{
-    cli::{Command, Policy, Skills},
+    cli::{Command, Policy, SkillCmd},
     context::Context,
     error::{Error, Result},
     governance::Governance,
@@ -14,23 +14,26 @@ use std::{
 };
 
 pub fn query(ctx: &Context, command: &Command) -> Result<Option<Value>> {
-    let Command::Skills {
-        command: Some(command),
-    } = command
-    else {
-        return Ok(None);
-    };
     let value = match command {
-        Skills::List {
-            name,
-            only,
+        Command::Skill {
+            project: _,
+            command: None,
             details,
-        } => inventory(ctx, "list", name.as_deref(), only, *details)?,
-        Skills::Check { name, only } => inventory(ctx, "check", name.as_deref(), only, true)?,
-        Skills::Status { name, only } => inventory(ctx, "status", name.as_deref(), only, true)?,
-
-        Skills::Policy {
-            command: Policy::Check,
+            only,
+        } => inventory(ctx, "list", None, only, *details)?,
+        Command::Skill {
+            project: _,
+            details: _,
+            only: _,
+            command: Some(SkillCmd::Doctor { name, only }),
+        } => inventory(ctx, "check", name.as_deref(), only, true)?,
+        Command::Skill {
+            project: _,
+            details: _,
+            only: _,
+            command: Some(SkillCmd::Policy {
+                command: Policy::Check,
+            }),
         } => policy_check(ctx)?,
         _ => return Ok(None),
     };

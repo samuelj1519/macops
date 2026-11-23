@@ -13,7 +13,7 @@ fn readonly_policy_assessment_finds_missing_metadata_without_creating_files() ->
         "macops",
         "--home",
         home.to_str().ok_or("utf8")?,
-        "skills",
+        "skill",
         "policy",
         "check",
     ])?;
@@ -51,7 +51,7 @@ impl PolicyFixture {
             "macops",
             "--home",
             home.to_str().ok_or("utf8")?,
-            "skills",
+            "skill",
             "policy",
             "check",
         ])?;

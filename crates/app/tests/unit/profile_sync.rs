@@ -24,7 +24,7 @@ fn fixture()
         "macops",
         "--home",
         home.to_str().ok_or("utf8")?,
-        "skills",
+        "skill",
         "sync",
         "--only",
         "profile:mi",

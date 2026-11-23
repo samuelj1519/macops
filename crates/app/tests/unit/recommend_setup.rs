@@ -134,7 +134,8 @@ fn setup_recovers_staged_credentials_without_removing_the_active_key() -> TestRe
         "macops",
         "--home",
         home.path().to_str().ok_or("home")?,
-        "setup",
+        "recommend",
+        "--setup",
     ])?;
     let ctx = Context::from_cli(&cli, &mut vec![])?;
     let keys = FixtureKeys {
@@ -228,7 +229,8 @@ fn wizard_verifies_the_selected_destination_before_committing_an_opt_in() -> Tes
         "macops",
         "--home",
         dir.path().to_str().ok_or("home")?,
-        "setup",
+        "recommend",
+        "--setup",
     ])?;
     let ctx = Context::from_cli(&cli, &mut vec![])?;
     let keys = FixtureKeys {
@@ -322,7 +324,8 @@ fn saved_key_test_resume_and_model_edit_share_the_existing_keychain_entry() -> T
         "macops",
         "--home",
         dir.path().to_str().ok_or("home")?,
-        "setup",
+        "recommend",
+        "--setup",
     ])?;
     let ctx = Context::from_cli(&cli, &mut vec![])?;
     let keys = FixtureKeys::default();
@@ -384,7 +387,8 @@ fn rotation_commits_new_profile_before_cleanup_and_can_retry_cleanup() -> TestRe
         "macops",
         "--home",
         dir.path().to_str().ok_or("home")?,
-        "setup",
+        "recommend",
+        "--setup",
     ])?;
     let ctx = Context::from_cli(&cli, &mut vec![])?;
     let keys = FixtureKeys::default();
@@ -443,7 +447,8 @@ fn wizard_bind_existing_item_confirms_address_and_saves_a_locator() -> TestResul
         "macops",
         "--home",
         dir.path().to_str().ok_or("home")?,
-        "setup",
+        "recommend",
+        "--setup",
     ])?;
     let ctx = Context::from_cli(&cli, &mut vec![])?;
     let keychain_file = tempfile::NamedTempFile::new_in("/private/tmp")?;
@@ -505,7 +510,8 @@ fn confirmed_retention_allows_replacement_without_erasing_an_unknown_add() -> Te
         "macops",
         "--home",
         dir.path().to_str().ok_or("home")?,
-        "setup",
+        "recommend",
+        "--setup",
     ])?;
     let ctx = Context::from_cli(&cli, &mut vec![])?;
     let keys = FixtureKeys::default();
@@ -637,7 +643,8 @@ fn saved_key_actions_require_a_profile_and_valid_model_before_loading() -> TestR
         "macops",
         "--home",
         dir.path().to_str().ok_or("home")?,
-        "setup",
+        "recommend",
+        "--setup",
     ])?;
     let ctx = Context::from_cli(&cli, &mut vec![])?;
     let keys = FixtureKeys::default();
@@ -681,7 +688,8 @@ fn borrowed_setup_cancel_and_provider_failure_leave_no_credential_metadata() -> 
         "macops",
         "--home",
         dir.path().to_str().ok_or("home")?,
-        "setup",
+        "recommend",
+        "--setup",
     ])?;
     let ctx = Context::from_cli(&cli, &mut vec![])?;
     let keys = FixtureKeys::default();
@@ -729,7 +737,8 @@ fn failed_insert_keeps_predecessor_and_can_recover_confirmed_absence() -> TestRe
         "macops",
         "--home",
         dir.path().to_str().ok_or("home")?,
-        "setup",
+        "recommend",
+        "--setup",
     ])?;
     let ctx = Context::from_cli(&cli, &mut vec![])?;
     let keys = FixtureKeys::default();

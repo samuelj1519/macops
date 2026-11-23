@@ -18,32 +18,32 @@ fn native_commands_never_dispatch_to_the_retired_backend() -> TestResult {
     let f = Fixture::new()?;
     legacy_canary(&f)?;
     for args in [
-        vec!["ai", "list"],
-        vec!["skills", "list"],
-        vec!["skills", "list", "demo", "--details", "--only", "demo"],
-        vec!["skills", "check", "--only", "demo"],
-        vec!["skills", "status", "demo", "--only", "demo"],
-        vec!["skills", "outdated", "--only", "demo"],
-        vec!["skills", "policy", "check"],
-        vec!["skills", "policy", "sync", "--change-id", "CASE-1"],
-        vec!["skills", "policy", "sync"],
-        vec!["skills", "sync", "--only", "demo"],
-        vec!["skills", "policy", "recover", "--change-id", "CASE-2"],
-        vec!["skills", "update", "demo"],
-        vec!["skills", "upgrade", "demo"],
+        vec!["agent", "tools"],
+        vec!["skill"],
+        vec!["skill", "demo", "--details", "--only", "demo"],
+        vec!["skill", "doctor", "--only", "demo"],
+        vec!["skill", "doctor", "demo", "--only", "demo"],
+        vec!["skill", "outdated", "--only", "demo"],
+        vec!["skill", "policy", "check"],
+        vec!["skill", "policy", "sync", "--change-id", "CASE-1"],
+        vec!["skill", "policy", "sync"],
+        vec!["skill", "sync", "--only", "demo"],
+        vec!["skill", "policy", "recover", "--change-id", "CASE-2"],
+        vec!["skill", "refresh", "demo"],
+        vec!["skill", "upgrade", "demo"],
         vec!["config", "list"],
         vec!["config", "where", "query"],
         vec!["config", "diff"],
         vec!["config", "reconcile", "codex"],
-        vec!["ai", "reconcile"],
-        vec!["ai", "reconcile", "codex"],
-        vec!["ai", "upgrade", "dsh", "1.0.0-rc.1", "--force-live"],
-        vec!["app", "upgrade", "codex", "1.0.0"],
-        vec!["credential", "list"],
-        vec!["credential", "check", "mi"],
-        vec!["credential", "add", "mi", "alias"],
-        vec!["credential", "activate", "mi", "alias"],
-        vec!["doctor"],
+        vec!["agent", "upgrade"],
+        vec!["agent", "upgrade", "codex"],
+        vec!["agent", "install", "dsh", "1.0.0-rc.1", "--force-live"],
+        vec!["agent", "install", "codex", "1.0.0"],
+        vec!["agent", "credential", "list"],
+        vec!["agent", "credential", "check", "mi"],
+        vec!["agent", "credential", "add", "mi", "alias"],
+        vec!["agent", "credential", "activate", "mi", "alias"],
+        vec!["app", "doctor"],
     ] {
         let mut preview = vec!["--dry-run"];
         preview.extend(args);
@@ -65,33 +65,33 @@ fn native_selection_and_change_id_validation_replace_legacy_route_validation() -
     let f = Fixture::new()?;
     legacy_canary(&f)?;
     for args in [
-        vec!["skills", "upgrade"],
-        vec!["skills", "upgrade", "demo", "--all"],
-        vec!["skills", "upgrade", "--all", "--only", "demo"],
-        vec!["skills", "sync", "demo", "--revision", "short"],
+        vec!["skill", "upgrade"],
+        vec!["skill", "upgrade", "demo", "--all"],
+        vec!["skill", "upgrade", "--all", "--only", "demo"],
+        vec!["skill", "sync", "demo", "--revision", "short"],
         vec![
-            "skills",
+            "skill",
             "sync",
             "demo",
             "--revision",
             "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
         ],
-        vec!["skills", "sync", "demo", "--change-id", ""],
-        vec!["skills", "sync", "demo", "--change-id", "../escape"],
-        vec!["skills", "update", "--revision", "bad"],
-        vec!["skills", "policy", "sync", "--change-id", "bad/unsafe"],
-        vec!["skills", "policy", "recover", "--change-id", "bad/unsafe"],
-        vec!["skills", "policy", "sync", "--change-id", "../outside"],
+        vec!["skill", "sync", "demo", "--change-id", ""],
+        vec!["skill", "sync", "demo", "--change-id", "../escape"],
+        vec!["skill", "refresh", "--revision", "bad"],
+        vec!["skill", "policy", "sync", "--change-id", "bad/unsafe"],
+        vec!["skill", "policy", "recover", "--change-id", "bad/unsafe"],
+        vec!["skill", "policy", "sync", "--change-id", "../outside"],
         vec![
-            "skills",
-            "update",
+            "skill",
+            "refresh",
             "--only",
             "source",
             "--change-id",
             "CASE-1",
         ],
-        vec!["skills", "update", "--change-id", "../escape"],
-        vec!["ai", "upgrade", "dsh"],
+        vec!["skill", "refresh", "--change-id", "../escape"],
+        vec!["agent", "install", "dsh"],
     ] {
         let (output, value) = f.run(&args)?;
         assert!(
@@ -114,10 +114,10 @@ fn native_selection_and_change_id_validation_replace_legacy_route_validation() -
 fn empty_native_policy_sync_preserves_zero_write_preview_and_noop() -> TestResult {
     let f = Fixture::new()?;
     legacy_canary(&f)?;
-    let (output, _) = f.run(&["skills", "policy", "sync", "--dry-run"])?;
+    let (output, _) = f.run(&["skill", "policy", "sync", "--dry-run"])?;
     assert_code(&output, 0);
     for _ in 0..2 {
-        let (output, value) = f.run(&["skills", "policy", "sync", "--yes"])?;
+        let (output, value) = f.run(&["skill", "policy", "sync", "--yes"])?;
         assert_code(&output, 0);
         assert_eq!(value["data"]["backend"], "rust");
         assert_eq!(value["data"]["status"], "same");

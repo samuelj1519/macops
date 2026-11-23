@@ -1,7 +1,7 @@
 use crate::{
     ai_gate as gate,
     ai_state::{self, Mise, Snapshot, Upgrade},
-    cli::{Ai, App, Command},
+    cli::{AgentCmd, AppCmd, Command},
     config_tx,
     context::Context,
     domain::{
@@ -12,28 +12,47 @@ use crate::{
 };
 use serde_json::{Value, json};
 
+pub(crate) fn parse_tool(key: &str) -> std::result::Result<String, String> {
+    let tool = policy::upgrade_target(key)
+        .or_else(|| crate::scoped_retry("agent", key))
+        .unwrap_or(key);
+    let tool = policy::upgrade_target(tool).unwrap_or(tool);
+    if policy::TOOLS.contains(&tool) {
+        Ok(tool.to_owned())
+    } else {
+        Err(format!(
+            "未知 Agent CLI {key}。可用工具：{}",
+            policy::TOOLS.join(", ")
+        ))
+    }
+}
+
 pub fn run(ctx: &Context, command: &Command, dry_run: bool) -> Result<Option<Value>> {
     match command {
-        Command::Ai { command: Ai::List } => list(ctx).map(Some),
-        Command::Ai {
+        Command::Agent {
+            project: _,
+            command: Some(AgentCmd::Tools),
+        } => list(ctx).map(Some),
+        Command::Agent {
+            project: _,
             command:
-                Ai::Upgrade {
+                Some(AgentCmd::Install {
                     tool,
                     version,
                     force_live,
-                },
-        }
-        | Command::App {
-            command:
-                App::Upgrade {
-                    tool,
-                    version,
-                    force_live,
-                },
+                }),
         } => execute(ctx, tool, version.as_deref(), *force_live, dry_run, || {
             Ok(())
         })
         .map(Some),
+        Command::Agent {
+            project: _,
+            command:
+                Some(AgentCmd::Upgrade {
+                    tool: Some(tool),
+                    force_live,
+                }),
+        } => execute(ctx, tool, None, *force_live, dry_run, || Ok(())).map(Some),
         _ => Ok(None),
     }
 }
@@ -44,10 +63,12 @@ pub fn unified_upgrade(
     dry_run: bool,
     explicit_config: bool,
 ) -> Result<Option<Value>> {
-    let Command::Upgrade {
-        id,
-        version,
-        force_live,
+    let Command::App {
+        project: _,
+        command: Some(AppCmd::Upgrade {
+            id: Some(id),
+            version,
+        }),
     } = command
     else {
         return Ok(None);
@@ -58,7 +79,7 @@ pub fn unified_upgrade(
             if category == "ai" && selector == tool)
         {
             let selected = fingerprint(&package)?;
-            return execute(ctx, tool, version.as_deref(), *force_live, dry_run, || {
+            return execute(ctx, tool, version.as_deref(), false, dry_run, || {
                 let current = crate::target::refresh(ctx, &package)?;
                 if fingerprint(&current)? != selected {
                     return Err(Error::attention(
@@ -76,12 +97,6 @@ pub fn unified_upgrade(
                 "此对象由其他软件配方管理，不能使用 AI 对账范围",
             ));
         }
-    }
-    if *force_live {
-        return Err(Error::new(
-            "force_live_target_unsupported",
-            "--force-live 仅适用于内置 AI 升级对象",
-        ));
     }
     Ok(None)
 }
@@ -104,7 +119,22 @@ fn execute(
     crate::ai_tx::execute(ctx, &upgrade, plan, check)
 }
 
-fn list(ctx: &Context) -> Result<Value> {
+pub(crate) fn list(ctx: &Context) -> Result<Value> {
+    tool_inventory(ctx, &policy::TOOLS)
+}
+
+pub(crate) fn detail(ctx: &Context, tool: &str) -> Result<Option<Value>> {
+    let tool = policy::upgrade_target(tool).unwrap_or(tool);
+    if !policy::TOOLS.contains(&tool) {
+        return Ok(None);
+    }
+    let inventory = tool_inventory(ctx, &[tool])?;
+    Ok(Some(
+        json!({"tool":inventory["tools"][0],"incomplete":inventory["incomplete"],"persistentWrites":false}),
+    ))
+}
+
+fn tool_inventory(ctx: &Context, tools: &[&str]) -> Result<Value> {
     let configs = config_tx::resolve_mise_paths(ctx).and_then(|(live, source, _)| {
         Ok((
             Snapshot::capture(&live)?.text,
@@ -113,7 +143,7 @@ fn list(ctx: &Context) -> Result<Value> {
     });
     let mut rows = Vec::new();
     let mut incomplete = false;
-    for tool in policy::TOOLS {
+    for &tool in tools {
         let binary = gate::executable(ctx, policy::binary(tool)?);
         let version = binary
             .as_ref()

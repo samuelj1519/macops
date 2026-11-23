@@ -13,7 +13,7 @@ fn link_assessment_never_changes_models_default_claude_cursor_or_foreign_placeme
         "macops",
         "--home",
         home.to_str().ok_or("utf8")?,
-        "skills",
+        "skill",
         "sync",
         "--all",
     ])?;
@@ -71,7 +71,7 @@ fn fixture() -> std::result::Result<(tempfile::TempDir, Context), Box<dyn std::e
         "macops",
         "--home",
         home.to_str().ok_or("utf8")?,
-        "skills",
+        "skill",
         "sync",
         "--all",
     ])?;

@@ -33,7 +33,7 @@ fn distinct_claude_registrations_stay_read_only_and_a_changed_profile_invalidate
     }
     let malformed = b"invalid registry";
     fs::write(registry(&third), malformed)?;
-    let cli = Cli::try_parse_from(["macops", "--home", home.to_str().ok_or("home")?, "list"])?;
+    let cli = Cli::try_parse_from(["macops", "--home", home.to_str().ok_or("home")?, "app"])?;
     let ctx = Context::from_cli(&cli, &mut vec![])?;
     let view = observe(&ctx)?;
     let shared: Vec<_> = view
@@ -81,7 +81,7 @@ fn a_configured_claude_root_with_an_absent_registry_is_still_bound_to_the_view()
     let root = temp.path().join("custom-model");
     fs::create_dir(&home)?;
     fs::create_dir_all(root.join("plugins"))?;
-    let cli = Cli::try_parse_from(["macops", "--home", home.to_str().ok_or("home")?, "list"])?;
+    let cli = Cli::try_parse_from(["macops", "--home", home.to_str().ok_or("home")?, "app"])?;
     let mut ctx = Context::from_cli(&cli, &mut vec![])?;
     ctx.harness.claude = Some(root.clone());
     let before = observe(&ctx)?;

@@ -224,7 +224,7 @@ fn claude_profile_bytes(
 fn ai_native_claude_recovery_leaves_user_model_edits_intact_when_resolving_failure() -> TestResult {
     let f = setup("claude", "1.0.0")?;
     fs::write(f.home.join("installer-fail"), b"fixture marker")?;
-    let (out, started) = f.run(&["ai", "upgrade", "claude", "2.0.0"])?;
+    let (out, started) = f.run(&["agent", "install", "claude", "2.0.0"])?;
     assert_code(&out, 3);
     assert_eq!(started["data"]["journal"]["phase"], "unknown");
     let id = started["data"]["journal"]["id"]
@@ -283,7 +283,7 @@ fn ai_native_claude_reshim_recovery_preserves_the_exact_prior_live_pin_and_profi
     let shims_failed = f.home.join("reshim-fail");
     fs::write(&shims_failed, b"fixture marker")?;
     fs::write(f.home.join("version-fail"), b"fixture marker")?;
-    let (out, started) = f.run(&["ai", "upgrade", "claude", "2.0.0", "--force-live"])?;
+    let (out, started) = f.run(&["agent", "install", "claude", "2.0.0", "--force-live"])?;
     assert_code(&out, 3);
     assert_eq!(started["data"]["journal"]["phase"], "unknown");
     let id = started["data"]["journal"]["id"]
@@ -327,12 +327,12 @@ fn ai_native_claude_reshim_recovery_preserves_the_exact_prior_live_pin_and_profi
 fn ai_native_codex_reconciles_under_original_operation_and_recovers_source_commit_window()
 -> TestResult {
     let f = setup("codex", "1.0.0")?;
-    let (out, dry) = f.run(&["ai", "upgrade", "codex", "2.0.0", "--dry-run"])?;
+    let (out, dry) = f.run(&["agent", "install", "codex", "2.0.0", "--dry-run"])?;
     assert_code(&out, 0);
     assert_eq!(dry["data"]["backend"], "rust");
     assert!(!f.file("state").exists());
     assert_eq!(pin(&f, false)?, config("codex", "1.0.0"));
-    let (out, value) = f.run(&["app", "upgrade", "codex", "2.0.0"])?;
+    let (out, value) = f.run(&["agent", "agent:codex", "install", "2.0.0"])?;
     assert_code(&out, 0);
     assert_eq!(value["data"]["journal"]["phase"], "succeeded");
     let id = value["data"]["journal"]["id"].as_str().ok_or("id")?;
@@ -354,14 +354,21 @@ fn ai_native_codex_reconciles_under_original_operation_and_recovers_source_commi
 #[test]
 fn unified_ai_upgrade_freezes_the_legacy_plan_and_uses_the_same_recovery() -> TestResult {
     let f = setup("codex", "1.0.0")?;
-    let (old_out, old) = f.run(&["ai", "upgrade", "codex", "2.0.0", "--dry-run"])?;
-    let (new_out, new) = f.run(&["upgrade", "ai:codex", "--version", "2.0.0", "--dry-run"])?;
+    let (old_out, old) = f.run(&["agent", "install", "codex", "2.0.0", "--dry-run"])?;
+    let (new_out, new) = f.run(&[
+        "app",
+        "upgrade",
+        "ai:codex",
+        "--version",
+        "2.0.0",
+        "--dry-run",
+    ])?;
     assert_code(&old_out, 0);
     assert_code(&new_out, 0);
     assert_eq!(new, old);
     assert!(!f.file("state").exists());
     assert_eq!(pin(&f, false)?, config("codex", "1.0.0"));
-    let (out, completed) = f.run(&["upgrade", "ai:codex", "--version", "2.0.0"])?;
+    let (out, completed) = f.run(&["app", "upgrade", "ai:codex", "--version", "2.0.0"])?;
     assert_code(&out, 0);
     let id = completed["data"]["journal"]["id"].as_str().ok_or("id")?;
     assert_eq!(completed["data"]["journal"]["phase"], "succeeded");
@@ -382,12 +389,20 @@ fn unified_ai_flags_do_not_switch_a_declared_recipe_to_another_adapter() -> Test
     let mut catalog = f.read_json("catalog.json")?;
     catalog["packages"][0]["id"] = json!("ai:codex");
     write_json(&f.catalog, &catalog)?;
-    let (out, refusal) = f.run(&["upgrade", "ai:codex", "--version", "2.0.0", "--force-live"])?;
-    assert_code(&out, 1);
-    assert_eq!(refusal["error"]["code"], "force_live_target_unsupported");
+    let (out, refusal) = f.run(&[
+        "app",
+        "upgrade",
+        "ai:codex",
+        "--version",
+        "2.0.0",
+        "--force-live",
+    ])?;
+    assert_code(&out, 2);
+    assert_eq!(refusal["error"]["code"], "usage");
     let (out, refusal) = f.run(&[
         "--chezmoi-source",
         f.home.to_str().ok_or("home")?,
+        "app",
         "upgrade",
         "ai:codex",
         "--version",
@@ -398,8 +413,16 @@ fn unified_ai_flags_do_not_switch_a_declared_recipe_to_another_adapter() -> Test
     assert!(!f.file("state").exists());
     assert!(!f.file("calls").exists());
 
-    assert_code(&f.run(&["install", "ai:codex", "--version", "1.0.0"])?.0, 0);
-    assert_code(&f.run(&["upgrade", "ai:codex", "--version", "2.0.0"])?.0, 0);
+    assert_code(
+        &f.run(&["app", "install", "ai:codex", "--version", "1.0.0"])?
+            .0,
+        0,
+    );
+    assert_code(
+        &f.run(&["app", "upgrade", "ai:codex", "--version", "2.0.0"])?
+            .0,
+        0,
+    );
     assert_eq!(fs::read(f.file("version"))?, b"2.0.0");
     assert_eq!(pin(&f, false)?, config("codex", "1.0.0"));
     Ok(())
@@ -411,7 +434,7 @@ fn unified_ai_upgrade_refuses_recipe_replacement_during_native_plan_probe() -> T
     let mut catalog = f.read_json("catalog.json")?;
     catalog["packages"][0]["id"] = json!("ai:codex");
     write_json(&f.home.join("replace-upgrade-recipe"), &catalog)?;
-    let (out, refused) = f.run(&["upgrade", "ai:codex", "--version", "2.0.0"])?;
+    let (out, refused) = f.run(&["app", "upgrade", "ai:codex", "--version", "2.0.0"])?;
     assert_code(&out, 3);
     assert_eq!(refused["error"]["code"], "plan_stale");
     assert_eq!(f.read_json("catalog.json")?, catalog);
@@ -425,7 +448,7 @@ fn unified_ai_upgrade_refuses_recipe_replacement_during_native_plan_probe() -> T
 #[test]
 fn config_reconcile_lists_drift_without_the_legacy_ai_entry() -> TestResult {
     let f = setup("codex", "2.0.0")?;
-    let (legacy, old) = f.run(&["ai", "reconcile"])?;
+    let (legacy, old) = f.run(&["agent", "upgrade"])?;
     let (current, new) = f.run(&["config", "reconcile"])?;
     assert_eq!(legacy.status.code(), current.status.code());
     assert_eq!(new, old);
@@ -442,12 +465,12 @@ fn ai_native_all_config_drift_blocks_before_mise_and_force_live_keeps_source() -
     ] {
         let f = setup("codex", "1.0.0")?;
         fs::write(f.home.join(".config/mise/config.toml"), &drift)?;
-        let (out, v) = f.run(&["ai", "upgrade", "codex", "2.0.0"])?;
+        let (out, v) = f.run(&["agent", "install", "codex", "2.0.0"])?;
         assert_code(&out, 3);
         assert_eq!(v["error"]["code"], "mise_config_drift");
         assert!(!f.home.join("mise-calls").exists());
         assert!(!f.file("state").exists());
-        let (out, v) = f.run(&["ai", "upgrade", "codex", "2.0.0", "--force-live"])?;
+        let (out, v) = f.run(&["agent", "install", "codex", "2.0.0", "--force-live"])?;
         assert_code(&out, 0);
         assert_eq!(v["data"]["journal"]["phase"], "succeeded");
         assert_eq!(pin(&f, true)?, config("codex", "1.0.0"));
@@ -460,7 +483,7 @@ fn ai_native_payload_failure_returns_previous_live_pin_and_recovers_rollback_win
 {
     for tool in ["dsh", "codegraph"] {
         let f = setup(tool, "7.0.0")?;
-        let (out, v) = f.run(&["ai", "upgrade", tool, "2.0.0", "--force-live"])?;
+        let (out, v) = f.run(&["agent", "install", tool, "2.0.0", "--force-live"])?;
         assert_code(&out, 3);
         assert_eq!(v["data"]["journal"]["phase"], "failed", "{v}");
         assert_eq!(pin(&f, false)?, config(tool, "7.0.0"));
@@ -500,7 +523,7 @@ fn ai_native_complete_payloads_and_claude_profiles_are_preserved() -> TestResult
                 before.push((path.clone(), fs::read(path)?));
             }
         }
-        let (out, v) = f.run(&["ai", "upgrade", tool, "2.0.0"])?;
+        let (out, v) = f.run(&["agent", "install", tool, "2.0.0"])?;
         assert_code(&out, 0);
         assert_eq!(v["data"]["journal"]["phase"], "succeeded", "{v}");
         for (path, bytes) in before {
@@ -520,10 +543,10 @@ fn ai_native_foreign_config_changes_and_failed_reshim_stay_unknown() -> TestResu
     for marker in ["change-other", "change-source", "reshim-fail"] {
         let f = setup("dsh", "1.0.0")?;
         fs::write(f.home.join(marker), "")?;
-        let (out, v) = f.run(&["ai", "upgrade", "dsh", "2.0.0"])?;
+        let (out, v) = f.run(&["agent", "install", "dsh", "2.0.0"])?;
         assert_code(&out, 3);
         assert_eq!(v["data"]["journal"]["phase"], "unknown", "{marker}: {v}");
-        let (out, _) = f.run(&["ai", "upgrade", "dsh", "2.0.0", "--force-live"])?;
+        let (out, _) = f.run(&["agent", "install", "dsh", "2.0.0", "--force-live"])?;
         assert_code(&out, 3);
         if marker != "change-source" {
             assert_eq!(pin(&f, true)?, config("dsh", "1.0.0"));
@@ -557,14 +580,14 @@ esac"#,
     let bad = f.script("old-mo", "printf bad > \"$HOME/legacy-called\"; exit 9")?;
     fs::copy(&bad, f.home.join(".local/bin/mo"))?;
     f.script("security", "printf bad > \"$HOME/keychain-called\"; exit 9")?;
-    let (out, list) = f.run(&["ai", "list"])?;
+    let (out, list) = f.run(&["agent", "tools"])?;
     assert_code(&out, 0);
     assert_eq!(list["data"]["backend"], "rust");
     assert_eq!(list["data"]["tools"].as_array().ok_or("tools")?.len(), 7);
     assert!(!f.file("state").exists());
     assert!(!f.home.join("legacy-called").exists());
     assert!(!f.home.join("keychain-called").exists());
-    let (out, v) = f.run(&["ai", "upgrade", "mimo", "2.0.0"])?;
+    let (out, v) = f.run(&["agent", "install", "mimo", "2.0.0"])?;
     assert_code(&out, 0);
     assert_eq!(v["data"]["journal"]["phase"], "succeeded");
     assert_eq!(
@@ -596,7 +619,7 @@ fn ai_native_each_required_payload_component_and_real_probe_are_indispensable() 
         let f = setup(tool, "1.0.0")?;
         payload(&f, tool)?;
         fs::remove_file(f.home.join("payload/2.0.0/lib/node_modules").join(leaf))?;
-        let (out, v) = f.run(&["ai", "upgrade", tool, "2.0.0"])?;
+        let (out, v) = f.run(&["agent", "install", tool, "2.0.0"])?;
         assert_code(&out, 3);
         assert_eq!(v["data"]["journal"]["phase"], "failed", "{leaf}: {v}");
         assert_eq!(pin(&f, false)?, config(tool, "1.0.0"));
@@ -610,7 +633,7 @@ fn ai_native_each_required_payload_component_and_real_probe_are_indispensable() 
         let f = setup(tool, "1.0.0")?;
         payload(&f, tool)?;
         fs::write(f.home.join(marker), "")?;
-        let (out, v) = f.run(&["ai", "upgrade", tool, "2.0.0"])?;
+        let (out, v) = f.run(&["agent", "install", tool, "2.0.0"])?;
         assert_code(&out, 3);
         assert_eq!(v["data"]["journal"]["phase"], "failed", "{marker}: {v}");
         assert_eq!(pin(&f, false)?, config(tool, "1.0.0"));
@@ -623,7 +646,7 @@ fn ai_native_rollback_cas_rejects_gate_time_concurrent_edits_and_profile_drift()
     for marker in ["change-during-gate", "change-profile"] {
         let f = setup("claude", "1.0.0")?;
         fs::write(f.home.join(marker), "")?;
-        let (out, v) = f.run(&["ai", "upgrade", "claude", "2.0.0"])?;
+        let (out, v) = f.run(&["agent", "install", "claude", "2.0.0"])?;
         assert_code(&out, 3);
         assert_eq!(v["data"]["journal"]["phase"], "unknown");
         assert_eq!(pin(&f, true)?, config("claude", "1.0.0"));
@@ -645,16 +668,16 @@ fn ai_native_rollback_cas_rejects_gate_time_concurrent_edits_and_profile_drift()
 #[test]
 fn ai_native_exact_required_tools_never_resolve_latest_and_other_tools_resolve_it() -> TestResult {
     let f = setup("codex", "1.0.0")?;
-    let (out, v) = f.run(&["ai", "upgrade", "codex"])?;
+    let (out, v) = f.run(&["agent", "install", "codex"])?;
     assert_code(&out, 0);
     assert_eq!(v["data"]["journal"]["plan"]["target"], "2.0.0");
     assert_eq!(calls(&f)?.iter().filter(|v| v[0][0] == "latest").count(), 1);
     for args in [
-        vec!["ai", "upgrade", "dsh"],
-        vec!["app", "upgrade", "codegraph"],
-        vec!["ai", "upgrade", "codegraph", "2.0.0-rc.1"],
-        vec!["ai", "upgrade", "dsh", "1.0"],
-        vec!["ai", "upgrade", "other", "1.0.0"],
+        vec!["agent", "install", "dsh"],
+        vec!["agent", "install", "codegraph"],
+        vec!["agent", "install", "codegraph", "2.0.0-rc.1"],
+        vec!["agent", "install", "dsh", "1.0"],
+        vec!["agent", "install", "other", "1.0.0"],
     ] {
         let f = setup("dsh", "1.0.0")?;
         let (out, _) = f.run(&args)?;
@@ -672,7 +695,7 @@ fn ai_native_vendor_unknown_result_queries_before_recovery_without_reinstalling(
 -v) if [ -f "$HOME/mimo-version" ]; then /bin/cat "$HOME/mimo-version"; else printf '1.0.0\n'; fi ;;
 upgrade) printf 'upgrade\n' >> "$HOME/mimo-calls";printf '2.0.0\n' > "$HOME/mimo-version";/bin/sleep 30 ;;
 esac"#)?;
-    let (out, v) = f.run(&["--timeout-secs", "1", "ai", "upgrade", "mimo", "2.0.0"])?;
+    let (out, v) = f.run(&["--timeout-secs", "1", "agent", "install", "mimo", "2.0.0"])?;
     assert_code(&out, 3);
     assert_eq!(v["data"]["journal"]["phase"], "unknown");
     let id = v["data"]["journal"]["id"].as_str().ok_or("id")?;
@@ -688,7 +711,7 @@ fn ai_native_source_write_failure_keeps_new_verified_live_and_never_advances_sou
 {
     let f = setup("codex", "1.0.0")?;
     fs::write(f.home.join("change-before-reconcile"), "")?;
-    let (out, v) = f.run(&["ai", "upgrade", "codex", "2.0.0"])?;
+    let (out, v) = f.run(&["agent", "install", "codex", "2.0.0"])?;
     assert_code(&out, 3);
     assert_eq!(v["data"]["journal"]["phase"], "unknown");
     assert_eq!(pin(&f, true)?, config("codex", "1.0.0"));
@@ -702,7 +725,7 @@ fn ai_native_source_write_failure_keeps_new_verified_live_and_never_advances_sou
 fn ai_native_namespace_exchange_during_gate_cannot_publish_rollback_or_new_state() -> TestResult {
     let f = setup("codex", "1.0.0")?;
     fs::write(f.home.join("replace-state"), "")?;
-    let (out, v) = f.run(&["ai", "upgrade", "codex", "2.0.0"])?;
+    let (out, v) = f.run(&["agent", "install", "codex", "2.0.0"])?;
     assert_code(&out, 3);
     assert_eq!(v["error"]["code"], "state_namespace_changed");
     assert_eq!(pin(&f, false)?, config("codex", "2.0.0"));
@@ -728,7 +751,7 @@ printf '1.0.0\n'"#)?;
     let out = f
         .command()
         .env("CODEGRAPH_INSTALL_DIR", f.home.join(".codegraph"))
-        .args(["ai", "list"])
+        .args(["agent", "tools"])
         .output()?;
     assert_eq!(
         fs::read_to_string(f.home.join(".codegraph/bundles/poison"))?,
@@ -738,7 +761,7 @@ printf '1.0.0\n'"#)?;
     let out = f
         .command()
         .env("CODEGRAPH_INSTALL_DIR", f.home.join(".codegraph"))
-        .args(["ai", "upgrade", "codegraph", "2.0.0"])
+        .args(["agent", "install", "codegraph", "2.0.0"])
         .output()?;
     assert_code(&out, 0);
     assert_eq!(
@@ -765,7 +788,7 @@ fn ai_native_frozen_explicit_destination_is_the_only_config_passed_to_mise() -> 
         .arg(f.home.join(".local/share/chezmoi"))
         .arg("--chezmoi-destination")
         .arg(&destination)
-        .args(["ai", "upgrade", "codex", "2.0.0"])
+        .args(["agent", "install", "codex", "2.0.0"])
         .output()?;
     assert_code(&out, 0);
     let value: Value = serde_json::from_slice(&out.stdout)?;
@@ -786,7 +809,7 @@ fn ai_native_frozen_explicit_destination_is_the_only_config_passed_to_mise() -> 
 fn ai_native_missing_installed_version_cannot_implicitly_run_another_installer() -> TestResult {
     let f = setup("codex", "1.0.0")?;
     fs::write(f.home.join("missing-tool"), "")?;
-    let (out, v) = f.run(&["ai", "upgrade", "codex", "2.0.0"])?;
+    let (out, v) = f.run(&["agent", "install", "codex", "2.0.0"])?;
     assert_code(&out, 3);
     assert_eq!(v["data"]["journal"]["phase"], "failed");
     assert_eq!(pin(&f, false)?, config("codex", "1.0.0"));
@@ -821,7 +844,7 @@ fn ai_native_js_and_shell_probes_use_frozen_installed_node_without_host_fallback
                 "#!/usr/bin/env node\n// synthetic entry\n"
             },
         )?;
-        let (out, v) = f.run(&["ai", "upgrade", tool, "2.0.0"])?;
+        let (out, v) = f.run(&["agent", "install", tool, "2.0.0"])?;
         assert_code(&out, 0);
         assert_eq!(v["data"]["journal"]["phase"], "succeeded");
         assert!(!f.home.join("host-node-called").exists());
@@ -839,7 +862,7 @@ fn ai_native_mise_which_cannot_select_an_executable_outside_the_installed_versio
         "printf BAD > \"$HOME/host-called\";printf '2.0.0\\n'",
     )?;
     fs::write(f.home.join("outside-binary"), "")?;
-    let (out, v) = f.run(&["ai", "upgrade", "codex", "2.0.0"])?;
+    let (out, v) = f.run(&["agent", "install", "codex", "2.0.0"])?;
     assert_code(&out, 3);
     assert_eq!(v["data"]["journal"]["phase"], "failed");
     assert!(!f.home.join("host-called").exists());
@@ -855,7 +878,7 @@ fn ai_native_recovery_marker_does_not_capture_an_unrelated_user_recipe_with_same
     let mut catalog: Value = serde_json::from_slice(&fs::read(&f.catalog)?)?;
     catalog["packages"][0]["id"] = json!("ai-native:codex");
     write_json(&f.catalog, &catalog)?;
-    let (out, v) = f.run(&["install", "ai-native:codex", "--version", "1.0.0"])?;
+    let (out, v) = f.run(&["app", "install", "ai-native:codex", "--version", "1.0.0"])?;
     assert_code(&out, 0);
     assert_eq!(v["data"]["phase"], "succeeded");
     let id = v["data"]["id"].as_str().ok_or("id")?;
@@ -873,7 +896,7 @@ fn positional(value: &Value, fields: &[&str]) -> Value {
 #[test]
 fn ai_native_private_record_objects_cannot_be_reinterpreted_as_positional_arrays() -> TestResult {
     let f = setup("codex", "1.0.0")?;
-    let (out, v) = f.run(&["ai", "upgrade", "codex", "2.0.0"])?;
+    let (out, v) = f.run(&["agent", "install", "codex", "2.0.0"])?;
     assert_code(&out, 0);
     let id = v["data"]["journal"]["id"].as_str().ok_or("id")?;
     let record_path = f.file(&format!("state/ai-{id}.json"));
@@ -950,7 +973,7 @@ fn ai_native_partial_or_mismatched_previous_pin_is_rejected_before_upgrade() -> 
         f.home.join("payload/1.0/bin/codex"),
         "#!/bin/sh\nprintf '1.0.0\\n'\n",
     )?;
-    let (out, rejected) = f.run(&["ai", "upgrade", "codex", "2.0.0", "--force-live"])?;
+    let (out, rejected) = f.run(&["agent", "install", "codex", "2.0.0", "--force-live"])?;
     assert_code(&out, 3);
     assert_eq!(rejected["error"]["code"], "ai_live_pin_not_exact");
     assert!(!f.file("state").exists());
@@ -991,7 +1014,7 @@ fn ai_r2_force_live_success_requires_post_gate_full_config_and_identity_cas() ->
                 &format!("if version=='2.0.0':\n {edit}\nprint(version)"),
             ),
         )?;
-        let (out, v) = f.run(&["ai", "upgrade", "codegraph", "2.0.0", "--force-live"])?;
+        let (out, v) = f.run(&["agent", "install", "codegraph", "2.0.0", "--force-live"])?;
         assert_code(&out, 3);
         assert_eq!(v["data"]["journal"]["phase"], "unknown", "{mutation}: {v}");
         assert_eq!(
@@ -1025,7 +1048,7 @@ fn publicly_pending_codegraph() -> Result<(Fixture, String), Box<dyn std::error:
     let f = setup("codegraph", "1.0.0")?;
     payload(&f, "codegraph")?;
     fs::write(f.home.join("change-before-reconcile"), "")?;
-    let (out, initial) = f.run(&["ai", "upgrade", "codegraph", "2.0.0"])?;
+    let (out, initial) = f.run(&["agent", "install", "codegraph", "2.0.0"])?;
     assert_code(&out, 3);
     assert_eq!(initial["data"]["journal"]["phase"], "unknown");
     let id = initial["data"]["journal"]["id"]
@@ -1108,7 +1131,7 @@ fn ai_r2_public_reconcile_recovery_rechecks_complete_payload_before_source_publi
 fn ai_r2_source_publication_crash_recovery_cannot_accept_a_missing_target_payload() -> TestResult {
     let f = setup("codegraph", "1.0.0")?;
     payload(&f, "codegraph")?;
-    let (out, initial) = f.run(&["ai", "upgrade", "codegraph", "2.0.0"])?;
+    let (out, initial) = f.run(&["agent", "install", "codegraph", "2.0.0"])?;
     assert_code(&out, 0);
     interrupt_terminal(&f, &initial)?;
     let id = initial["data"]["journal"]["id"].as_str().ok_or("id")?;
@@ -1183,7 +1206,7 @@ fn ai_r3_force_live_does_not_accept_payload_removed_before_version_returns() -> 
         &f,
         "(h/'payload/2.0.0/lib/node_modules/@colbymchenry/codegraph-darwin-arm64/bin/codegraph').unlink()",
     )?;
-    let (out, result) = f.run(&["ai", "upgrade", "codegraph", "2.0.0", "--force-live"])?;
+    let (out, result) = f.run(&["agent", "install", "codegraph", "2.0.0", "--force-live"])?;
     assert_code(&out, 3);
     assert_eq!(result["data"]["journal"]["phase"], "unknown");
     assert_eq!(pin(&f, true)?, config("codegraph", "1.0.0"));

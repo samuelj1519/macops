@@ -113,7 +113,7 @@ pub fn outdated_row(
     Ok(if let Some(version) = version {
         serde_json::json!({"id":package.id,"installed":installed,"available":version,"queried_at":queried_at,"status":if installed.version()==Some(version.as_str()) {"current"}else{"different"}})
     } else {
-        serde_json::json!({"id":package.id,"installed":installed,"available":null,"status":"unknown","hint":"先运行 update；索引缺失或来源/作用域已改变"})
+        serde_json::json!({"id":package.id,"installed":installed,"available":null,"status":"unknown","hint":"先运行 mo app refresh；索引缺失或来源/作用域已改变"})
     })
 }
 

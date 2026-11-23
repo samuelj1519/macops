@@ -83,7 +83,7 @@ fn loader_slots(home: &Path, prefix: &Path) -> Result<Value, Box<dyn std::error:
 fn bound_native_unknown_cannot_fall_back_to_legacy_empty_output_missing() -> TestResult {
     let f = Fixture::new()?;
     let id = bound_catalog(&f)?;
-    let (_, data) = f.run(&["doctor", &id])?;
+    let (_, data) = f.run(&["app", "doctor", &id])?;
     assert_eq!(data["data"][0]["id"], id, "{data}");
     assert_eq!(data["data"][0]["observation"]["status"], "unknown");
     assert!(!f.home.join("native-calls").exists());
@@ -94,7 +94,7 @@ fn bound_native_unknown_cannot_fall_back_to_legacy_empty_output_missing() -> Tes
 fn unregistered_bound_preview_never_executes_native_or_creates_state() -> TestResult {
     let f = Fixture::new()?;
     let id = bound_catalog(&f)?;
-    let (_output, data) = f.run(&["upgrade", &id, "--dry-run"])?;
+    let (_output, data) = f.run(&["app", "upgrade", &id, "--dry-run"])?;
     assert!(!f.home.join("native-calls").exists(), "{data}");
     assert!(!f.root.path().join("state").exists());
     assert!(!f.root.path().join("cache").exists());
@@ -169,7 +169,7 @@ fn registered_doctor_uses_frozen_private_query_and_never_creates_install_owner()
     let output = command
         .env("HOME", &actual)
         .env("PATH", "/usr/bin:/bin")
-        .args(["doctor", &id])
+        .args(["app", "doctor", &id])
         .output()?;
     let data: Value = serde_json::from_slice(&output.stdout)?;
     assert_eq!(
@@ -199,7 +199,7 @@ fn assert_uninstall_noop(f: &Fixture, id: &str, actual: &Path, state: &Path) -> 
     let output = command
         .env("HOME", actual)
         .env("PATH", "/usr/bin:/bin")
-        .args(["uninstall", id, "--yes"])
+        .args(["app", "uninstall", id, "--yes"])
         .output()?;
     let result: Value = serde_json::from_slice(&output.stdout)?;
     assert_eq!(
@@ -366,22 +366,49 @@ fn lifecycle_run(
     Ok(data)
 }
 #[test]
+fn bulk_upgrade_refreshes_the_bound_formula_and_runs_one_writer() -> TestResult {
+    let f = Fixture::new()?;
+    let (id, actual) = lifecycle_fixture(&f)?;
+    let preview = lifecycle_run(&f, &actual, &["app", "upgrade", "--dry-run"])?;
+    assert_eq!(preview["data"]["results"][0]["id"], id);
+    assert_eq!(
+        preview["data"]["results"][0]["status"],
+        "native_query_required"
+    );
+    assert!(!f.home.join("events").exists());
+    let upgraded = lifecycle_run(&f, &actual, &["app", "upgrade", "--yes"])?;
+    assert_eq!(upgraded["status"], "ok", "{upgraded}");
+    assert_eq!(
+        upgraded["data"]["results"][0]["operation"]["journal"]["phase"],
+        "succeeded"
+    );
+    assert!(f.home.join("native-cellar/foo/2.0.0").exists());
+    let events: Vec<Value> = fs::read_to_string(f.home.join("events"))?
+        .lines()
+        .map(serde_json::from_str)
+        .collect::<Result<_, _>>()?;
+    assert_eq!(events.iter().filter(|a| a[0] == "upgrade").count(), 1);
+    assert!(events.iter().take_while(|a| a[0] != "upgrade").count() >= 2);
+    Ok(())
+}
+
+#[test]
 fn trusted_native_upgrade_and_full_uninstall_execute_once_without_adopt() -> TestResult {
     let f = Fixture::new()?;
     let (id, actual) = lifecycle_fixture(&f)?;
-    let updated = lifecycle_run(&f, &actual, &["update", &id])?;
+    let updated = lifecycle_run(&f, &actual, &["app", "refresh", &id])?;
     assert_eq!(
         updated["data"]["results"][0]["version"], "2.0.0",
         "{updated}"
     );
     assert!(!f.home.join("mutated").exists());
-    let upgraded = lifecycle_run(&f, &actual, &["upgrade", &id, "--yes"])?;
+    let upgraded = lifecycle_run(&f, &actual, &["app", "upgrade", &id, "--yes"])?;
     assert_eq!(
         upgraded["data"]["journal"]["phase"], "succeeded",
         "{upgraded}"
     );
     assert!(f.home.join("native-cellar/foo/2.0.0").exists());
-    let removed = lifecycle_run(&f, &actual, &["uninstall", &id, "--yes"])?;
+    let removed = lifecycle_run(&f, &actual, &["app", "uninstall", &id, "--yes"])?;
     assert_eq!(
         removed["data"]["journal"]["phase"], "succeeded",
         "{removed}"
@@ -401,19 +428,19 @@ fn adopted_brew_formula_remains_bound_to_its_original_context_without_a_catalog_
 {
     let f = Fixture::new()?;
     let (id, actual) = lifecycle_fixture(&f)?;
-    let adopted = lifecycle_run(&f, &actual, &["adopt", &id, "--yes"])?;
+    let adopted = lifecycle_run(&f, &actual, &["app", "adopt", &id, "--yes"])?;
     assert_eq!(adopted["data"]["phase"], "succeeded", "{adopted}");
     let common = f.read_json("state/receipts.json")?;
     assert!(common["installations"].get(&id).is_some());
     write_json(&f.catalog, &json!({"schema_version":1,"packages":[]}))?;
     let original_events = fs::read(f.home.join("events"))?;
-    let preview = lifecycle_run(&f, &actual, &["uninstall", &id, "--dry-run"])?;
+    let preview = lifecycle_run(&f, &actual, &["app", "uninstall", &id, "--dry-run"])?;
     assert_eq!(preview["data"]["nativeRuns"], 0);
     assert_eq!(preview["data"]["scope"]["full_name"], "foo");
     assert_eq!(fs::read(f.home.join("events"))?, original_events);
     assert_eq!(f.read_json("state/receipts.json")?, common);
 
-    let removed = lifecycle_run(&f, &actual, &["uninstall", &id, "--yes"])?;
+    let removed = lifecycle_run(&f, &actual, &["app", "uninstall", &id, "--yes"])?;
     assert_eq!(
         removed["data"]["journal"]["phase"], "succeeded",
         "{removed}"
@@ -440,7 +467,7 @@ fn recover_settles_the_authoritative_active_brew_record_across_a_terminal_histor
 {
     let f = Fixture::new()?;
     let (id, actual) = lifecycle_fixture(&f)?;
-    let first = lifecycle_run(&f, &actual, &["upgrade", &id, "--yes"])?;
+    let first = lifecycle_run(&f, &actual, &["app", "upgrade", &id, "--yes"])?;
     assert_eq!(first["data"]["journal"]["phase"], "succeeded", "{first}");
     let operation = first["data"]["journal"]["id"].as_str().ok_or("operation")?;
     let active_path = f.file("state/active.json");
@@ -499,7 +526,7 @@ fn original_nonzero_and_bad_after_remain_unknown_without_native_retry() -> TestR
         let f = Fixture::new()?;
         let (id, actual) = lifecycle_fixture(&f)?;
         fs::write(f.home.join("mode"), mode)?;
-        let result = lifecycle_run(&f, &actual, &["upgrade", &id, "--yes"])?;
+        let result = lifecycle_run(&f, &actual, &["app", "upgrade", &id, "--yes"])?;
         assert_eq!(
             result["data"]["journal"]["phase"], "unknown",
             "{mode}: {result}"
@@ -539,7 +566,7 @@ fn native_update_preserves_revision_and_install_uses_native_missing_scope() -> T
     let f = Fixture::new()?;
     let (id, actual) = lifecycle_fixture(&f)?;
     fs::write(f.home.join("mode"), "revision")?;
-    let updated = lifecycle_run(&f, &actual, &["update", &id])?;
+    let updated = lifecycle_run(&f, &actual, &["app", "refresh", &id])?;
     assert_eq!(
         updated["data"]["results"][0]["version"], "1.2.3_1",
         "{updated}"
@@ -550,7 +577,7 @@ fn native_update_preserves_revision_and_install_uses_native_missing_scope() -> T
     let mut catalog = f.read_json("catalog.json")?;
     catalog["packages"][0]["provider"]["recipe_ref"] = json!("synthetic-declared-formula");
     write_json(&f.catalog, &catalog)?;
-    let installed = lifecycle_run(&f, &actual, &["install", &id, "--yes"])?;
+    let installed = lifecycle_run(&f, &actual, &["app", "install", &id, "--yes"])?;
     assert_eq!(
         installed["data"]["journal"]["phase"], "succeeded",
         "{installed}"
@@ -581,7 +608,7 @@ fn another_registry_does_not_trust_a_new_context_and_first_explicit_action_confi
     let (id, actual) = lifecycle_fixture(&f)?;
     let registry = f.root.path().join("state/brew-contexts-v1.json");
     write_json(&registry, &json!({"schema_version":1,"contexts":{}}))?;
-    let doctor = lifecycle_run(&f, &actual, &["doctor", &id])?;
+    let doctor = lifecycle_run(&f, &actual, &["app", "doctor", &id])?;
     assert_eq!(
         doctor["error"]["code"], "brew_context_unregistered",
         "{doctor}"
@@ -591,13 +618,13 @@ fn another_registry_does_not_trust_a_new_context_and_first_explicit_action_confi
         serde_json::from_slice::<Value>(&fs::read(&registry)?)?["contexts"],
         json!({})
     );
-    let unconfirmed = lifecycle_run(&f, &actual, &["upgrade", &id])?;
+    let unconfirmed = lifecycle_run(&f, &actual, &["app", "upgrade", &id])?;
     assert_eq!(
         unconfirmed["error"]["code"], "confirmation_required",
         "{unconfirmed}"
     );
     assert!(!f.home.join("events").exists());
-    let confirmed = lifecycle_run(&f, &actual, &["upgrade", &id, "--yes"])?;
+    let confirmed = lifecycle_run(&f, &actual, &["app", "upgrade", &id, "--yes"])?;
     assert_eq!(
         confirmed["data"]["journal"]["phase"], "succeeded",
         "{confirmed}"
@@ -610,7 +637,7 @@ fn fresh_before_query_blocks_keg_drift_without_launch_or_recovery_retry() -> Tes
     let f = Fixture::new()?;
     let (id, actual) = lifecycle_fixture(&f)?;
     fs::write(f.home.join("mode"), "before-drift")?;
-    let result = lifecycle_run(&f, &actual, &["upgrade", &id, "--yes"])?;
+    let result = lifecycle_run(&f, &actual, &["app", "upgrade", &id, "--yes"])?;
     assert_eq!(result["data"]["journal"]["phase"], "unknown", "{result}");
     assert!(!f.home.join("mutated").exists());
     assert_eq!(
@@ -643,9 +670,9 @@ fn fresh_before_query_blocks_keg_drift_without_launch_or_recovery_retry() -> Tes
 fn unregistered_discovery_and_application_inventory_do_not_execute_path_brew() -> TestResult {
     let f = Fixture::new()?;
     f.script("brew", "printf query >> \"$MACOPS_TEST_HOME/discovery-calls\"; case \"$1\" in --prefix) printf '%s' \"$MACOPS_TEST_HOME/native-prefix\";; *) printf '%s' '{\"formulae\":[],\"casks\":[]}' ;; esac")?;
-    let _ = f.run(&["discover", "brew"])?;
+    let _ = f.run(&["app", "discover", "brew"])?;
     assert!(!f.home.join("discovery-calls").exists());
-    let _ = f.run(&["list", "--kind", "applications"])?;
+    let _ = f.run(&["app", "resources"])?;
     assert!(!f.home.join("discovery-calls").exists());
     Ok(())
 }
@@ -663,7 +690,7 @@ fn first_interactive_query_consent_does_not_authorize_the_actual_writer() -> Tes
         .chain(command.get_args())
         .map(|s| s.to_str().ok_or("argv").map(str::to_owned))
         .collect::<Result<_, _>>()?;
-    argv.extend(["upgrade".into(), id]);
+    argv.extend(["app".into(), "upgrade".into(), id]);
     let mut env =
         json!({"HOME":actual,"PATH":"/usr/bin:/bin","SYNTHETIC_AUTH":"private-fixture-token"});
     if let Some(profile) = std::env::var_os("LLVM_PROFILE_FILE") {
@@ -715,7 +742,7 @@ fn wrong_formula_cannot_publish_an_index_or_settle_upgrade() -> TestResult {
     let f = Fixture::new()?;
     let (id, actual) = lifecycle_fixture(&f)?;
     fs::write(f.home.join("mode"), "wrong-formula")?;
-    let update = lifecycle_run(&f, &actual, &["update", &id])?;
+    let update = lifecycle_run(&f, &actual, &["app", "refresh", &id])?;
     assert_eq!(
         update["error"]["code"], "brew_formula_identity_mismatch",
         "{update}"
@@ -725,7 +752,7 @@ fn wrong_formula_cannot_publish_an_index_or_settle_upgrade() -> TestResult {
     let f = Fixture::new()?;
     let (id, actual) = lifecycle_fixture(&f)?;
     fs::write(f.home.join("mode"), "wrong-formula-after")?;
-    let upgraded = lifecycle_run(&f, &actual, &["upgrade", &id, "--yes"])?;
+    let upgraded = lifecycle_run(&f, &actual, &["app", "upgrade", &id, "--yes"])?;
     assert_eq!(
         upgraded["data"]["journal"]["phase"], "unknown",
         "{upgraded}"
@@ -745,7 +772,7 @@ fn already_current_native_upgrade_settles_noop_with_zero_writer() -> TestResult 
     let keg = f.home.join("native-cellar/foo/2.0.0");
     fs::create_dir(&keg)?;
     fs::write(keg.join("INSTALL_RECEIPT.json"), b"{}")?;
-    let result = lifecycle_run(&f, &actual, &["upgrade", &id, "--yes"])?;
+    let result = lifecycle_run(&f, &actual, &["app", "upgrade", &id, "--yes"])?;
     assert_eq!(result["data"]["phase"], "succeeded", "{result}");
     assert_eq!(result["data"]["plan"]["brew"]["execution"], "verified-noop");
     assert!(result["data"]["plan"]["command"].is_null());
@@ -768,7 +795,7 @@ fn brew_noop_cannot_settle_after_a_failed_recheck_or_a_changed_owner() -> TestRe
         let receipt = keg.join("INSTALL_RECEIPT.json");
         fs::write(&receipt, b"{}")?;
         fs::write(f.home.join("mode"), mode)?;
-        let result = lifecycle_run(&f, &actual, &["upgrade", &id])?;
+        let result = lifecycle_run(&f, &actual, &["app", "upgrade", &id])?;
         assert_eq!(result["data"]["phase"], "unknown", "{mode}: {result}");
         assert_eq!(result["data"]["plan"]["brew"]["execution"], "verified-noop");
         assert_eq!(f.read_json("state/active.json")?["phase"], "unknown");
@@ -799,17 +826,17 @@ fn verified_bound_discovery_reads_absolute_program_and_preserves_casks_without_a
 -> TestResult {
     let f = Fixture::new()?;
     let (id, actual) = lifecycle_fixture(&f)?;
-    let pending = lifecycle_run(&f, &actual, &["discover", "brew"])?;
+    let pending = lifecycle_run(&f, &actual, &["app", "discover", "brew"])?;
     assert_eq!(pending["data"]["coverage"]["state"], "unavailable");
     assert_eq!(pending["data"]["packages"], json!([]));
     assert_eq!(pending["data"]["unresolved"], true);
     assert!(!f.home.join("events").exists());
-    let observed = lifecycle_run(&f, &actual, &["doctor", &id])?;
+    let observed = lifecycle_run(&f, &actual, &["app", "doctor", &id])?;
     assert_eq!(
         observed["data"][0]["observation"]["status"], "brew-installed",
         "{observed}"
     );
-    let result = lifecycle_run(&f, &actual, &["discover", "brew"])?;
+    let result = lifecycle_run(&f, &actual, &["app", "discover", "brew"])?;
     assert_eq!(result["data"]["adopted"], false);
     let packages = result["data"]["packages"].as_array().ok_or("packages")?;
     assert!(
@@ -848,7 +875,7 @@ fn verified_bound_discovery_reads_absolute_program_and_preserves_casks_without_a
     unverified["binding"]["metadata_scope"]["config_files"] = loader_slots(&f.home, &other_prefix)?;
     contexts.insert(other_context, unverified);
     write_json(&f.file("state/brew-contexts-v1.json"), &registry)?;
-    let mixed = lifecycle_run(&f, &actual, &["discover", "brew"])?;
+    let mixed = lifecycle_run(&f, &actual, &["app", "discover", "brew"])?;
     assert_eq!(mixed["data"]["coverage"]["state"], "unavailable");
     assert_eq!(mixed["data"]["packages"], result["data"]["packages"]);
     assert_eq!(mixed["data"]["unresolved"], true);
@@ -865,7 +892,7 @@ fn bound_discovery_preserves_the_registry_when_native_info_fails_or_loader_metad
     for verification in ["discovery-unavailable", "loader-drift"] {
         let f = Fixture::new()?;
         let (id, actual) = lifecycle_fixture(&f)?;
-        let observed = lifecycle_run(&f, &actual, &["doctor", &id])?;
+        let observed = lifecycle_run(&f, &actual, &["app", "doctor", &id])?;
         assert_eq!(
             observed["data"][0]["observation"]["status"],
             "brew-installed"
@@ -880,7 +907,7 @@ fn bound_discovery_preserves_the_registry_when_native_info_fails_or_loader_metad
         } else {
             fs::write(f.home.join("mode"), verification)?;
         }
-        let result = lifecycle_run(&f, &actual, &["discover", "brew"])?;
+        let result = lifecycle_run(&f, &actual, &["app", "discover", "brew"])?;
         assert_eq!(result["data"]["coverage"]["state"], "unavailable");
         assert_eq!(result["data"]["packages"], json!([]));
         assert_eq!(result["data"]["unresolved"], true);
@@ -939,15 +966,15 @@ fn noop_and_baseline_adoption_do_not_confirm_native_writer_scope() -> TestResult
             let keg = f.home.join("native-cellar/foo/2.0.0");
             fs::create_dir(&keg)?;
             fs::write(keg.join("INSTALL_RECEIPT.json"), b"{}")?;
-            let result = lifecycle_run(&f, &actual, &["upgrade", &id])?;
+            let result = lifecycle_run(&f, &actual, &["app", "upgrade", &id])?;
             assert_eq!(result["data"]["phase"], "succeeded", "{result}");
             fs::remove_dir_all(keg)?;
         } else {
-            let result = lifecycle_run(&f, &actual, &["adopt", &id, "--yes"])?;
+            let result = lifecycle_run(&f, &actual, &["app", "adopt", &id, "--yes"])?;
             assert_eq!(result["data"]["phase"], "succeeded", "{result}");
         }
         assert!(!writer_scope_confirmed(&f)?);
-        let next = lifecycle_run(&f, &actual, &["upgrade", &id])?;
+        let next = lifecycle_run(&f, &actual, &["app", "upgrade", &id])?;
         assert_eq!(next["error"]["code"], "confirmation_required", "{next}");
         assert!(!f.home.join("mutated").exists());
         assert!(!writer_scope_confirmed(&f)?);
@@ -958,11 +985,11 @@ fn noop_and_baseline_adoption_do_not_confirm_native_writer_scope() -> TestResult
 fn confirmed_native_writer_scope_allows_daily_upgrade_without_reconfirmation() -> TestResult {
     let f = Fixture::new()?;
     let (id, actual) = lifecycle_fixture(&f)?;
-    let first = lifecycle_run(&f, &actual, &["upgrade", &id, "--yes"])?;
+    let first = lifecycle_run(&f, &actual, &["app", "upgrade", &id, "--yes"])?;
     assert_eq!(first["data"]["journal"]["phase"], "succeeded", "{first}");
     assert!(writer_scope_confirmed(&f)?);
     fs::remove_dir_all(f.home.join("native-cellar/foo/2.0.0"))?;
-    let next = lifecycle_run(&f, &actual, &["upgrade", &id])?;
+    let next = lifecycle_run(&f, &actual, &["app", "upgrade", &id])?;
     assert_eq!(next["data"]["journal"]["phase"], "succeeded", "{next}");
     assert!(writer_scope_confirmed(&f)?);
     let events: Vec<Value> = fs::read_to_string(f.home.join("events"))?
@@ -986,7 +1013,7 @@ fn independent_refusal_keeps_first_writer_confirmation_pending() -> TestResult {
         .chain(command.get_args())
         .map(|s| s.to_str().ok_or("argv").map(str::to_owned))
         .collect::<Result<_, _>>()?;
-    argv.extend(["upgrade".into(), id.clone()]);
+    argv.extend(["app".to_owned(), "upgrade".to_owned(), id.clone()]);
     let mut env =
         json!({"HOME":actual,"PATH":"/usr/bin:/bin","SYNTHETIC_AUTH":"private-fixture-token"});
     if let Some(profile) = std::env::var_os("LLVM_PROFILE_FILE") {
@@ -1038,7 +1065,7 @@ print(json.dumps({'stdout':buf['out'].decode(),'stderr':buf['err'].decode(),'pro
         .next()
         .ok_or("context")?["observation_valid"]
         .clone();
-    let next = lifecycle_run(&f, &actual, &["upgrade", &id])?;
+    let next = lifecycle_run(&f, &actual, &["app", "upgrade", &id])?;
     let writes = f.home.join("mutated").exists();
     eprintln!(
         "review: refusal_exit={} native_at_prompts={} observation_valid={} second_status={} second_phase={} second_consent={} fake_wrote={writes}",
@@ -1059,7 +1086,7 @@ print(json.dumps({'stdout':buf['out'].decode(),'stderr':buf['err'].decode(),'pro
 #[test]
 fn independent_read_queries_do_not_authorize_a_first_writer() -> TestResult {
     let mut all_blocked = true;
-    for query in ["doctor", "update"] {
+    for prefix in [vec!["app", "doctor"], vec!["app", "refresh", "--dry-run"]] {
         let f = Fixture::new()?;
         let (id, actual) = lifecycle_fixture(&f)?;
         let before = f.read_json("state/brew-contexts-v1.json")?;
@@ -1072,7 +1099,9 @@ fn independent_read_queries_do_not_authorize_a_first_writer() -> TestResult {
                 .ok_or("context")?["observation_valid"],
             false
         );
-        let result = lifecycle_run(&f, &actual, &[query, &id])?;
+        let mut args = prefix.clone();
+        args.push(id.as_str());
+        let result = lifecycle_run(&f, &actual, &args)?;
         assert_eq!(result["status"], "ok");
         assert!(!f.home.join("mutated").exists());
         let registry = f.read_json("state/brew-contexts-v1.json")?;
@@ -1083,10 +1112,10 @@ fn independent_read_queries_do_not_authorize_a_first_writer() -> TestResult {
             .next()
             .ok_or("context")?["observation_valid"]
             .clone();
-        let next = lifecycle_run(&f, &actual, &["upgrade", &id])?;
+        let next = lifecycle_run(&f, &actual, &["app", "upgrade", &id])?;
         let writes = f.home.join("mutated").exists();
         eprintln!(
-            "review: query={query} observation_valid={} first_writer_status={} first_writer_phase={} first_writer_consent={} fake_wrote={writes}",
+            "review: query={prefix:?} observation_valid={} first_writer_status={} first_writer_phase={} first_writer_consent={} fake_wrote={writes}",
             observation_valid,
             next["status"],
             next["data"]["journal"]["phase"],
@@ -1108,15 +1137,15 @@ fn adopt_brew_by_the_name_shown_in_apps() -> TestResult {
     let mut catalog = f.read_json("catalog.json")?;
     catalog["packages"][0]["name"] = json!("Formula Display Label");
     write_json(&f.catalog, &catalog)?;
-    let refreshed = lifecycle_run(&f, &actual, &["update", &id])?;
+    let refreshed = lifecycle_run(&f, &actual, &["app", "refresh", &id])?;
     assert_eq!(refreshed["status"], "ok", "{refreshed}");
     let events = fs::read(f.home.join("events"))?;
-    let preview = lifecycle_run(&f, &actual, &["adopt", "foo", "--dry-run"])?;
+    let preview = lifecycle_run(&f, &actual, &["app", "adopt", "foo", "--dry-run"])?;
     assert_eq!(preview["data"]["id"], id, "{preview}");
     assert_eq!(preview["data"]["nativeRuns"], 0, "{preview}");
     assert_eq!(fs::read(f.home.join("events"))?, events);
     assert!(!f.file("state/receipts.json").exists());
-    let listed = lifecycle_run(&f, &actual, &["list", "--kind", "apps"])?;
+    let listed = lifecycle_run(&f, &actual, &["app", "resources"])?;
     assert!(
         listed["data"]["resources"]
             .as_array()
@@ -1124,7 +1153,7 @@ fn adopt_brew_by_the_name_shown_in_apps() -> TestResult {
             .iter()
             .any(|item| item["name"] == "foo" && item["id"] == id && item["manager"] == "brew")
     );
-    let adopted = lifecycle_run(&f, &actual, &["adopt", "foo", "--yes"])?;
+    let adopted = lifecycle_run(&f, &actual, &["app", "adopt", "foo", "--yes"])?;
     assert_eq!(adopted["data"]["phase"], "succeeded", "{adopted}");
     let receipts = f.read_json("state/receipts.json")?;
     assert_eq!(receipts["installations"][&id]["package"]["id"], id);
@@ -1149,19 +1178,22 @@ fn adopt_brew_name_collision_refuses_but_explicit_id_still_works() -> TestResult
             "paths": [], "exact_version_required": false
         }));
     write_json(&f.catalog, &catalog)?;
-    for args in [["adopt", "foo", "--yes"], ["adopt", "foo", "--dry-run"]] {
+    for args in [
+        ["app", "adopt", "foo", "--yes"],
+        ["app", "adopt", "foo", "--dry-run"],
+    ] {
         let ambiguous = lifecycle_run(&f, &actual, &args)?;
         assert_eq!(ambiguous["error"]["code"], "ambiguous", "{ambiguous}");
         assert!(
             ambiguous["error"]["message"]
                 .as_str()
                 .ok_or("message")?
-                .contains("mo apps")
+                .contains("mo app")
         );
         assert!(!f.file("state/receipts.json").exists());
         assert!(!f.home.join("events").exists());
     }
-    let adopted = lifecycle_run(&f, &actual, &["adopt", &id, "--yes"])?;
+    let adopted = lifecycle_run(&f, &actual, &["app", "adopt", &id, "--yes"])?;
     assert_eq!(adopted["data"]["phase"], "succeeded", "{adopted}");
     assert!(
         f.read_json("state/receipts.json")?["installations"]
@@ -1183,14 +1215,14 @@ fn inventory_confirms_adoption_upgrade_and_removal_with_native_brew() -> TestRes
     ] {
         let f = Fixture::new()?;
         let (id, actual) = lifecycle_fixture(&f)?;
-        let refreshed = lifecycle_run(&f, &actual, &["update", &id])?;
+        let refreshed = lifecycle_run(&f, &actual, &["app", "refresh", &id])?;
         assert_eq!(refreshed["status"], "ok", "{refreshed}");
         if receipt_only {
-            let adopted = lifecycle_run(&f, &actual, &["adopt", &id, "--yes"])?;
+            let adopted = lifecycle_run(&f, &actual, &["app", "adopt", &id, "--yes"])?;
             assert_eq!(adopted["status"], "ok", "{adopted}");
             write_json(&f.catalog, &json!({"schema_version":1,"packages":[]}))?;
         }
-        let listed = lifecycle_run(&f, &actual, &["list", "--kind", "applications"])?;
+        let listed = lifecycle_run(&f, &actual, &["app", "resources"])?;
         let formulae: Vec<_> = listed["data"]["resources"]
             .as_array()
             .ok_or("software inventory")?
@@ -1223,7 +1255,7 @@ fn inventory_confirms_adoption_upgrade_and_removal_with_native_brew() -> TestRes
         run_brew_pty(
             &f,
             &actual,
-            &["list"],
+            &["app"],
             json!({"inventory":[key,result],"approved":approved}),
         )?;
         let commands: Vec<Value> = fs::read_to_string(f.home.join("events"))?

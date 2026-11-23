@@ -40,7 +40,7 @@ exec /usr/bin/python3 "$@""#,
     }
     fn install(&self) -> Result<(std::process::Output, Value), Box<dyn std::error::Error>> {
         self.f.run(&[
-            "skills",
+            "skill",
             "install",
             "--recipe",
             self.recipe.to_str().ok_or("recipe")?,
@@ -80,7 +80,7 @@ fn legacy_policy_preview_leaves_the_fixed_recipe_metadata_under_its_installation
         receipts["installations"][skill_id]["package"]["name"],
         "alpha"
     );
-    let (out, baseline) = n.f.run(&["doctor", skill_id])?;
+    let (out, baseline) = n.f.run(&["app", "doctor", skill_id])?;
     assert_code(&out, 0);
     assert_eq!(baseline["data"][0]["baseline"]["comparison"], "same");
     let skill = n.f.home.join(".agents/skills/alpha/SKILL.md");
@@ -92,7 +92,7 @@ fn legacy_policy_preview_leaves_the_fixed_recipe_metadata_under_its_installation
         &n.f.file("settings/manifests/agent-invocation-policy.json"),
         &json!({"schema_version":1,"standalone_manual_only":["alpha"]}),
     )?;
-    let (out, preview) = n.f.run(&["--dry-run", "skills", "policy", "sync"])?;
+    let (out, preview) = n.f.run(&["--dry-run", "skill", "policy", "sync"])?;
     assert_code(&out, 0);
     assert_eq!(preview["data"]["plan"]["planned_changes"], 0, "{preview}");
     assert_eq!(fs::read(&skill)?, installed);
@@ -106,7 +106,7 @@ fn legacy_policy_preview_leaves_the_fixed_recipe_metadata_under_its_installation
         &n.f.file("settings/manifests/agent-invocation-policy.json"),
         &json!({"schema_version":1,"standalone_manual_only":["alpha","beta"]}),
     )?;
-    let (out, synced) = n.f.run(&["--yes", "skills", "policy", "sync"])?;
+    let (out, synced) = n.f.run(&["--yes", "skill", "policy", "sync"])?;
     assert_code(&out, 0);
     assert_eq!(synced["data"]["changed"], 2);
     let operation = synced["data"]["operation_id"]
@@ -134,7 +134,7 @@ fn legacy_policy_preview_leaves_the_fixed_recipe_metadata_under_its_installation
     assert!(!codex_policy.exists());
     assert!(fs::read_to_string(other)?.contains("disable-model-invocation: true"));
     assert_eq!(fs::read(&receipt_path)?, receipt_before);
-    let (out, baseline) = n.f.run(&["doctor", skill_id])?;
+    let (out, baseline) = n.f.run(&["app", "doctor", skill_id])?;
     assert_code(&out, 0);
     assert_eq!(baseline["data"][0]["baseline"]["comparison"], "same");
     assert_eq!(fs::read(receipt_path)?, receipt_before);
@@ -149,7 +149,7 @@ fn unconfigured_native_skills_keep_readonly_aliases_without_claiming_update_evid
     native_skill_fixture(&f, &["alpha", "beta"])?;
     let lock_path = f.home.join(".agents/.skill-lock.json");
     let original = fs::read(&lock_path)?;
-    let (out, all) = f.run(&["skills", "outdated"])?;
+    let (out, all) = f.run(&["skill", "outdated"])?;
     assert_code(&out, 3);
     let rows = all["data"]["results"]
         .as_array()
@@ -161,13 +161,13 @@ fn unconfigured_native_skills_keep_readonly_aliases_without_claiming_update_evid
         .ok_or("alpha")?;
     let id = alpha["id"].as_str().ok_or("alpha ID")?;
     for key in ["alpha", id, "skill:alpha"] {
-        let (out, selected) = f.run(&["skills", "outdated", "--only", key])?;
+        let (out, selected) = f.run(&["skill", "outdated", "--only", key])?;
         assert_code(&out, 3);
         assert_eq!(selected["data"]["results"], json!([alpha]));
         assert_eq!(selected["data"]["results"][0]["reason"], "recipe_required");
         assert_eq!(selected["data"]["networkInvoked"], false);
     }
-    let (out, source) = f.run(&["skills", "outdated", "source:owner/repo"])?;
+    let (out, source) = f.run(&["skill", "outdated", "source:owner/repo"])?;
     assert_code(&out, 3);
     assert_eq!(source["data"]["results"], all["data"]["results"]);
     assert!(!f.file("state").exists());
@@ -197,11 +197,11 @@ fn native_recipe_default_write_exact_reinstall_and_remove_keep_one_owner_and_fix
     let native: Value = serde_json::from_slice(&raw)?;
     assert_eq!(native["skills"]["alpha"]["skillFolderHash"], "b".repeat(40));
     assert_eq!(native["skills"]["alpha"]["ref"], "a".repeat(40));
-    let (out, info) = n.f.run(&["skills", "info", id])?;
+    let (out, info) = n.f.run(&["skill", id])?;
     assert_code(&out, 0);
     assert_eq!(info["data"]["delivery"]["stage"], "verified");
     assert_eq!(fs::read(n.f.home.join(".agents/.skill-lock.json"))?, raw);
-    let (out, upgraded) = n.f.run(&["skills", "upgrade", id])?;
+    let (out, upgraded) = n.f.run(&["skill", "upgrade", id])?;
     assert_code(&out, 0);
     assert_eq!(
         upgraded["data"]["results"][0]["journal"]["plan"]["package"]["id"],
@@ -215,7 +215,7 @@ fn native_recipe_default_write_exact_reinstall_and_remove_keep_one_owner_and_fix
             .len(),
         1
     );
-    let (out, removed) = n.f.run(&["--yes", "skills", "remove", id])?;
+    let (out, removed) = n.f.run(&["--yes", "skill", "remove", id])?;
     assert_code(&out, 0);
     assert_eq!(removed["data"]["deliveryStage"], "verified");
     assert!(!root.exists());
@@ -243,7 +243,7 @@ fn native_partial_result_and_recovery_do_not_rerun_or_customize_native_payload()
     assert_code(&out, 3);
     assert_eq!(recovered["data"]["deliveryStage"], "native-unknown");
     assert_eq!(n.calls()?.len(), 1);
-    let (out, info) = n.f.run(&["skills", "info", "alpha"])?;
+    let (out, info) = n.f.run(&["skill", "alpha"])?;
     assert_code(&out, 0);
     assert_eq!(info["data"]["delivery"]["stage"], "native-unknown");
     assert_eq!(info["data"]["recipe"]["id"], "alpha");
@@ -350,10 +350,10 @@ fn explicit_native_maintenance_never_parses_unrelated_plugin_settings_or_cache()
     )?;
     let (out, _) = n.install()?;
     assert_code(&out, 0);
-    let (out, _) = n.f.run(&["skills", "upgrade", "alpha"])?;
+    let (out, _) = n.f.run(&["skill", "upgrade", "alpha"])?;
     assert_code(&out, 0);
     assert_eq!(n.calls()?.len(), 2);
-    let (out, _) = n.f.run(&["skills", "upgrade", "--all"])?;
+    let (out, _) = n.f.run(&["skill", "upgrade", "--all"])?;
     assert_code(&out, 3);
     assert_eq!(n.calls()?.len(), 2);
     assert_eq!(
@@ -372,7 +372,7 @@ fn native_success_with_unsupported_metadata_remains_customization_pending_and_in
     assert_code(&out, 3);
     assert_eq!(value["data"]["deliveryStage"], "customization-pending");
     let operation = value["data"]["journal"]["id"].as_str().ok_or("operation")?;
-    let (out, info) = n.f.run(&["skills", "info", "alpha"])?;
+    let (out, info) = n.f.run(&["skill", "alpha"])?;
     assert_code(&out, 0);
     assert_eq!(info["data"]["delivery"]["stage"], "customization-pending");
     assert_eq!(info["data"]["delivery"]["operationId"], operation);
@@ -392,7 +392,7 @@ fn compiled_outdated_uses_the_fixed_recipe_locator_without_starting_native_or_re
     assert_code(&out, 0);
     let calls = n.calls()?;
     let native = fs::read(n.f.home.join(".agents/.skill-lock.json"))?;
-    let (out, value) = n.f.run(&["skills", "outdated", "alpha"])?;
+    let (out, value) = n.f.run(&["skill", "outdated", "alpha"])?;
     assert_code(&out, 3);
     assert_eq!(value["data"]["resources"][0]["status"], "unknown");
     assert_eq!(
@@ -415,7 +415,7 @@ fn central_remove_refuses_an_unregistered_client_reference_without_starting_nati
     fs::create_dir_all(&parent)?;
     std::os::unix::fs::symlink(&canonical, parent.join("alpha"))?;
     let raw = fs::read(n.f.home.join(".agents/.skill-lock.json"))?;
-    let (out, value) = n.f.run(&["--yes", "skills", "remove", "alpha"])?;
+    let (out, value) = n.f.run(&["--yes", "skill", "remove", "alpha"])?;
     assert_code(&out, 3);
     assert_eq!(value["error"]["code"], "native_skills_shared_installation");
     assert_eq!(n.calls()?.len(), 1);
@@ -432,7 +432,7 @@ fn fixed_runner_drift_never_installs_a_new_runner_or_starts_the_old_native_comma
     let mut bytes = fs::read(&entry)?;
     bytes.extend_from_slice(b"\n# changed runner\n");
     fs::write(&entry, &bytes)?;
-    let (out, value) = n.f.run(&["skills", "upgrade", "alpha"])?;
+    let (out, value) = n.f.run(&["skill", "upgrade", "alpha"])?;
     assert_code(&out, 3);
     assert_eq!(value["error"]["code"], "native_skills_runner_changed");
     assert_eq!(n.calls()?.len(), 1);

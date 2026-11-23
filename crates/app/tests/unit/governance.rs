@@ -9,7 +9,7 @@ fn context(home: &std::path::Path) -> Result<Context> {
         "macops",
         "--home",
         home.to_str().ok_or_else(|| Error::new("utf8", "home"))?,
-        "list",
+        "app",
     ])
     .map_err(|_| Error::new("parse", "fixture"))?;
     Context::from_cli(&cli, &mut vec![])

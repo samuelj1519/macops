@@ -27,7 +27,7 @@ impl Fixture {
         fs::write(&live, &old_pin)?;
         fs::write(&source, &old_pin)?;
         fs::write(&profile, br#"{"model":"custom-mi"}"#)?;
-        let cli = Cli::try_parse_from(["macops", "--home", home.to_str().ok_or("home")?, "list"])?;
+        let cli = Cli::try_parse_from(["macops", "--home", home.to_str().ok_or("home")?, "app"])?;
         let context = Context::from_cli(&cli, &mut vec![])?;
         let target = old_pin.replace("1.0.0", "2.0.0");
         let recipe = Upgrade {

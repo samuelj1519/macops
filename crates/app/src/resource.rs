@@ -115,6 +115,8 @@ pub struct RuntimeBinding {
 }
 #[derive(Clone, Debug, Serialize)]
 pub struct Origin {
+    #[serde(skip)]
+    pub repository: Option<crate::policy::source_git::Repository>,
     pub manager: String,
     pub label: Option<String>,
     pub record: PathBuf,
@@ -177,7 +179,12 @@ pub struct Snapshot {
 
 impl Resource {
     pub(crate) fn matches_name(&self, key: &str) -> bool {
-        self.name == key || self.aliases.iter().any(|alias| alias == key)
+        self.name == key
+            || self.aliases.iter().any(|alias| alias == key)
+            || matches!(&self.data, Data::Capability { origin, .. }
+            if origin.repository.as_ref().is_some_and(|repository| {
+                repository.key().eq_ignore_ascii_case(key.strip_prefix("skill:").unwrap_or(key))
+            }))
     }
 
     pub fn category(&self) -> &'static str {

@@ -77,29 +77,97 @@ fn snapshot_with_authority(
 }
 
 pub fn query(ctx: &Context, command: &crate::cli::Command) -> Result<Option<serde_json::Value>> {
-    match command {
-        crate::cli::Command::List { kind, project } => Ok(Some(serde_json::to_value(snapshot(
-            ctx,
-            kind.as_deref(),
-            project.as_deref(),
-        )?)?)),
-        crate::cli::Command::Info { id, project } => {
-            let kind = if id.starts_with("agent:") {
-                Some("agents")
-            } else if id.starts_with("capability:") {
-                Some("capabilities")
-            } else if id.starts_with("config:") {
-                Some("configs")
-            } else {
-                None
-            };
-            let data = snapshot(ctx, kind, project.as_deref())?;
-            Ok(Some(
-                serde_json::json!({"resource":data.select(id)?,"coverage":&data.coverage,"incomplete":data.incomplete}),
-            ))
+    use crate::cli::{AgentCmd, AppCmd, Command, Config, SkillCmd};
+    let (kind, project, detail) = match command {
+        Command::App {
+            command: None | Some(AppCmd::Resources),
+            project,
+        } => ("applications", project, None),
+        Command::Config {
+            command: None | Some(Config::Resources),
+            project,
+        } => ("configs", project, None),
+        Command::Skill {
+            command: None,
+            project: Some(project),
+            ..
+        } => {
+            return snapshot(ctx, Some("capabilities"), Some(project))
+                .and_then(|data| Ok(Some(serde_json::to_value(data)?)));
         }
-        _ => Ok(None),
+        Command::Skill {
+            command: Some(SkillCmd::Resources),
+            project,
+            ..
+        } => ("capabilities", project, None),
+        Command::Agent {
+            command: None | Some(AgentCmd::Resources),
+            project,
+        } => ("agents", project, None),
+        Command::Config {
+            command: Some(Config::Detail(detail)),
+            project,
+        } => ("configs", project, Some(&detail.target)),
+        Command::Skill {
+            command: Some(SkillCmd::Detail(detail)),
+            project,
+            ..
+        } => ("capabilities", project, Some(&detail.target)),
+        Command::Agent {
+            command: Some(AgentCmd::Detail(detail)),
+            project,
+        } => ("agents", project, Some(&detail.target)),
+        _ => return Ok(None),
+    };
+    let data = snapshot(ctx, Some(kind), project.as_deref())?;
+    let mut value = if let Some(term) = detail {
+        match snapshot_detail(&data, kind, term) {
+            Err(error) if kind == "agents" && project.is_none() && error.code == "not_found" => {
+                crate::ai::detail(ctx, crate::scoped_retry("agent", term).unwrap_or(term))?
+                    .ok_or(error)?
+            }
+            result => result?,
+        }
+    } else {
+        serde_json::to_value(data)?
+    };
+    if matches!(
+        command,
+        Command::Agent {
+            command: None,
+            project: None
+        }
+    ) {
+        let tools = crate::ai::list(ctx)?;
+        value["tools"] = tools["tools"].clone();
+        value["config_coverage"] = tools["config_coverage"].clone();
+        if tools["incomplete"] == true {
+            value["incomplete"] = serde_json::Value::Bool(true);
+        }
     }
+    Ok(Some(value))
+}
+
+pub(crate) fn snapshot_detail(
+    data: &Snapshot,
+    kind: &str,
+    term: &str,
+) -> Result<serde_json::Value> {
+    let noun = match kind {
+        "applications" => "app",
+        "capabilities" => "skill",
+        "configs" => "config",
+        _ => "agent",
+    };
+    let resource = match data.select(term) {
+        Err(error) if error.code == "not_found" => {
+            crate::scoped_retry(noun, term).map_or(Err(error), |key| data.select(key))
+        }
+        result => result,
+    }?;
+    Ok(
+        serde_json::json!({"resource":resource,"coverage":&data.coverage,"incomplete":data.incomplete}),
+    )
 }
 
 pub fn native_query(

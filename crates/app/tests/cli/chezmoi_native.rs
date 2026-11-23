@@ -122,6 +122,18 @@ pub(super) fn run_browser_pty(
     Ok(())
 }
 
+fn config_plain(f: &Fixture) -> Result<std::process::Output, std::io::Error> {
+    let fixture = f.command();
+    let mut command = std::process::Command::new(fixture.get_program());
+    command.args(fixture.get_args().filter(|arg| *arg != "--json"));
+    for (name, value) in fixture.get_envs() {
+        if let Some(value) = value {
+            command.env(name, value);
+        }
+    }
+    command.arg("config").output()
+}
+
 #[test]
 fn config_browser_pty_opens_selected_files_and_refuses_unbound_replacement_and_links() -> TestResult
 {
@@ -196,9 +208,9 @@ fn config_browser_r_retries_only_after_a_confirmed_exit_and_publishes_success() 
         f.calls()?.strip_prefix(&original_calls),
         Some("managed\nstatus\nmanaged\nstatus\n")
     );
-    let (out, result) = f.run(&["config"])?;
+    let out = config_plain(&f.fixture)?;
     assert_code(&out, 0);
-    assert_eq!(result["data"]["items"].as_array().ok_or("items")?.len(), 2);
+    assert_eq!(std::str::from_utf8(&out.stdout)?.lines().count(), 3);
     assert!(!f.destination.join(".demo").exists());
     Ok(())
 }
@@ -211,14 +223,11 @@ fn config_browser_uses_verified_empty_instead_of_unavailable_when_no_targets_exi
     fs::write(f.fixture.home.join("native-output-status"), "")?;
     let (refreshed, _) = f.run(&["config", "list", "--refresh"])?;
     assert_code(&refreshed, 0);
-    let (out, value) = f.run(&["config"])?;
+    let out = config_plain(&f.fixture)?;
     assert_code(&out, 0);
-    assert_eq!(value["data"]["items"], json!([]));
-    assert!(
-        value["data"]["note"]
-            .as_str()
-            .is_some_and(|text| text.contains("当前范围无受管文件"))
-    );
+    let text = std::str::from_utf8(&out.stdout)?;
+    assert_eq!(text.lines().count(), 1);
+    assert!(text.contains("当前范围无受管文件"));
     Ok(())
 }
 
@@ -233,9 +242,16 @@ fn config_browser_never_uses_historical_mapping_as_file_authority() -> TestResul
     fs::remove_file(f.fixture.file("state/chezmoi-owner.json"))?;
     let (out, view) = f.run(&["config"])?;
     assert_code(&out, 3);
-    assert_eq!(view["data"]["coverage"], "historical");
+    assert!(
+        view["data"]["coverage"]
+            .as_array()
+            .ok_or("coverage")?
+            .iter()
+            .any(|row| row["source"] == "chezmoi-native-cache"
+                && row["issues"] == json!(["cached_metadata_not_live"]))
+    );
     assert_eq!(
-        view["data"]["items"]
+        view["data"]["resources"]
             .as_array()
             .ok_or("historical mapping")?
             .len(),
@@ -338,15 +354,15 @@ fn path_text(path: &Path) -> Result<&str, Box<dyn std::error::Error>> {
 fn browser_distinguishes_pending_and_complete_inventory_without_the_legacy_summary_limit()
 -> TestResult {
     let f = Native::new()?;
-    let (before, value) = f.run(&["config"])?;
+    let before = config_plain(&f.fixture)?;
     assert_code(&before, 3);
-    assert_eq!(value["data"]["coverage"], "unregistered");
+    assert!(std::str::from_utf8(&before.stdout)?.contains("mo config enroll"));
     assert!(!f.fixture.file("state").exists());
     f.enroll()?;
     let enrollment_calls = f.calls()?;
-    let (pending, value) = f.run(&["config"])?;
+    let pending = config_plain(&f.fixture)?;
     assert_code(&pending, 3);
-    assert_eq!(value["data"]["coverage"], "pending");
+    assert!(std::str::from_utf8(&pending.stdout)?.contains("尚未确认受管配置清单"));
     assert_eq!(f.calls()?, enrollment_calls);
     let mut rows = serde_json::Map::new();
     for index in 0..81 {
@@ -374,16 +390,23 @@ fn browser_distinguishes_pending_and_complete_inventory_without_the_legacy_summa
     );
     let queried = f.calls()?;
     let metadata = fs::read(f.fixture.file("state/chezmoi-metadata.json"))?;
-    let (browsed, value) = f.run(&["config"])?;
+    let browsed = config_plain(&f.fixture)?;
     assert_code(&browsed, 0);
-    assert_eq!(value["data"]["items"].as_array().ok_or("items")?.len(), 81);
+    let text = std::str::from_utf8(&browsed.stdout)?;
+    assert_eq!(text.lines().count(), 82);
+    assert!(text.contains("target-80"));
+    let (listed, value) = f.run(&["config"])?;
+    assert_code(&listed, 3);
     assert!(
-        value["data"]["items"]
+        value["data"]["resources"]
             .as_array()
-            .ok_or("items")?
+            .ok_or("resources")?
             .iter()
-            .any(|row| row["path"] == json!(f.destination.join("target-80"))
-                && row["source"] == json!(f.source.join("home/dot_target-80")))
+            .any(|row| {
+                row["target"] == json!(f.destination.join("target-80"))
+                    && row["source_candidates"][0]["path"]
+                        == json!(f.source.join("home/dot_target-80"))
+            })
     );
     assert_eq!(f.calls()?, queried);
     assert_eq!(
@@ -607,7 +630,7 @@ fn native_enroll_selected_apply_and_complete_range_queries_keep_scope() -> TestR
     assert_eq!(before, f.calls()?);
     let (_, value) = f.run(&["--dry-run", "config", "apply", path_text(&target)?])?;
     assert_eq!(value["data"]["nativeInvocations"], 0);
-    let (out, value) = f.run(&["adopt", path_text(&target)?, "--yes"])?;
+    let (out, value) = f.run(&["app", "adopt", path_text(&target)?, "--yes"])?;
     assert_code(&out, 3);
     assert_eq!(
         value["error"]["code"],
@@ -628,7 +651,7 @@ fn native_apply_resolves_only_the_selected_cached_config_id() -> TestResult {
 
     let (out, _) = f.run(&["config", "list", "--refresh"])?;
     assert_code(&out, 0);
-    let (_, value) = f.run(&["list", "--kind", "configs"])?;
+    let (_, value) = f.run(&["config"])?;
     let target = f.destination.join(".demo");
     let id = value["data"]["resources"]
         .as_array()
@@ -764,7 +787,7 @@ fn native_cached_resource_metadata_and_owner_identity_are_never_live_queries() -
     f.enroll()?;
     f.run(&["config", "list", "--refresh"])?;
     let before = f.calls()?;
-    let (_, value) = f.run(&["list", "--kind", "configs"])?;
+    let (_, value) = f.run(&["config"])?;
     assert_eq!(before, f.calls()?);
     assert!(
         value["data"]["resources"]
@@ -804,7 +827,7 @@ fn native_reported_configuration_without_a_source_leaf_stays_visible_from_cache(
     assert_code(&out, 0);
     assert_eq!(refreshed["data"]["candidates"]["count"], 2);
     let cached_calls = f.calls()?;
-    let (_, value) = f.run(&["list", "--kind", "configs"])?;
+    let (_, value) = f.run(&["config"])?;
     let rows = value["data"]["resources"]
         .as_array()
         .ok_or("config resources")?;
@@ -831,7 +854,7 @@ fn legacy_readonly_config_receipt_can_refresh_its_baseline_without_native_author
         "chezmoi",
         "printf called > \"$MACOPS_TEST_HOME/native-called\";exit 91",
     )?;
-    let (out, value) = f.run(&["list", "--kind", "configs"])?;
+    let (out, value) = f.run(&["config"])?;
     assert_code(&out, 0);
     let id = value["data"]["resources"]
         .as_array()
@@ -841,23 +864,23 @@ fn legacy_readonly_config_receipt_can_refresh_its_baseline_without_native_author
         .and_then(|row| row["id"].as_str())
         .ok_or("config id")?;
     let package = json!({"id":id,"name":target,"kind":"config","official_url":"","provider":{"type":"config-observed","target":target,"authority":"untracked"},"paths":[{"path":target,"kind":"config"}],"exact_version_required":false});
-    let (out, _) = f.run(&["install", "fixture:demo", "--version", "1.0.0"])?;
+    let (out, _) = f.run(&["app", "install", "fixture:demo", "--version", "1.0.0"])?;
     assert_code(&out, 0);
     let mut receipts = f.read_json("state/receipts.json")?;
     let scope = receipts["installations"]["fixture:demo"]["scope"].clone();
     receipts["installations"][id] = json!({"scope":scope,"package":package,"observation":{"status":"unknown","reason":"legacy_baseline_unavailable"},"operation_id":"OP-legacy","updated_at":0});
     super::write_json(&f.file("state/receipts.json"), &receipts)?;
-    let (out, _) = f.run(&["adopt", id, "--yes"])?;
+    let (out, _) = f.run(&["app", "adopt", id, "--yes"])?;
     assert_code(&out, 0);
     let receipt = fs::read(f.file("state/receipts.json"))?;
-    let (out, value) = f.run(&["list", "--kind", "configs"])?;
+    let (out, value) = f.run(&["config"])?;
     assert_code(&out, 0);
     assert_eq!(
         value["data"]["resources"][0]["baseline"]["comparison"],
         "same"
     );
     fs::write(&target, "foreign-edit\n")?;
-    let (out, value) = f.run(&["list", "--kind", "configs"])?;
+    let (out, value) = f.run(&["config"])?;
     assert_code(&out, 3);
     assert_eq!(
         value["data"]["resources"][0]["baseline"]["comparison"],
@@ -984,7 +1007,7 @@ use) [ "$2 $3 $4" = '--global --pin demo@2.0.0' ]; printf 2.0.0 > "$HOME/mise-ve
 *) exit 92;;
 esac"#,
         )?;
-        assert_code(&f.run(&["adopt", "demo", "--yes"])?.0, 0);
+        assert_code(&f.run(&["app", "adopt", "demo", "--yes"])?.0, 0);
         native.enroll()?;
         if mode != "overlap" && mode != "disjoint" && mode != "managed" {
             fs::write(
@@ -1008,7 +1031,7 @@ esac"#,
             fs::write(file, b"# synthetic source control\n")?;
         }
         let calls = native.calls()?;
-        let (stdout, result) = f.run(&["upgrade", "demo", "--version", "2.0.0"])?;
+        let (stdout, result) = f.run(&["app", "upgrade", "demo", "--version", "2.0.0"])?;
         if let Some(error) = expected {
             assert_code(&stdout, 3);
             assert_eq!(result["error"]["code"], error, "{result}");

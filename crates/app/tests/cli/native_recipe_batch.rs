@@ -8,12 +8,9 @@ fn add_member(native: &NativeFixture, name: &str) -> TestResult {
     recipe["source"]["skillDirectory"] = json!(format!("skills/{name}"));
     let path = native.f.file(&format!("{name}-recipe.json"));
     write_json(&path, &recipe)?;
-    let (out, _) = native.f.run(&[
-        "skills",
-        "install",
-        "--recipe",
-        path.to_str().ok_or("path")?,
-    ])?;
+    let (out, _) = native
+        .f
+        .run(&["skill", "install", "--recipe", path.to_str().ok_or("path")?])?;
     assert_code(&out, 0);
     Ok(())
 }
@@ -26,7 +23,7 @@ fn batch_upgrade_reports_completed_and_unattempted_members_after_a_later_refusal
     for name in ["beta", "gamma"] {
         add_member(&native, name)?;
     }
-    let (out, preview) = native.f.run(&["--dry-run", "skills", "upgrade", "--all"])?;
+    let (out, preview) = native.f.run(&["--dry-run", "skill", "upgrade", "--all"])?;
     assert_code(&out, 0);
     let outcomes = preview["data"]["results"]
         .as_array()
@@ -43,7 +40,7 @@ fn batch_upgrade_reports_completed_and_unattempted_members_after_a_later_refusal
         .join(order[1])
         .join("SKILL.md");
     fs::write(&changed, b"independent edit before this upgrade")?;
-    let (out, upgrade) = native.f.run(&["skills", "upgrade", "--all"])?;
+    let (out, upgrade) = native.f.run(&["skill", "upgrade", "--all"])?;
     assert_code(&out, 3);
     assert_eq!(upgrade["data"]["incomplete"], true, "{upgrade}");
     assert_eq!(upgrade["data"]["partial"], true);
@@ -69,7 +66,7 @@ fn a_single_upgrade_with_unknown_native_outcome_returns_attention_and_original_e
     let (out, _) = native.install()?;
     assert_code(&out, 0);
     native.mode("partial")?;
-    let (out, value) = native.f.run(&["skills", "upgrade", "alpha"])?;
+    let (out, value) = native.f.run(&["skill", "upgrade", "alpha"])?;
     assert_code(&out, 3);
     assert_eq!(value["data"]["incomplete"], true);
     assert_eq!(value["data"]["partial"], false);
@@ -92,7 +89,7 @@ fn batch_does_not_attempt_another_member_after_an_unknown_native_outcome() -> Te
     let (out, _) = native.install()?;
     assert_code(&out, 0);
     add_member(&native, "beta")?;
-    let (out, preview) = native.f.run(&["--dry-run", "skills", "upgrade", "--all"])?;
+    let (out, preview) = native.f.run(&["--dry-run", "skill", "upgrade", "--all"])?;
     assert_code(&out, 0);
     let first = preview["data"]["results"][0]["recipe"]["id"]
         .as_str()
@@ -101,7 +98,7 @@ fn batch_does_not_attempt_another_member_after_an_unknown_native_outcome() -> Te
         .as_str()
         .ok_or("second")?;
     native.mode("partial")?;
-    let (out, value) = native.f.run(&["skills", "upgrade", "--all"])?;
+    let (out, value) = native.f.run(&["skill", "upgrade", "--all"])?;
     assert_code(&out, 3);
     assert_eq!(value["data"]["unattempted"], json!([second]));
     let results = value["data"]["results"].as_array().ok_or("results")?;

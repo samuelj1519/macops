@@ -107,7 +107,7 @@ fn resolve_with(ctx: &Context, key: &str, discover_brew: bool, lookup: Lookup) -
             {
                 return Err(Error::attention(
                     "adopt_id_collision",
-                    "此 ID 同时指向不同清单条目和配方。运行 mo adopt 按安装范围选择，或修正 catalog ID",
+                    "此 ID 同时指向不同清单条目和配方。运行 mo app adopt 按安装范围选择，或修正 catalog ID",
                 ));
             }
             return Ok(selected);

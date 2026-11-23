@@ -11,7 +11,7 @@ fn test_context(home: &Path) -> Result<Context> {
         "macops",
         "--home",
         home.to_str().ok_or_else(|| Error::new("utf8", "home"))?,
-        "list",
+        "app",
     ])
     .map_err(|e| Error::new("parse", e.to_string()))?;
     Context::from_cli(&cli, &mut warnings)

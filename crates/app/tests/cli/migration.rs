@@ -237,9 +237,9 @@ fn migration_pending_blocks_every_normal_entry_and_preserves_foreign_marker() ->
             _ => fs::create_dir(&marker)?,
         }
         for command in [
-            vec!["list"],
-            vec!["doctor"],
-            vec!["install", "demo", "--version", "1.0.0", "--yes"],
+            vec!["app", "resources"],
+            vec!["app", "doctor"],
+            vec!["app", "install", "demo", "--version", "1.0.0", "--yes"],
             vec!["recover", "OP-123-456"],
             vec!["migrate", "preflight"],
         ] {
@@ -767,7 +767,7 @@ fn migration_r6_reads_v1_and_rejects_forged_v2_without_falling_back() -> TestRes
         let (out, response) = f.run(&["migrate", "preflight"])?;
         assert_code(&out, 3);
         assert_eq!(response["error"]["code"], "invalid_migration_ledger");
-        let (out, response) = f.run(&["skills", "list"])?;
+        let (out, response) = f.run(&["skill"])?;
         assert_code(&out, 3);
         assert_eq!(response["error"]["code"], "invalid_migration_ledger");
         assert_eq!(fs::read(&path)?, before);
@@ -1209,7 +1209,7 @@ fn migration_r6_rechecks_frozen_link_evidence_even_if_the_native_symlink_is_gone
     fs::remove_file(&native)?;
     fs::remove_file(&peer)?;
     symlink(".agents", &peer)?;
-    for command in [["migrate", "verify"], ["skills", "list"]] {
+    for command in [vec!["migrate", "verify"], vec!["skill"]] {
         let (out, value) = f.run(&command)?;
         assert_code(&out, 3);
         assert_eq!(value["error"]["code"], "invalid_migration_ledger");

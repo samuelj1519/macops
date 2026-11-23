@@ -369,6 +369,41 @@ pub(crate) fn is_publication(journal: &Journal) -> bool {
             .is_some_and(|tag| tag.starts_with(PUBLICATION))
 }
 
+pub(crate) fn awaiting_followup(
+    ctx: &Context,
+    journals: &[Journal],
+) -> Result<(std::collections::BTreeSet<String>, bool)> {
+    let mut stages = journals
+        .iter()
+        .filter(|journal| is_install(journal) && scope(ctx, journal).is_ok())
+        .peekable();
+    if stages.peek().is_none() {
+        return Ok((std::collections::BTreeSet::new(), false));
+    }
+    let directory = physical(&ctx.state)?;
+    let mut pending = std::collections::BTreeSet::new();
+    let mut superseded = std::collections::BTreeSet::new();
+    let mut incomplete = false;
+    for journal in stages {
+        if let Ok(input) = frozen(journal, &directory) {
+            if let Some(prior) = input.step.prior() {
+                superseded.insert(prior.to_owned());
+            }
+            if journal.phase == Phase::Succeeded {
+                pending.insert(journal.id.clone());
+            }
+        } else {
+            incomplete = true;
+        }
+    }
+    let recorded: std::collections::BTreeSet<_> =
+        journals.iter().map(|journal| journal.id.as_str()).collect();
+    pending.retain(|id| {
+        !superseded.contains(id) && !recorded.contains(format!("{id}-receipt").as_str())
+    });
+    Ok((pending, incomplete))
+}
+
 fn original(directory: &Directory, id: &str) -> Result<Option<Journal>> {
     if !store::valid_id(id) {
         return Err(invalid());
@@ -1063,7 +1098,7 @@ fn recover_using(
         journal.phase == Phase::Succeeded && continuation(ctx, &journal.id, native).is_ok();
     Ok(
         json!({"journal":journal,"continuationRequired":continuation,
-        "continuationCommand":continuation.then(|| format!("mo resume {}", journal.id))}),
+        "continuationCommand":continuation.then(|| format!("mo agent resume {}", journal.id))}),
     )
 }
 

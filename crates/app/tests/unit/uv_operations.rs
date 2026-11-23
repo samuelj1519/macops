@@ -17,6 +17,7 @@ fn fixture() -> Result<(tempfile::TempDir, Context, Package)> {
         catalog
             .to_str()
             .ok_or_else(|| Error::new("test", "catalog"))?,
+        "app",
         "adopt",
         "demo-tool",
     ])

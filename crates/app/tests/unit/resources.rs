@@ -92,6 +92,7 @@ fn categories_and_source_failures_are_explicit() {
         delivery_kind: "skill".into(),
         native_id: "demo".into(),
         origin: Origin {
+            repository: None,
             manager: "skills".into(),
             label: None,
             record: "/lock".into(),

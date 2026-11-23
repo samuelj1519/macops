@@ -109,7 +109,7 @@ impl Fixture {
             self.home.as_os_str(),
             "--state-dir".as_ref(),
             self.state.as_os_str(),
-            "skills".as_ref(),
+            "skill".as_ref(),
             "plugins".as_ref(),
             "list".as_ref(),
         ])?;

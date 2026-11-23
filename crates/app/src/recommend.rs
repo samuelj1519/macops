@@ -203,6 +203,7 @@ pub(crate) fn interactive(cli: &crate::cli::Cli) -> bool {
                 evidence: None,
                 github: None,
                 model: false,
+                setup: false,
                 ..
             }
         )

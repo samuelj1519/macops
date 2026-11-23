@@ -21,7 +21,7 @@ fn uv_local_read_views_separate_same_name_roots_without_executing_any_tool() -> 
             {"id":"declared:b","name":"Demo Tool B","kind":"cli","official_url":"https://example.org/b","provider":{"type":"uv","package":"demo-tool","binding":{"tool_dir":b,"bin_dir":bb}}}
         ]}),
     )?;
-    let (_, v) = f.run(&["list", "--kind", "applications"])?;
+    let (_, v) = f.run(&["app", "resources"])?;
     let rows = v["data"]["resources"].as_array().ok_or("resources")?;
     let uv: Vec<_> = rows.iter().filter(|r| r["manager"] == "uv").collect();
     assert_eq!(uv.len(), 2, "{v}");
@@ -29,12 +29,12 @@ fn uv_local_read_views_separate_same_name_roots_without_executing_any_tool() -> 
     assert!(uv.iter().all(|r| r["status"] == "present"));
     for row in uv {
         let id = row["id"].as_str().ok_or("id")?;
-        let (_, v) = f.run(&["info", id])?;
+        let (_, v) = f.run(&["app", id])?;
         assert_eq!(v["data"]["resource"]["id"], id);
     }
-    let (_, v) = f.run(&["doctor", "declared:a"])?;
+    let (_, v) = f.run(&["app", "doctor", "declared:a"])?;
     assert_eq!(v["data"][0]["observation"]["status"], "uv-tool");
-    let (_, v) = f.run(&["discover", "uv"])?;
+    let (_, v) = f.run(&["app", "discover", "uv"])?;
     assert!(v["data"]["packages"].as_array().is_some());
     assert!(!f.home.join("native-called").exists());
     assert!(!a.join(".lock").exists());
@@ -87,7 +87,7 @@ fn uv_all_five_data_leaf_canaries_are_not_opened_by_compiled_cli() -> TestResult
                 .env("MACOPS_UV_CANARY", &canary)
                 .env("MACOPS_UV_OPEN_LOG", &log);
         }
-        let output = command.args(["doctor", "uv:demo"]).output()?;
+        let output = command.args(["app", "doctor", "uv:demo"]).output()?;
         let value: serde_json::Value = serde_json::from_slice(&output.stdout)?;
         assert_eq!(
             value["data"][0]["observation"]["status"], "unknown",
@@ -130,7 +130,7 @@ fn assert_discovery_drift(
     other_bin: &std::path::Path,
     declared: bool,
 ) -> TestResult {
-    let (_, changed) = f.run(&["discover", "uv"])?;
+    let (_, changed) = f.run(&["app", "discover", "uv"])?;
     let row = discovery_row(&changed, id)?;
     assert_eq!(row["status"], "unknown", "{declared}: {changed}");
     assert_eq!(row["management"], "adopted");
@@ -155,7 +155,7 @@ fn assert_discovery_drift(
             .any(|row| row["scope"] == other_root.display().to_string()
                 && row["status"] == "present")
     );
-    let (out, list) = f.run(&["list", "--kind", "applications"])?;
+    let (out, list) = f.run(&["app", "resources"])?;
     assert_code(&out, 3);
     assert!(
         list["data"]["resources"]
@@ -164,10 +164,10 @@ fn assert_discovery_drift(
             .iter()
             .any(|row| row["id"] == id && row["status"] == "unknown")
     );
-    let (out, doctor) = f.run(&["doctor", if declared { "owner:a" } else { id }])?;
+    let (out, doctor) = f.run(&["app", "doctor", if declared { "owner:a" } else { id }])?;
     assert_code(&out, 3);
     assert_eq!(doctor["data"][0]["observation"]["status"], "unknown");
-    let (out, _) = f.run(&["--dry-run", "adopt", id])?;
+    let (out, _) = f.run(&["--dry-run", "app", "adopt", id])?;
     assert_code(&out, 3);
     Ok(())
 }
@@ -194,7 +194,7 @@ fn uv_discovery_preserves_adopted_root_and_bin_identity_for_all_owners() -> Test
                 packages.push(uv_declaration("owner:a", &root, &bin));
             }
             write_json(&f.catalog, &json!({"schema_version":1,"packages":packages}))?;
-            let (_, before) = f.run(&["discover", "uv"])?;
+            let (_, before) = f.run(&["app", "discover", "uv"])?;
             let rows = before["data"]["packages"].as_array().ok_or("packages")?;
             let id = rows
                 .iter()
@@ -204,10 +204,10 @@ fn uv_discovery_preserves_adopted_root_and_bin_identity_for_all_owners() -> Test
             assert_eq!(discovery_row(&before, id)?["status"], "present");
             assert_eq!(discovery_row(&before, id)?["management"], "native");
             assert!(!f.file("state").exists());
-            let (out, _) = f.run(&["adopt", id, "--yes"])?;
+            let (out, _) = f.run(&["app", "adopt", id, "--yes"])?;
             assert_code(&out, 0);
             let receipts = fs::read(f.file("state/receipts.json"))?;
-            let (_, stable) = f.run(&["discover", "uv"])?;
+            let (_, stable) = f.run(&["app", "discover", "uv"])?;
             let row = discovery_row(&stable, id)?;
             assert_eq!(row["status"], "present");
             assert_eq!(row["management"], "adopted");
@@ -251,7 +251,7 @@ fn uv_observed_adopt_is_zero_authority_and_never_mutates_another_root() -> TestR
         &f.catalog,
         &json!({"schema_version":1,"packages":[uv_declaration("owner:b",&b,&bb)]}),
     )?;
-    let (_, v) = f.run(&["list", "--kind", "applications"])?;
+    let (_, v) = f.run(&["app", "resources"])?;
     let resource = v["data"]["resources"]
         .as_array()
         .ok_or("resources")?
@@ -259,16 +259,16 @@ fn uv_observed_adopt_is_zero_authority_and_never_mutates_another_root() -> TestR
         .find(|r| r["manager"] == "uv" && r["scope"] == a.display().to_string())
         .ok_or("A")?;
     let id = resource["id"].as_str().ok_or("id")?;
-    let (out, v) = f.run(&["--dry-run", "adopt", id])?;
+    let (out, v) = f.run(&["--dry-run", "app", "adopt", id])?;
     assert_code(&out, 0);
     assert_eq!(v["data"]["plan"]["package"]["id"], id);
     assert_eq!(v["data"]["plan"]["command"], serde_json::Value::Null);
     assert_eq!(v["data"]["plan"]["target"], serde_json::Value::Null);
     assert!(!f.file("state").exists());
-    let (out, _) = f.run(&["adopt", id])?;
+    let (out, _) = f.run(&["app", "adopt", id])?;
     assert_code(&out, 3);
     assert!(!f.file("state").exists());
-    let (out, v) = f.run(&["adopt", id, "--yes"])?;
+    let (out, v) = f.run(&["app", "adopt", id, "--yes"])?;
     assert_code(&out, 0);
     assert_eq!(v["data"]["phase"], "succeeded");
     let receipt = f.read_json("state/receipts.json")?;
@@ -276,10 +276,11 @@ fn uv_observed_adopt_is_zero_authority_and_never_mutates_another_root() -> TestR
     assert_eq!(record["package"]["provider"]["type"], "uv-observed");
     assert!(record["package"]["provider"].get("authority").is_none());
     assert_eq!(record["query"]["kind"], "uv-tool-local-v1");
-    let (_, v) = f.run(&["info", id])?;
-    assert_eq!(v["data"]["resource"]["baseline"]["comparison"], "same");
-    for action in ["install", "upgrade", "uninstall", "update"] {
-        let mut args = vec![action, id];
+    let (out, detail) = f.run(&["app", id])?;
+    assert_code(&out, 0);
+    assert_eq!(detail["data"]["resource"]["baseline"]["comparison"], "same");
+    for action in ["install", "upgrade", "uninstall", "refresh"] {
+        let mut args = vec!["app", action, id];
         if action == "install" || action == "upgrade" {
             args.extend(["--version", "9.0"]);
         }
@@ -311,7 +312,7 @@ fn uv_unique_declared_owner_is_reused_and_both_entry_forms_block_collisions() ->
     uv_tool(&root, &bin, "demo-tool", "1.0")?;
     let one = uv_declaration("owner:one", &root, &bin);
     write_json(&f.catalog, &json!({"schema_version":1,"packages":[one]}))?;
-    let (_, v) = f.run(&["list", "--kind", "applications"])?;
+    let (_, v) = f.run(&["app", "resources"])?;
     let id = v["data"]["resources"]
         .as_array()
         .ok_or("resources")?
@@ -320,13 +321,13 @@ fn uv_unique_declared_owner_is_reused_and_both_entry_forms_block_collisions() ->
         .and_then(|r| r["id"].as_str())
         .ok_or("id")?;
     for key in [id, "owner:one"] {
-        let (out, v) = f.run(&["--dry-run", "adopt", key])?;
+        let (out, v) = f.run(&["--dry-run", "app", "adopt", key])?;
         assert_code(&out, 0);
         assert_eq!(v["data"]["plan"]["package"]["id"], "owner:one");
     }
-    let (out, _) = f.run(&["adopt", id, "--yes"])?;
+    let (out, _) = f.run(&["app", "adopt", id, "--yes"])?;
     assert_code(&out, 0);
-    let (out, value) = f.run(&["update", id])?;
+    let (out, value) = f.run(&["app", "refresh", id])?;
     assert_code(&out, 3);
     assert_eq!(value["error"]["code"], "uv_write_blocked_review");
     write_json(
@@ -334,7 +335,7 @@ fn uv_unique_declared_owner_is_reused_and_both_entry_forms_block_collisions() ->
         &json!({"schema_version":1,"packages":[uv_declaration("owner:two",&root,&bin)]}),
     )?;
     for key in [id, "owner:two"] {
-        let (out, v) = f.run(&["--dry-run", "adopt", key])?;
+        let (out, v) = f.run(&["--dry-run", "app", "adopt", key])?;
         assert_code(&out, 3);
         assert_eq!(v["error"]["code"], "owner_conflict", "{v}");
     }
@@ -361,7 +362,7 @@ fn uv_adopt_recovery_uses_original_operation_and_legacy_uv_recovery_cannot_query
         r#"printf called > "$MACOPS_TEST_HOME/uv-called"; exit 99"#,
     )?;
     write_json(&f.catalog, &json!({"schema_version":1,"packages":[]}))?;
-    let (_, v) = f.run(&["list", "--kind", "applications"])?;
+    let (_, v) = f.run(&["app", "resources"])?;
     let id = v["data"]["resources"]
         .as_array()
         .ok_or("resources")?
@@ -369,7 +370,7 @@ fn uv_adopt_recovery_uses_original_operation_and_legacy_uv_recovery_cannot_query
         .find(|r| r["manager"] == "uv")
         .and_then(|r| r["id"].as_str())
         .ok_or("id")?;
-    let (out, v) = f.run(&["adopt", id, "--yes"])?;
+    let (out, v) = f.run(&["app", "adopt", id, "--yes"])?;
     assert_code(&out, 0);
     let operation = v["data"]["id"].as_str().ok_or("op")?;
     let before = fs::read(f.file("state/receipts.json"))?;

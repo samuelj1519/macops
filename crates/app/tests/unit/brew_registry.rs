@@ -12,7 +12,7 @@ fn fixture()
     let temp = tempfile::tempdir_in("/private/tmp")?;
     let home = temp.path().join("home");
     std::fs::create_dir(&home)?;
-    let cli = Cli::try_parse_from(["macops", "--home", home.to_str().ok_or("home")?, "list"])?;
+    let cli = Cli::try_parse_from(["macops", "--home", home.to_str().ok_or("home")?, "app"])?;
     let ctx = Context::from_cli(&cli, &mut vec![])?;
     let mut q = query()?;
     q.binding.metadata_scope.home = home;

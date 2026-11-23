@@ -26,7 +26,7 @@ fn fixture()
         home.join(".claude-glm/settings.json"),
         br#"{"model":"fixture-sibling"}"#,
     )?;
-    let cli = crate::cli::Cli::try_parse_from(["macops", "--home", text(&home)?, "list"])?;
+    let cli = crate::cli::Cli::try_parse_from(["macops", "--home", text(&home)?, "app"])?;
     let ctx = Context::from_cli(&cli, &mut vec![])?;
     let offer = Offer::identify(
         "example/fixture-plugin",
@@ -319,6 +319,47 @@ fn an_error_before_dispatch_closes_only_the_proven_unstarted_stage() -> TestResu
 }
 
 #[test]
+fn recovery_inventory_lists_only_the_latest_unpublished_claude_stage() -> TestResult {
+    let (_temp, ctx, offer, binary) = fixture()?;
+    let store = Store::lock(&ctx)?;
+    let prepared = prepare(&ctx, &store, offer, binary, true, &FIXTURE)?;
+    let market = stage(
+        &ctx,
+        &store,
+        &Frozen {
+            prepared: prepared.clone(),
+            step: Step::Market,
+        },
+        &FIXTURE,
+    )?;
+    let input = Frozen {
+        prepared,
+        step: Step::Plugin { market: market.id },
+    };
+    let installed = stage(&ctx, &store, &input, &FIXTURE)?;
+    assert_eq!(installed.phase, Phase::Succeeded);
+    let original = fs::read(ctx.state.join("active.json"))?;
+    let calls = fs::read(ctx.home.join("native-calls"))?;
+    let (pending, incomplete) = crate::operations::pending_recovery(&ctx)?;
+    assert!(!incomplete);
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].id, installed.id);
+    assert_eq!(fs::read(ctx.state.join("active.json"))?, original);
+    assert_eq!(fs::read(ctx.home.join("native-calls"))?, calls);
+    assert!(store.receipts()?.installations.is_empty());
+
+    publish(&ctx, &store, &installed, &input, &FIXTURE)?;
+    assert!(crate::operations::pending_recovery(&ctx)?.0.is_empty());
+    let receipt_before = fs::read(ctx.state.join("receipts.json"))?;
+    fs::remove_file(ctx.state.join(sidecar(&installed, "plan")))?;
+    let (_, incomplete) = crate::operations::pending_recovery(&ctx)?;
+    assert!(incomplete);
+    assert_eq!(fs::read(ctx.state.join("receipts.json"))?, receipt_before);
+    assert_eq!(fs::read(ctx.home.join("native-calls"))?, calls);
+    Ok(())
+}
+
+#[test]
 fn continuation_requires_fresh_confirmation_and_starts_only_the_unattempted_native_stage()
 -> TestResult {
     for from_plugin in [false, true] {
@@ -350,11 +391,17 @@ fn continuation_requires_fresh_confirmation_and_starts_only_the_unattempted_nati
         };
         assert_eq!(interrupted.phase, Phase::Succeeded);
         let before = fs::read(ctx.home.join("native-calls"))?;
+        let (listed, incomplete) = crate::operations::pending_recovery(&ctx)?;
+        assert!(!incomplete);
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, interrupted.id);
+        assert_eq!(fs::read(ctx.home.join("native-calls"))?, before);
+        assert!(store.receipts()?.installations.is_empty());
         let verification = recover_using(&ctx, &store, &mut interrupted, false, false, &FIXTURE)?;
         assert_eq!(verification["continuationRequired"], true);
         assert_eq!(
             verification["continuationCommand"],
-            format!("mo resume {}", interrupted.id)
+            format!("mo agent resume {}", interrupted.id)
         );
         assert_eq!(fs::read(ctx.home.join("native-calls"))?, before);
         drop(store);

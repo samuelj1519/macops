@@ -121,13 +121,13 @@ impl Index {
         let candidate = self.entries.get(member).ok_or_else(|| {
             Error::attention(
                 "source_candidate_missing",
-                "所选来源尚无可验证候选，请先 update",
+                "所选来源尚无可验证候选，请先运行 mo skill refresh",
             )
         })?;
         if candidate.locator_sha256 != locator {
             return Err(Error::attention(
                 "source_candidate_stale",
-                "来源或交付声明已经改变，请先 update",
+                "来源或交付声明已经改变，请先运行 mo skill refresh",
             ));
         }
         Ok(candidate)

@@ -12,6 +12,7 @@ fn declared_adoption_prepares_full_metadata_without_changing_payload_or_state() 
         "macops",
         "--home",
         home.to_str().ok_or("utf8")?,
+        "app",
         "adopt",
         "asset:alpha",
     ])?;
@@ -43,6 +44,7 @@ fn declared_adoption_cannot_infer_no_conflict_from_an_unknown_native_registry() 
         "macops",
         "--home",
         home.to_str().ok_or("utf8")?,
+        "app",
         "adopt",
         "asset:alpha",
     ])?;

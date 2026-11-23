@@ -2,7 +2,16 @@ use crate::{cli, domain, error};
 use serde_json::Value;
 
 pub(crate) fn adopt_target(command: &cli::Command) -> Option<cli::AdoptTarget<'_>> {
-    let cli::Command::Adopt { target, id, .. } = command else {
+    let cli::Command::App {
+        project: _,
+        command:
+            Some(cli::AppCmd::Adopt {
+                target,
+                id,
+                bind_recipe: _,
+            }),
+    } = command
+    else {
         return None;
     };
     id.as_deref()
@@ -33,7 +42,8 @@ pub fn attention(command: &cli::Command, value: &Value) -> bool {
     if matches!(
         command,
         cli::Command::App {
-            command: cli::App::Info { .. }
+            project: _,
+            command: Some(cli::AppCmd::Detail(_))
         }
     ) {
         return value
@@ -42,33 +52,15 @@ pub fn attention(command: &cli::Command, value: &Value) -> bool {
             .and_then(Value::as_str)
             .is_some_and(|s| s != "present");
     }
-    let rows_need_attention = |rows: &Value| {
-        rows.as_array().is_some_and(|rows| {
-            rows.iter().any(|row| {
-                row.get("incomplete") == Some(&Value::Bool(true))
-                    || row
-                        .get("baseline")
-                        .and_then(|v| v.get("comparison"))
-                        .and_then(Value::as_str)
-                        .is_some_and(|s| s != "same")
-                    || row
-                        .get("status")
-                        .and_then(Value::as_str)
-                        .is_some_and(|s| matches!(s, "unknown" | "missing" | "different" | "drift"))
-                    || row
-                        .get("observation")
-                        .and_then(|o| o.get("status"))
-                        .and_then(Value::as_str)
-                        .is_some_and(|s| matches!(s, "unknown" | "missing"))
-            })
-        })
-    };
     if matches!(
         command,
-        cli::Command::Credential {
-            command: cli::Credential::List
-                | cli::Credential::Add { .. }
-                | cli::Credential::Activate { .. }
+        cli::Command::Agent {
+            project: _,
+            command: Some(cli::AgentCmd::Credential {
+                command: cli::Credential::List
+                    | cli::Credential::Add { .. }
+                    | cli::Credential::Activate { .. }
+            })
         }
     ) {
         return false;
@@ -76,9 +68,26 @@ pub fn attention(command: &cli::Command, value: &Value) -> bool {
     if matches!(
         command,
         cli::Command::History { .. }
-            | cli::Command::List { .. }
+            | cli::Command::Search { .. }
+            | cli::Command::Config {
+                project: _,
+                command: None | Some(cli::Config::List { .. } | cli::Config::Resources)
+            }
+            | cli::Command::App {
+                project: _,
+                command: None | Some(cli::AppCmd::Resources)
+            }
+            | cli::Command::Skill {
+                project: _,
+                details: _,
+                only: _,
+                command: None | Some(cli::SkillCmd::Detail(_) | cli::SkillCmd::Resources)
+            }
+            | cli::Command::Agent {
+                project: _,
+                command: None | Some(cli::AgentCmd::Detail(_) | cli::AgentCmd::Resources)
+            }
             | cli::Command::Dirs { .. }
-            | cli::Command::Info { .. }
     ) {
         return false;
     }
@@ -108,21 +117,52 @@ pub fn attention(command: &cli::Command, value: &Value) -> bool {
     rows_need_attention(value) || value.get("results").is_some_and(rows_need_attention)
 }
 
+fn rows_need_attention(rows: &Value) -> bool {
+    rows.as_array().is_some_and(|rows| {
+        rows.iter().any(|row| {
+            row.get("incomplete") == Some(&Value::Bool(true))
+                || row
+                    .get("baseline")
+                    .and_then(|v| v.get("comparison"))
+                    .and_then(Value::as_str)
+                    .is_some_and(|s| s != "same")
+                || row
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .is_some_and(|s| matches!(s, "unknown" | "missing" | "different" | "drift"))
+                || row
+                    .get("observation")
+                    .and_then(|o| o.get("status"))
+                    .and_then(Value::as_str)
+                    .is_some_and(|s| matches!(s, "unknown" | "missing"))
+        })
+    })
+}
+
 #[cfg(test)]
 #[path = "../../tests/unit/cli_policy.rs"]
 mod tests;
 
 pub fn config_scope(command: &cli::Command, requested: bool) -> error::Result<()> {
     if requested
-        && !matches!(command, cli::Command::Upgrade { id, .. } if crate::policy::ai::upgrade_target(id).is_some())
         && !matches!(
             command,
-            cli::Command::List { .. }
-                | cli::Command::Info { .. }
-                | cli::Command::Adopt { .. }
-                | cli::Command::Recover { .. }
-                | cli::Command::Doctor { id: Some(_) }
+            cli::Command::App {
+                project: _,
+                command: Some(cli::AppCmd::Upgrade { id: Some(id), .. })
+            } if crate::policy::ai::upgrade_target(id).is_some()
+        )
+        && !matches!(
+            command,
+            cli::Command::App {
+                project: _,
+                command: None
+                    | Some(cli::AppCmd::Adopt { .. } | cli::AppCmd::Doctor { id: Some(_) })
+            } | cli::Command::Recover { .. }
+                | cli::Command::History { .. }
+                | cli::Command::Search { .. }
                 | cli::Command::Config {
+                    project: _,
                     command: None
                         | Some(
                             cli::Config::List { .. }
@@ -135,18 +175,25 @@ pub fn config_scope(command: &cli::Command, requested: bool) -> error::Result<()
                                 | cli::Config::Reconcile { .. }
                         )
                 }
-                | cli::Command::Ai {
-                    command: cli::Ai::Reconcile { .. } | cli::Ai::Upgrade { .. }
+                | cli::Command::Agent {
+                    project: _,
+                    command: None
+                        | Some(
+                            cli::AgentCmd::Install { .. }
+                                | cli::AgentCmd::Upgrade { .. }
+                                | cli::AgentCmd::Detail(_)
+                                | cli::AgentCmd::Credential { .. }
+                        )
                 }
-                | cli::Command::App {
-                    command: cli::App::Upgrade { .. }
-                }
-                | cli::Command::Skills {
+                | cli::Command::Skill {
+                    project: _,
+                    details: _,
+                    only: _,
                     command: Some(
-                        cli::Skills::Sync(_)
-                            | cli::Skills::Policy {
-                                command: cli::Policy::Recover { .. }
-                            }
+                        cli::SkillCmd::Policy {
+                            command: cli::Policy::Recover { .. }
+                        } | cli::SkillCmd::Sync(_)
+                            | cli::SkillCmd::Detail(_)
                     )
                 }
         )

@@ -669,10 +669,7 @@ fn select_capability<'a>(
     if exact {
         return Ok(None);
     }
-    let matches: Vec<_> = items
-        .iter()
-        .filter(|r| r.name == key || r.aliases.iter().any(|a| a == key))
-        .collect();
+    let matches: Vec<_> = items.iter().filter(|r| r.matches_name(key)).collect();
     match matches.as_slice() {
         [] => Ok(None),
         [one] => Ok(Some(*one)),

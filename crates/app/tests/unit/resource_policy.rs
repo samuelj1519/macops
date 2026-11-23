@@ -371,6 +371,7 @@ fn sample_skill() -> Resource {
             delivery_kind: "skill".into(),
             native_id: "demo".into(),
             origin: Origin {
+                repository: None,
                 manager: "skills-cli:github".into(),
                 label: None,
                 record: "/home/.agents/.skill-lock.json".into(),

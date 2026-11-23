@@ -129,7 +129,7 @@ pub fn mutation(
             if mise_owned {
                 return Err(Error::attention(
                     "configuration_owner_requires_review",
-                    "mise 配置由 chezmoi 拥有；AI 工具请使用 ai upgrade，通用 runtime 的 source 收敛需独立维护窗口",
+                    "mise 配置由 chezmoi 拥有；Agent CLI 请使用 mo agent install，通用 runtime 的 source 收敛需独立维护窗口",
                 ));
             }
             let version = target

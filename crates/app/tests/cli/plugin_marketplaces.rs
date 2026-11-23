@@ -34,7 +34,7 @@ fn marketplace_listing_observes_local_catalogs_per_harness_profile() -> TestResu
         "claude",
         "touch \"$MACOPS_TEST_HOME/claude-called\"; exit 88",
     )?;
-    let (out, data) = f.run(&["plugins"])?;
+    let (out, data) = f.run(&["skill", "market"])?;
     assert_code(&out, 0);
     let profiles = data["data"]["profiles"].as_array().ok_or("profiles")?;
     let markets = |id: &str| {
@@ -51,7 +51,7 @@ fn marketplace_listing_observes_local_catalogs_per_harness_profile() -> TestResu
     );
     assert_eq!(markets("claude:mi")?["plugins"], json!(["mi-only"]));
     assert_eq!(markets("claude:glm")?["plugins"], json!(["glm-only"]));
-    let (out, selected) = f.run(&["plugins", "claude:mi"])?;
+    let (out, selected) = f.run(&["skill", "market", "claude:mi"])?;
     assert_code(&out, 0);
     assert_eq!(
         selected["data"]["profiles"]
@@ -64,10 +64,17 @@ fn marketplace_listing_observes_local_catalogs_per_harness_profile() -> TestResu
     assert!(!f.home.join("codex-called").exists());
     assert!(!f.home.join("claude-called").exists());
     assert!(!f.file("state").exists());
-    super::chezmoi_native::run_browser_pty(&f, &["plugins"], "market-browser", &f.home, "76", "0")?;
     super::chezmoi_native::run_browser_pty(
         &f,
-        &["plugins", "--json"],
+        &["skill", "market"],
+        "market-browser",
+        &f.home,
+        "76",
+        "0",
+    )?;
+    super::chezmoi_native::run_browser_pty(
+        &f,
+        &["skill", "market", "--json"],
         "market-json",
         &f.home,
         "76",
@@ -94,7 +101,7 @@ fn marketplace_listing_preserves_known_rows_and_rejects_conflicting_catalog_iden
         &catalog.join(".claude-plugin/marketplace.json"),
         &json!({"name":"other-team","plugins":[{"name":"wrong-plugin"}]}),
     )?;
-    let (out, data) = f.run(&["plugins", "claude"])?;
+    let (out, data) = f.run(&["skill", "market", "claude"])?;
     assert_code(&out, 3);
     let market = &data["data"]["profiles"][0]["marketplaces"][0];
     assert_eq!(market["name"], "team");
@@ -103,7 +110,7 @@ fn marketplace_listing_preserves_known_rows_and_rejects_conflicting_catalog_iden
     assert!(market["plugins"].is_null());
     assert!(!data.to_string().contains("TOKEN"));
     assert!(!data.to_string().contains("wrong-plugin"));
-    let (out, missing) = f.run(&["plugins", "claude:unknown"])?;
+    let (out, missing) = f.run(&["skill", "market", "claude:unknown"])?;
     assert_code(&out, 3);
     assert_eq!(missing["error"]["code"], "marketplace_profile_unknown");
     assert!(!f.file("state").exists());
@@ -121,15 +128,15 @@ fn cursor_marketplace_query_requires_an_explicit_online_request() -> TestResult 
         printf 'called\n' >> "$MACOPS_TEST_HOME/query-calls"
         printf '%s' '{"marketplaces":[{"name":"team","scope":"user","gitUrl":"https://github.com/vendor/cursor.git","credential":"SYNTHETIC_SECRET"}]}'"#,
     )?;
-    let (_, data) = f.run(&["plugins", "cursor"])?;
+    let (_, data) = f.run(&["skill", "market", "cursor"])?;
     assert_eq!(
         data["data"]["profiles"][0]["status"],
         "account_query_available"
     );
-    let (_, data) = f.run(&["plugins", "cursor", "--online", "--dry-run"])?;
+    let (_, data) = f.run(&["skill", "market", "cursor", "--online", "--dry-run"])?;
     assert_eq!(data["data"]["profiles"][0]["status"], "dry_run");
     assert!(!f.home.join("query-calls").exists());
-    let (out, data) = f.run(&["plugins", "cursor", "--online"])?;
+    let (out, data) = f.run(&["skill", "market", "cursor", "--online"])?;
     assert_code(&out, 0);
     let market = &data["data"]["profiles"][0]["marketplaces"][0];
     assert_eq!(market["repository"], "https://github.com/vendor/cursor");
@@ -139,7 +146,7 @@ fn cursor_marketplace_query_requires_an_explicit_online_request() -> TestResult 
     assert_eq!(fs::read_to_string(f.home.join("query-calls"))?, "called\n");
     super::chezmoi_native::run_browser_pty(
         &f,
-        &["plugins", "cursor"],
+        &["skill", "market", "cursor"],
         "market-entry",
         &f.home,
         "76",
@@ -148,7 +155,7 @@ fn cursor_marketplace_query_requires_an_explicit_online_request() -> TestResult 
     assert_eq!(fs::read_to_string(f.home.join("query-calls"))?, "called\n");
     super::chezmoi_native::run_browser_pty(
         &f,
-        &["plugins", "cursor", "--online"],
+        &["skill", "market", "cursor", "--online"],
         "market-online",
         &f.home,
         "76",
@@ -166,7 +173,7 @@ fn cursor_marketplace_query_requires_an_explicit_online_request() -> TestResult 
 fn cursor_marketplace_query_reports_login_and_unrecognized_shapes_without_native_output()
 -> TestResult {
     let f = Fixture::new()?;
-    let (out, invalid_host) = f.run(&["plugins", "claude", "--online"])?;
+    let (out, invalid_host) = f.run(&["skill", "market", "claude", "--online"])?;
     assert_code(&out, 1);
     assert_eq!(
         invalid_host["error"]["code"],
@@ -176,7 +183,7 @@ fn cursor_marketplace_query_reports_login_and_unrecognized_shapes_without_native
         "cursor-agent",
         "printf '%s' 'Authentication required: SYNTHETIC_SECRET' >&2; exit 1",
     )?;
-    let (out, data) = f.run(&["plugins", "cursor", "--online"])?;
+    let (out, data) = f.run(&["skill", "market", "cursor", "--online"])?;
     assert_code(&out, 3);
     assert_eq!(
         data["data"]["profiles"][0]["reason"],
@@ -184,14 +191,14 @@ fn cursor_marketplace_query_reports_login_and_unrecognized_shapes_without_native
     );
     assert!(!data.to_string().contains("SYNTHETIC_SECRET"));
     f.script("cursor-agent", "printf '%s' '[]'")?;
-    let (out, data) = f.run(&["plugins", "cursor", "--online"])?;
+    let (out, data) = f.run(&["skill", "market", "cursor", "--online"])?;
     assert_code(&out, 0);
     assert_eq!(data["data"]["profiles"][0]["marketplaces"], json!([]));
     f.script(
         "cursor-agent",
         "printf '%s' '{\"unexpected\":\"SYNTHETIC_SECRET\"}'",
     )?;
-    let (out, data) = f.run(&["plugins", "cursor", "--online"])?;
+    let (out, data) = f.run(&["skill", "market", "cursor", "--online"])?;
     assert_code(&out, 3);
     assert_eq!(
         data["data"]["profiles"][0]["reason"],
@@ -214,10 +221,10 @@ fn marketplace_listing_rejects_ambiguous_profiles_and_isolates_unrelated_roots()
         fs::create_dir(f.home.join(name))?;
     }
     std::os::unix::fs::symlink(".kimi", f.home.join(".kimi"))?;
-    let (out, data) = f.run(&["plugins", "claude:mi"])?;
+    let (out, data) = f.run(&["skill", "market", "claude:mi"])?;
     assert_code(&out, 0);
     assert_eq!(data["data"]["profiles"][0]["profile"], "claude:mi");
-    let (out, data) = f.run(&["plugins", "claude"])?;
+    let (out, data) = f.run(&["skill", "market", "claude"])?;
     assert_code(&out, 3);
     assert_eq!(
         data["data"]["profiles"][0]["reason"],
@@ -250,7 +257,7 @@ fn marketplace_human_output_explains_native_routes_and_partial_results() -> Test
     let base = f.command();
     let output = std::process::Command::new(base.get_program())
         .args(base.get_args().filter(|arg| *arg != "--json"))
-        .args(["plugins"])
+        .args(["skill", "market"])
         .output()?;
     assert_code(&output, 3);
     let text = String::from_utf8(output.stdout)?;
@@ -260,13 +267,13 @@ fn marketplace_human_output_explains_native_routes_and_partial_results() -> Test
         "fixture-member",
         "claude:mi  ·  /plugin",
         "市场状态未知",
-        "查询账户市场  mo plugins cursor --online",
+        "查询账户市场  mo skill market cursor --online",
     ] {
         assert!(text.contains(line), "{text}");
     }
     super::chezmoi_native::run_browser_pty(
         &f,
-        &["plugins", "claude:mi"],
+        &["skill", "market", "claude:mi"],
         "market-partial",
         &f.home,
         "76",
@@ -290,12 +297,12 @@ fn codex_adoption_keeps_native_files_and_reuses_the_profile_resource_identity() 
     let raw = b"model = 'example'\n[plugins.'fixture@market']\nenabled=false\n";
     fs::write(&record, raw)?;
     f.script("codex", "touch \"$MACOPS_TEST_HOME/codex-called\"; exit 19")?;
-    let (out, found) = f.run(&["list", "--kind", "capabilities"])?;
+    let (out, found) = f.run(&["skill", "resources"])?;
     assert_code(&out, 0);
     let id = found["data"]["resources"][0]["id"]
         .as_str()
         .ok_or("inventory identity")?;
-    let (out, result) = f.run(&["adopt", id, "--yes"])?;
+    let (out, result) = f.run(&["app", "adopt", id, "--yes"])?;
     assert_code(&out, 0);
     assert_eq!(result["data"]["phase"], "succeeded");
     assert_eq!(result["data"]["plan"]["package"]["id"], id);
@@ -309,7 +316,7 @@ fn codex_adoption_keeps_native_files_and_reuses_the_profile_resource_identity() 
         cache.join(".git/HEAD"),
         "native Git administrative change\n",
     )?;
-    let (out, same) = f.run(&["list", "--kind", "capabilities"])?;
+    let (out, same) = f.run(&["skill", "resources"])?;
     assert_code(&out, 0);
     assert_eq!(same["data"]["resources"][0]["management"], "adopted");
     assert_eq!(
@@ -320,13 +327,13 @@ fn codex_adoption_keeps_native_files_and_reuses_the_profile_resource_identity() 
         &manifest,
         r#"{"name":"fixture","version":"1.0.0","description":"modified content"}"#,
     )?;
-    let (_, drift) = f.run(&["list", "--kind", "capabilities"])?;
+    let (_, drift) = f.run(&["skill", "resources"])?;
     assert_eq!(
         drift["data"]["resources"][0]["baseline"]["comparison"],
         "different"
     );
     fs::create_dir(root.join("plugins/cache/market/fixture/2.0.0"))?;
-    let (_, multiple) = f.run(&["list", "--kind", "capabilities"])?;
+    let (_, multiple) = f.run(&["skill", "resources"])?;
     assert_eq!(
         multiple["data"]["resources"][0]["baseline"]["comparison"],
         "unknown"
@@ -346,11 +353,11 @@ fn codex_adoption_refuses_an_ambiguous_or_unbound_cache_without_writing() -> Tes
         codex.join("config.toml"),
         "[plugins.'fixture@market']\nenabled=true\n",
     )?;
-    let (out, ambiguous) = f.run(&["adopt", "plugin:fixture@market", "--yes"])?;
+    let (out, ambiguous) = f.run(&["app", "adopt", "plugin:fixture@market", "--yes"])?;
     assert_code(&out, 3);
     assert_eq!(ambiguous["error"]["code"], "codex_plugin_cache_unproven");
     fs::remove_dir(cache.join("2.0.0"))?;
-    let (out, missing) = f.run(&["adopt", "plugin:fixture@market", "--yes"])?;
+    let (out, missing) = f.run(&["app", "adopt", "plugin:fixture@market", "--yes"])?;
     assert_code(&out, 3);
     assert_eq!(missing["error"]["code"], "codex_plugin_manifest_missing");
     let available = cache.join("1.0.0");
@@ -362,7 +369,7 @@ fn codex_adoption_refuses_an_ambiguous_or_unbound_cache_without_writing() -> Tes
         r#"{"name":"fixture","version":"2.0.0"}"#,
     ] {
         fs::write(&manifest, contents)?;
-        let (out, invalid) = f.run(&["adopt", "plugin:fixture@market", "--yes"])?;
+        let (out, invalid) = f.run(&["app", "adopt", "plugin:fixture@market", "--yes"])?;
         assert_code(&out, 3);
         assert_eq!(invalid["error"]["code"], "codex_plugin_manifest_mismatch");
     }
@@ -371,7 +378,7 @@ fn codex_adoption_refuses_an_ambiguous_or_unbound_cache_without_writing() -> Tes
         let portable = json!({"$schema":format!("https://agent-plugins.org/schemas/{schema}/plugin.schema.json"),
             "name":"other", "version":"1.0.0"});
         write_json(&available.join("plugin.json"), &portable)?;
-        let (out, invalid) = f.run(&["adopt", "plugin:fixture@market", "--yes"])?;
+        let (out, invalid) = f.run(&["app", "adopt", "plugin:fixture@market", "--yes"])?;
         assert_code(&out, 3);
         assert_eq!(invalid["error"]["code"], "codex_plugin_manifest_mismatch");
     }
@@ -398,6 +405,7 @@ fn codex_adoption_remains_present_when_the_profile_is_no_longer_selected() -> Te
         .args([
             "--state-dir",
             f.file("state").to_str().ok_or("state path")?,
+            "app",
             "adopt",
             "plugin:fixture@market",
             "--yes",
@@ -410,9 +418,8 @@ fn codex_adoption_remains_present_when_the_profile_is_no_longer_selected() -> Te
         .args([
             "--state-dir",
             f.file("state").to_str().ok_or("state path")?,
-            "list",
-            "--kind",
-            "capabilities",
+            "skill",
+            "resources",
         ])
         .output()?;
     assert_code(&output, 0);
@@ -441,11 +448,11 @@ fn codex_adoption_deduplicates_profile_aliases_but_rejects_redirected_plugin_cac
         "[plugins.'fixture@market']\nenabled=true\n[plugins.'other@market']\nenabled=false\n",
     )?;
     std::os::unix::fs::symlink(plugins.join("fixture"), plugins.join("other"))?;
-    let (out, redirected) = f.run(&["adopt", "plugin:other@market", "--yes"])?;
+    let (out, redirected) = f.run(&["app", "adopt", "plugin:other@market", "--yes"])?;
     assert_code(&out, 3);
     assert_eq!(redirected["error"]["code"], "codex_plugin_cache_rebound");
     assert!(!f.file("state").exists());
-    let (out, _) = f.run(&["adopt", "plugin:fixture@market", "--yes"])?;
+    let (out, _) = f.run(&["app", "adopt", "plugin:fixture@market", "--yes"])?;
     assert_code(&out, 0);
     let alias = f.home.join("alternate-codex");
     std::os::unix::fs::symlink(&root, &alias)?;
@@ -456,7 +463,7 @@ fn codex_adoption_deduplicates_profile_aliases_but_rejects_redirected_plugin_cac
             .env("CODEX_HOME", &alias);
         Ok::<_, Box<dyn std::error::Error>>(command)
     };
-    let out = query()?.args(["list", "--kind", "capabilities"]).output()?;
+    let out = query()?.args(["skill", "resources"]).output()?;
     assert_code(&out, 0);
     let result: serde_json::Value = serde_json::from_slice(&out.stdout)?;
     let alias_record = json!(alias.join("config.toml"));
@@ -468,7 +475,7 @@ fn codex_adoption_deduplicates_profile_aliases_but_rejects_redirected_plugin_cac
         .ok_or("alias resource")?;
     let id = row["id"].as_str().ok_or("alias id")?;
     let bytes = fs::read(f.file("state/receipts.json"))?;
-    let out = query()?.args(["adopt", id, "--yes"]).output()?;
+    let out = query()?.args(["app", "adopt", id, "--yes"]).output()?;
     assert_code(&out, 3);
     let result: serde_json::Value = serde_json::from_slice(&out.stdout)?;
     assert_eq!(result["error"]["code"], "owner_conflict");
@@ -502,25 +509,21 @@ fn unregistered_isolated_codex_profile_cannot_be_adopted_through_another_state_r
     let ordinary = f.home.join("ordinary-config");
     fs::create_dir_all(&ordinary)?;
     fs::copy(profile.join("config.toml"), ordinary.join("config.toml"))?;
-    let out = query(&ordinary)
-        .args(["list", "--kind", "capabilities"])
-        .output()?;
+    let out = query(&ordinary).args(["skill", "resources"]).output()?;
     assert_code(&out, 0);
     let selected: serde_json::Value = serde_json::from_slice(&out.stdout)?;
     assert_eq!(selected["data"]["resources"][0]["name"], "item@market");
-    let out = query(&profile)
-        .args(["list", "--kind", "capabilities"])
-        .output()?;
+    let out = query(&profile).args(["skill", "resources"]).output()?;
     assert_code(&out, 0);
     let hidden: serde_json::Value = serde_json::from_slice(&out.stdout)?;
     assert_eq!(hidden["data"]["resources"], json!([]));
     let out = query(&profile)
-        .args(["adopt", "plugin:item@market", "--yes"])
+        .args(["app", "adopt", "plugin:item@market", "--yes"])
         .output()?;
     assert_ne!(out.status.code(), Some(0));
     assert!(!f.file("state-b").join("receipts.json").exists());
     std::os::unix::fs::symlink(profile, f.home.join(".codex"))?;
-    let (out, hidden) = f.run(&["list", "--kind", "capabilities"])?;
+    let (out, hidden) = f.run(&["skill", "resources"])?;
     assert_code(&out, 0);
     assert_eq!(hidden["data"]["resources"], json!([]));
     Ok(())

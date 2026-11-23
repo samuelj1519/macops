@@ -14,7 +14,7 @@ fn fixture() -> std::result::Result<(tempfile::TempDir, Context, Recipe), Box<dy
     let temp = tempfile::tempdir_in("/private/tmp")?;
     let home = temp.path().join("home");
     fs::create_dir(&home)?;
-    let cli = Cli::try_parse_from(["macops", "--home", home.to_str().ok_or("home")?, "list"])?;
+    let cli = Cli::try_parse_from(["macops", "--home", home.to_str().ok_or("home")?, "app"])?;
     let ctx = Context::from_cli(&cli, &mut vec![])?;
     let node = temp.path().join("node");
     fs::write(&node,b"#!/bin/sh\nif [ \"$1\" = --version ];then printf 'v26.13.1\\n';exit 0;fi\nif [ \"$2\" = check ];then printf checked > \"$HOME/check-called\";exit 0;fi\nexit 97\n")?;

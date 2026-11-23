@@ -362,7 +362,7 @@ fn profile_summary(profile: &Value) -> String {
         return format!("市场状态未知  {reason}");
     }
     match field(profile, "status") {
-        "account_query_available" => "查询账户市场  mo plugins cursor --online",
+        "account_query_available" => "查询账户市场  mo skill market cursor --online",
         "dry_run" => "预演，未查询账户市场",
         "account" => "该账户未返回市场",
         _ => "未发现已登记的市场",

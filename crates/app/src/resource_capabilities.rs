@@ -147,6 +147,7 @@ fn cursor_project_plugins(
                     delivery_kind: "cursor-project-plugin".into(),
                     native_id: key.clone(),
                     origin: Origin {
+                        repository: None,
                         manager: "cursor".into(),
                         label: repository,
                         record: path.clone(),
@@ -285,6 +286,7 @@ fn apply_receipts(
                     delivery_kind: delivery_kind.into(),
                     native_id: native_id.clone(),
                     origin: Origin {
+                        repository: None,
                         manager: manager.clone(),
                         label: None,
                         record: record.clone(),
@@ -372,6 +374,7 @@ fn lock(
                     delivery_kind: "skill".into(),
                     native_id: name.clone(),
                     origin: Origin {
+                        repository: skill_repository(&record),
                         manager: format!("skills-cli:{}", record.source_type),
                         label: Some(policy::source_label(
                             record.source_url.as_deref().unwrap_or(&record.source),
@@ -394,6 +397,17 @@ fn lock(
         report.count += 1;
     }
     Ok(report)
+}
+
+fn skill_repository(record: &policy::SkillRecord) -> Option<crate::policy::source_git::Repository> {
+    if record.source_type != "github" {
+        return None;
+    }
+    let repository = crate::policy::source_git::Repository::parse(&record.source).ok()?;
+    if let Some(url) = &record.source_url {
+        repository.verify_url(url).ok()?;
+    }
+    Some(repository)
 }
 
 fn content(path: &Path) -> Result<Content> {
@@ -493,6 +507,7 @@ fn skill_dir(
                 delivery_kind: "skill".into(),
                 native_id: name.clone(),
                 origin: Origin {
+                    repository: None,
                     manager: "filesystem".into(),
                     label: None,
                     record: logical_root.to_path_buf(),
@@ -600,6 +615,7 @@ fn plugins(
                         delivery_kind: "plugin".into(),
                         native_id: name.clone(),
                         origin: Origin {
+                            repository: None,
                             manager: "claude-plugin".into(),
                             label: None,
                             record: path.clone(),
@@ -657,6 +673,7 @@ fn mcp_entries(
                 delivery_kind: "mcp".into(),
                 native_id: record.name.clone(),
                 origin: Origin {
+                    repository: None,
                     manager: "client-config".into(),
                     label: record.runner,
                     record: path.to_path_buf(),
@@ -764,6 +781,7 @@ fn codex(
                             delivery_kind: "plugin".into(),
                             native_id: name.clone(),
                             origin: Origin {
+                                repository: None,
                                 manager: "codex-config".into(),
                                 label: None,
                                 record: path.clone(),

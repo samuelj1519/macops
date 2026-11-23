@@ -514,6 +514,16 @@ impl Store {
     }
 }
 
+pub(crate) fn active(ctx: &Context) -> Result<Option<Journal>> {
+    let path = ctx.state.join("active.json");
+    if !paths::read_path(&path)?.exists() {
+        return Ok(None);
+    }
+    let journal = paths::regular_json(&path)?;
+    validate_journal(&journal)?;
+    Ok(Some(journal))
+}
+
 pub fn history(ctx: &Context) -> Result<Vec<Journal>> {
     let root = paths::read_path(&ctx.state.join("operations"))?;
     if !root.exists() {

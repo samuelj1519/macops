@@ -72,7 +72,7 @@ fn agent_action_losing_its_owner_returns_to_inventory_without_saving()
         "macops",
         "--home",
         home.path().to_str().ok_or("home")?,
-        "agents",
+        "agent",
     ])?;
     let ctx = Context::from_cli(&parser, &mut Vec::new())?;
     let (mut session, view) = Session::load(&ctx, Kind::Agents)?;

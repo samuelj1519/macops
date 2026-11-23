@@ -7,7 +7,7 @@ use std::path::PathBuf;
     bin_name = "mo",
     version,
     about = "本机软件、Agent 资产与目录的统一维护入口",
-    long_about = "查询来源、安装实例与目录；写命令默认执行，使用 --dry-run 预演。未知来源和恢复状态不会自动跳过。"
+    long_about = "统一文法：mo <类型> [对象] [动作]。无对象即列表，带对象即详情；安装、升级、卸载各类型同名。写命令默认执行，使用 --dry-run 预演。未知来源和恢复状态不会自动跳过。"
 )]
 pub struct Cli {
     #[arg(long,global=true,default_value_t=120,value_parser=clap::value_parser!(u64).range(1..=3600),help="单次写入操作超时秒数")]
@@ -46,38 +46,68 @@ pub struct Cli {
     pub command: Command,
 }
 
+#[derive(Debug, Args)]
+pub struct Detail {
+    pub target: String,
+}
+
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    #[command(about = "一次性转换旧治理数据；保留旧源并校验分叉")]
-    Migrate {
-        #[command(subcommand)]
-        command: Migrate,
-    },
-    #[command(alias = "ls", about = "列出登记的软件与来源，不运行安装器")]
-    List {
+    #[command(about = "应用：列表、详情、安装、升级、卸载与纳管；终端环境自动进入浏览")]
+    App {
         #[arg(
             long,
-            value_name = "CATEGORY",
-            help = "筛选 applications、agents、capabilities、configs 或 all"
+            global = true,
+            value_name = "PATH",
+            help = "按项目目录过滤资源快照"
         )]
-        kind: Option<String>,
-        #[arg(long, value_name = "PATH", help = "查看指定项目的安装、能力和配置")]
         project: Option<PathBuf>,
-    },
-    #[command(about = "导出本机管理清单或预演已有清单")]
-    Manifest {
         #[command(subcommand)]
-        command: Manifest,
+        command: Option<AppCmd>,
     },
-    #[command(about = "查看一个唯一安装对象")]
-    Info {
-        id: String,
-        #[arg(long)]
+    #[command(about = "配置：chezmoi 归属、状态与治理")]
+    Config {
+        #[arg(
+            long,
+            global = true,
+            value_name = "PATH",
+            help = "按项目目录过滤资源快照"
+        )]
         project: Option<PathBuf>,
+        #[command(subcommand)]
+        command: Option<Config>,
     },
-    #[command(about = "查询已声明来源或分析提供的安装证据")]
+    #[command(about = "技能：技能与插件的安装、升级与检查")]
+    Skill {
+        #[arg(
+            long,
+            global = true,
+            value_name = "PATH",
+            help = "按项目目录过滤资源快照"
+        )]
+        project: Option<PathBuf>,
+        #[arg(long, help = "显示每项技能的详细证据")]
+        details: bool,
+        #[arg(long = "only", value_name = "NAME", help = "仅列出指定技能")]
+        only: Vec<String>,
+        #[command(subcommand)]
+        command: Option<SkillCmd>,
+    },
+    #[command(about = "Agent 与 Harness：CLI 工具、档案、凭据与启动")]
+    Agent {
+        #[arg(
+            long,
+            global = true,
+            value_name = "PATH",
+            help = "按项目目录过滤资源快照"
+        )]
+        project: Option<PathBuf>,
+        #[command(subcommand)]
+        command: Option<AgentCmd>,
+    },
+    #[command(about = "智能安装：查询官方渠道并给出可执行计划")]
     Recommend {
-        product: String,
+        product: Option<String>,
         #[arg(long)]
         evidence: Option<PathBuf>,
         #[arg(
@@ -90,57 +120,38 @@ pub enum Command {
         model: bool,
         #[arg(long, requires = "model")]
         keychain_account: Option<String>,
+        #[arg(long, conflicts_with_all = ["product", "evidence", "github", "model"], help = "配置推荐模型与连接")]
+        setup: bool,
     },
-    #[command(about = "设置推荐模型与连接")]
-    Setup,
+    #[command(about = "收口未完结操作；省略编号时列出待收口项")]
+    Recover {
+        operation_id: Option<String>,
+        #[arg(
+            long,
+            requires = "operation_id",
+            help = "人工核对后记录失败并解除阻断；不修复软件"
+        )]
+        resolve_failed: bool,
+    },
+    #[command(about = "查看操作历史")]
+    History { query: Option<String> },
+    #[command(about = "查询任意对象；按名称或 ID 跨类型搜索")]
+    Search { query: String },
     #[command(
-        about = "浏览 Codex、Claude Code 和 Cursor 插件市场",
-        after_help = "示例\n  mo plugins claude:mi\n  mo plugins cursor --online\n  mo plugins --json"
+        name = "migrate",
+        hide = true,
+        about = "一次性转换旧治理数据；保留旧源并校验分叉"
     )]
-    Plugins {
-        /// 筛选 codex、claude、cursor 或具体档案，如 claude:mi
-        #[arg(value_name = "HARNESS_OR_PROFILE")]
-        profile: Option<String>,
-        /// 由 Cursor CLI 查询当前账户可见的市场
-        #[arg(long, requires = "profile")]
-        online: bool,
+    Migrate {
+        #[command(subcommand)]
+        command: Migrate,
     },
-    #[command(about = "通过原生管理器发现安装；不自动接管")]
-    Discover { manager: Option<String> },
-    #[command(about = "检查本地安装，损坏输入报告 unknown")]
-    Doctor { id: Option<String> },
-    #[command(about = "按名称或 ID 纳管，省略目标可交互选择")]
-    Adopt {
-        #[arg(value_name = "NAME_OR_ID", group = "adopt_target")]
-        target: Option<String>,
-        /// 精确匹配完整 ID
-        #[arg(long, value_name = "ID", group = "adopt_target")]
-        id: Option<String>,
-        /// 将已采纳的 npm 实例绑定到显式声明的原生配方
-        #[arg(long, requires = "adopt_target")]
-        bind_recipe: bool,
+    #[command(hide = true, about = "导出本机管理清单或预演已有清单")]
+    Manifest {
+        #[command(subcommand)]
+        command: Manifest,
     },
-    #[command(about = "按官方渠道安装一个对象")]
-    Install {
-        id: String,
-        #[arg(long)]
-        version: Option<String>,
-    },
-    #[command(about = "升级一个对象；不会隐式整机升级")]
-    Upgrade {
-        id: String,
-        #[arg(long)]
-        version: Option<String>,
-        #[arg(long, help = "仅对 ai:工具名生效，只更新本机版本")]
-        force_live: bool,
-    },
-    #[command(about = "卸载明确对象，保留配置与用户数据")]
-    Uninstall { id: String },
-    #[command(about = "刷新可用版本索引，不升级软件")]
-    Update { id: Option<String> },
-    #[command(about = "根据已有索引显示可更新或未知项")]
-    Outdated { id: Option<String> },
-    #[command(about = "查询准确目录与用途")]
+    #[command(name = "dirs", hide = true, about = "查询准确目录与用途")]
     Dirs {
         id: Option<String>,
         #[arg(
@@ -150,63 +161,12 @@ pub enum Command {
         )]
         roots: bool,
     },
-    #[command(about = "清理 macops 自有缓存；原生共享缓存只提供建议")]
+    #[command(
+        name = "cleanup",
+        hide = true,
+        about = "清理 macops 自有缓存；原生共享缓存只提供建议"
+    )]
     Cleanup { id: String },
-    #[command(about = "查看操作历史")]
-    History { id: Option<String> },
-    #[command(about = "查询原操作结果，不重跑安装器")]
-    Recover {
-        operation_id: String,
-        #[arg(long, help = "人工核对后记录失败并解除阻断；不修复软件")]
-        resolve_failed: bool,
-    },
-    #[command(about = "确认并继续已核验的 Claude Code 首装")]
-    Resume { operation_id: String },
-    #[command(about = "技能与插件来源维护")]
-    Skills {
-        #[command(subcommand)]
-        command: Option<Skills>,
-    },
-    #[command(about = "AI CLI 与固定版本维护")]
-    Ai {
-        #[command(subcommand)]
-        command: Ai,
-    },
-    #[command(about = "配置归属与差异")]
-    Config {
-        #[command(subcommand)]
-        command: Option<Config>,
-    },
-    #[command(about = "应用查询")]
-    App {
-        #[command(subcommand)]
-        command: App,
-    },
-    #[command(about = "浏览已发现的软件与安装来源")]
-    Apps,
-    #[command(about = "浏览 Agent 和 Harness 档案")]
-    Agents,
-    #[command(about = "启动 macops 纳管的独立 Agent 档案")]
-    Launch {
-        profile: String,
-        #[arg(long)]
-        native_profile: Option<String>,
-    },
-    #[command(about = "工具链查询")]
-    Toolchain {
-        #[command(subcommand)]
-        command: Toolchain,
-    },
-    #[command(about = "已声明服务")]
-    Service {
-        #[command(subcommand)]
-        command: Service,
-    },
-    #[command(about = "凭据元信息；永不读取密钥值")]
-    Credential {
-        #[command(subcommand)]
-        command: Credential,
-    },
     #[command(name = "__npm_observe", hide = true)]
     NpmObserve {
         #[arg(long)]
@@ -220,6 +180,56 @@ pub enum Command {
     Worker { journal: PathBuf },
     #[command(name = "__native_worker", hide = true)]
     NativeWorker { journal: PathBuf },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AppCmd {
+    #[command(about = "安装官方渠道声明的应用并自动纳管")]
+    Install {
+        id: String,
+        #[arg(long)]
+        version: Option<String>,
+    },
+    #[command(about = "升级应用；省略对象时先刷新索引再升级全部可升级项")]
+    Upgrade {
+        id: Option<String>,
+        #[arg(long, requires = "id")]
+        version: Option<String>,
+    },
+    #[command(about = "卸载明确对象，保留配置与用户数据")]
+    Uninstall { id: String },
+    #[command(about = "按名称或 ID 纳管本机已有安装，省略目标可交互选择")]
+    Adopt {
+        #[arg(value_name = "NAME_OR_ID", group = "adopt_target")]
+        target: Option<String>,
+        #[arg(long, value_name = "ID", group = "adopt_target")]
+        id: Option<String>,
+        #[arg(long, requires = "adopt_target")]
+        bind_recipe: bool,
+    },
+    #[command(about = "检查本地安装，损坏输入报告 unknown")]
+    Doctor { id: Option<String> },
+    #[command(about = "启动已声明的服务")]
+    Start { id: String },
+    #[command(hide = true, about = "通过原生管理器发现安装；不自动接管")]
+    Discover { manager: Option<String> },
+    #[command(hide = true, about = "刷新可用版本索引，不升级软件")]
+    Refresh { id: Option<String> },
+    #[command(hide = true, about = "根据已有索引显示可更新或未知项")]
+    Outdated { id: Option<String> },
+    #[command(hide = true, about = "应用资源的统一快照")]
+    Resources,
+    #[command(hide = true, about = "已声明服务查询")]
+    Service {
+        #[command(subcommand)]
+        command: ServiceCmd,
+    },
+    #[command(about = "停止已声明的服务")]
+    Stop { id: String },
+    #[command(hide = true, name = "__detail")]
+    Detail(Detail),
+    #[command(external_subcommand)]
+    Target(Vec<String>),
 }
 
 #[derive(Clone, Copy)]
@@ -254,57 +264,66 @@ pub struct SkillSelection {
 }
 
 #[derive(Debug, Subcommand)]
-pub enum Skills {
-    #[command(about = "查询客户端原生插件的固定安装配方")]
-    Plugins {
-        #[command(subcommand)]
-        command: NativePlugins,
-    },
-    Info {
-        id: String,
-    },
+pub enum SkillCmd {
+    #[command(about = "按固定配方安装技能")]
     Install {
         #[arg(long)]
         recipe: PathBuf,
     },
+    #[command(about = "按固定配方纳管已有技能")]
     Adopt {
         id: String,
         #[arg(long)]
         recipe: PathBuf,
     },
+    #[command(name = "uninstall", alias = "remove", about = "卸载已纳管的技能")]
     Remove {
         id: String,
     },
-    #[command(alias = "ls")]
-    List {
-        name: Option<String>,
-        #[arg(long)]
-        details: bool,
-        #[arg(long)]
-        only: Vec<String>,
-    },
-    Check {
+    Upgrade(SkillSelection),
+    #[command(about = "检查本地技能与插件证据")]
+    Doctor {
         name: Option<String>,
         #[arg(long)]
         only: Vec<String>,
     },
-    Status {
-        name: Option<String>,
-        #[arg(long)]
-        only: Vec<String>,
+    #[command(
+        about = "浏览 Codex、Claude Code 和 Cursor 插件市场",
+        after_help = "示例  mo skill market claude:mi
+      mo skill market cursor --online"
+    )]
+    Market {
+        #[arg(value_name = "HARNESS_OR_PROFILE")]
+        profile: Option<String>,
+        #[arg(long, requires = "profile")]
+        online: bool,
     },
-    Update(SkillSelection),
+    #[command(hide = true, about = "客户端原生插件的固定安装配方")]
+    Plugins {
+        #[command(subcommand)]
+        command: NativePlugins,
+    },
+    #[command(hide = true, about = "技能策略与变更恢复")]
+    Policy {
+        #[command(subcommand)]
+        command: Policy,
+    },
+    #[command(hide = true, about = "同步技能链接与声明")]
+    Sync(SkillSelection),
+    #[command(hide = true, about = "刷新技能来源索引，不升级")]
+    Refresh(SkillSelection),
+    #[command(hide = true, about = "根据已有索引显示可更新技能")]
     Outdated {
         name: Option<String>,
         #[arg(long)]
         only: Vec<String>,
     },
-    Upgrade(SkillSelection),
-    Sync(SkillSelection),
-    Policy {
-        #[command(subcommand)]
-        command: Policy,
-    },
+    #[command(hide = true, about = "技能资源的统一快照")]
+    Resources,
+    #[command(hide = true, name = "__detail")]
+    Detail(Detail),
+    #[command(external_subcommand)]
+    Target(Vec<String>),
 }
 
 #[derive(Debug, Subcommand)]
@@ -332,33 +351,59 @@ pub enum Policy {
         change_id: Option<String>,
     },
 }
+
 #[derive(Debug, Subcommand)]
-pub enum Ai {
-    #[command(alias = "ls")]
-    List,
-    #[command(hide = true)]
-    Upgrade {
-        #[arg(value_parser=["mimo","codex","claude","cursor","kimi","dsh","codegraph"])]
+pub enum AgentCmd {
+    #[command(
+        about = "安装或更新一个 Agent CLI（mimo、codex、claude、cursor、kimi、dsh、codegraph）"
+    )]
+    Install {
+        #[arg(value_parser=crate::ai::parse_tool)]
         tool: String,
         version: Option<String>,
-        #[arg(long)]
+        #[arg(long, help = "只更新本机版本，不改动配置")]
         force_live: bool,
     },
-    #[command(hide = true)]
-    Reconcile {
-        #[arg(value_parser=["mimo","codex","claude","cursor","kimi","dsh","codegraph"])]
+    #[command(about = "升级 Agent CLI；省略对象时检查全部工具的配置差异")]
+    Upgrade {
+        #[arg(value_parser=crate::ai::parse_tool)]
         tool: Option<String>,
+        #[arg(long, requires = "tool", help = "只更新本机版本，不改动配置")]
+        force_live: bool,
     },
+    #[command(about = "确认并继续已核验的 Claude Code 首装")]
+    Resume { operation_id: String },
+    #[command(about = "启动 macops 纳管的独立 Agent 档案")]
+    Launch {
+        profile: String,
+        #[arg(long)]
+        native_profile: Option<String>,
+    },
+    #[command(about = "凭据元信息；永不读取密钥值")]
+    Credential {
+        #[command(subcommand)]
+        command: Credential,
+    },
+    #[command(hide = true, about = "Agent 档案资源的统一快照")]
+    Resources,
+    #[command(hide = true, about = "Agent CLI 工具版本清单")]
+    Tools,
+    #[command(hide = true, name = "__detail")]
+    Detail(Detail),
+    #[command(external_subcommand)]
+    Target(Vec<String>),
 }
+
 #[derive(Debug, Subcommand)]
 pub enum Manifest {
     Export,
     Plan { file: PathBuf },
     Replay { file: PathBuf, id: String },
 }
+
 #[derive(Debug, Subcommand)]
 pub enum Config {
-    #[command(alias = "ls")]
+    #[command(alias = "ls", about = "刷新并查看配置归属")]
     List {
         #[arg(long)]
         refresh: bool,
@@ -397,50 +442,20 @@ pub enum Config {
     Reconcile {
         id: Option<String>,
     },
+    #[command(hide = true, about = "配置资源的统一快照")]
+    Resources,
+    #[command(hide = true, name = "__detail")]
+    Detail(Detail),
+    #[command(external_subcommand)]
+    Target(Vec<String>),
 }
+
 #[derive(Debug, Subcommand)]
-pub enum App {
-    #[command(alias = "ls")]
+pub enum ServiceCmd {
     List,
-    Info {
-        name: String,
-    },
-    Check {
-        name: Option<String>,
-    },
-    #[command(hide = true)]
-    Upgrade {
-        #[arg(value_parser=["mimo","codex","claude","cursor","kimi","dsh","codegraph"])]
-        tool: String,
-        version: Option<String>,
-        #[arg(long)]
-        force_live: bool,
-    },
+    Check { name: Option<String> },
 }
-#[derive(Debug, Subcommand)]
-pub enum Toolchain {
-    #[command(alias = "ls")]
-    List {
-        manager: Option<String>,
-    },
-    Info {
-        manager: String,
-    },
-}
-#[derive(Debug, Subcommand)]
-pub enum Service {
-    #[command(alias = "ls")]
-    List,
-    Check {
-        name: Option<String>,
-    },
-    Start {
-        name: String,
-    },
-    Stop {
-        name: String,
-    },
-}
+
 #[derive(Debug, Subcommand)]
 pub enum Credential {
     #[command(alias = "ls")]

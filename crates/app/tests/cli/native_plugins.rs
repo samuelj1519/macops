@@ -6,7 +6,7 @@ use std::{fs, os::unix::fs::symlink, path::Path, process::Output};
 fn run(fixture: &Fixture, args: &[&str]) -> Result<(Output, Value), Box<dyn std::error::Error>> {
     let out = fixture
         .roots_command()
-        .args(["skills", "plugins"])
+        .args(["skill", "plugins"])
         .args(args)
         .output()?;
     let envelope = serde_json::from_slice(&out.stdout)?;
