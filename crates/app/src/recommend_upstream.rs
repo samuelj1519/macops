@@ -359,7 +359,7 @@ fn repository_review(
             let codex_marketplace = codex_marketplace(&evidence, &mut fetch);
             let claude_marketplace = claude_marketplace(&evidence, &mut fetch);
             let model = match interactive
-                .then(|| crate::recommend_setup::read(ctx))
+                .then(|| crate::recommend_setup::read(&ctx.config))
                 .transpose()
             {
                 Ok(Some(Some(profile))) if profile.enabled => {

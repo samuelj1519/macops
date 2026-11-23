@@ -239,3 +239,35 @@ fn isolated_claude_preview_requires_confirmation_and_keeps_the_selected_mode() -
     assert!(!ctx.state.exists());
     Ok(())
 }
+
+#[test]
+fn local_install_evidence_remains_available_when_silent_keychain_access_fails() -> TestResult {
+    use clap::Parser as _;
+    let dir = tempfile::tempdir_in("/private/tmp")?;
+    let cli = crate::cli::Cli::try_parse_from([
+        "mo",
+        "--home",
+        dir.path().to_str().ok_or("fixture home")?,
+        "recommend",
+        "owner/release",
+    ])?;
+    let ctx = Context::from_cli(&cli, &mut vec![])?;
+    let result = choose(
+        &ctx,
+        json!({"query":"owner/release","repository":"owner/release","evidenceStatus":"public-commit",
+            "reason":"synthetic_partial_source","documents":[{"path":"README.md","url":"https://github.com/owner/release"}],
+            "model":{"status":"keychain-unavailable","candidates":[]},"persistentWrites":false}),
+    )?;
+    assert_eq!(result["model"]["status"], "keychain-unavailable");
+    assert_eq!(result["documents"][0]["path"], "README.md");
+    let mut suggested = result;
+    suggested["model"] = json!({"status":"suggested","candidates":[
+        {"name":"fixture","kind":"skill","adapter":"skills","scope":"global","version":"1.0.0","summary":"fixture evidence","document":0},
+        {"name":"unlinked","kind":"plugin","adapter":"codex-plugin","scope":"global","version":null,"summary":"fixture","document":7},
+        {"name":"unindexed","kind":"plugin","adapter":"claude-plugin","scope":"global","version":null,"summary":"fixture","document":null},
+    ]});
+    assert_eq!(choose(&ctx, suggested.clone())?, suggested);
+    assert!(!ctx.state.exists());
+    assert!(dir.path().exists());
+    Ok(())
+}

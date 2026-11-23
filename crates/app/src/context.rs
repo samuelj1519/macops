@@ -46,6 +46,56 @@ impl HarnessRoots {
         )
     }
 }
+fn logical_home(cli: &Cli) -> Result<(PathBuf, bool)> {
+    let ambient = std::env::var_os("HOME")
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from);
+    if let Some(home) = &cli.home {
+        return Ok((home.clone(), ambient.as_ref() != Some(home)));
+    }
+    ambient
+        .map(|home| (home, false))
+        .ok_or_else(|| Error::new("home_missing", "请使用 --home 指定绝对路径"))
+}
+
+#[derive(Debug)]
+pub(crate) struct RecommendSetupContext {
+    pub(crate) home: PathBuf,
+    pub(crate) config: PathBuf,
+    pub(crate) timeout_secs: u64,
+    pub(crate) isolated: bool,
+}
+
+impl RecommendSetupContext {
+    pub(crate) fn from_cli(cli: &Cli, warnings: &mut Vec<String>) -> Result<Self> {
+        let (home, isolated) = logical_home(cli)?;
+        paths::read_path(&home)?;
+        let base = (!isolated)
+            .then(|| std::env::var_os("XDG_CONFIG_HOME"))
+            .flatten()
+            .map(PathBuf::from);
+        let (base, warning) =
+            crate::policy::layout::scope_value("XDG_CONFIG_HOME", base.as_deref());
+        warnings.extend(warning);
+        if let Some(base) = &base {
+            validate_scope_path("XDG_CONFIG_HOME", base)?;
+        }
+        let config = crate::policy::layout::app_root(
+            cli.config_dir.as_deref(),
+            base.as_deref(),
+            &home,
+            ".config/macops",
+        )?;
+        validate_app_root(&config)?;
+        Ok(Self {
+            home,
+            config,
+            timeout_secs: cli.timeout_secs,
+            isolated,
+        })
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Context {
     pub scope: crate::domain::Scope,
@@ -66,12 +116,8 @@ pub struct Context {
 
 impl Context {
     pub fn from_cli(cli: &Cli, warnings: &mut Vec<String>) -> Result<Self> {
-        let actual = PathBuf::from(
-            std::env::var_os("HOME")
-                .ok_or_else(|| Error::new("home_missing", "请使用 --home 指定绝对路径"))?,
-        );
-        let home = cli.home.clone().unwrap_or_else(|| actual.clone());
-        let scope = scope(&home, home != actual, warnings)?;
+        let (home, isolated) = logical_home(cli)?;
+        let scope = scope(&home, isolated, warnings)?;
         let root = |explicit: Option<&std::path::Path>, key: &str, fallback: &str| {
             crate::policy::layout::app_root(
                 explicit,
@@ -87,8 +133,8 @@ impl Context {
         )?;
         let context = Self {
             config: config.clone(),
-            harness: HarnessRoots::capture(home != actual, warnings)?,
-            uv: crate::uv_local::DiscoveryInputs::capture(home != actual),
+            harness: HarnessRoots::capture(isolated, warnings)?,
+            uv: crate::uv_local::DiscoveryInputs::capture(isolated),
             data: root(
                 cli.data_dir.as_deref(),
                 "XDG_DATA_HOME",
@@ -111,8 +157,8 @@ impl Context {
                 .clone()
                 .unwrap_or_else(|| home.join(".local/settings")),
             catalog_explicit: cli.catalog.is_some(),
-            isolated: home != actual,
-            chezmoi: crate::config_inventory::Inputs::capture(cli, home != actual),
+            isolated,
+            chezmoi: crate::config_inventory::Inputs::capture(cli, isolated),
             home,
         };
         context.validate_roots(cli.settings.is_some())?;
@@ -132,12 +178,7 @@ impl Context {
             paths::read_path(path)?;
         }
         for root in [&self.config, &self.data, &self.state, &self.cache] {
-            match std::fs::metadata(paths::read_path(root)?) {
-                Ok(metadata) if metadata.is_dir() => (),
-                Ok(_) => return Err(Error::new("root_not_directory", root.display().to_string())),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
-                Err(error) => return Err(error.into()),
-            }
+            validate_app_root(root)?;
         }
         crate::policy::paths::separate_roots(&self.state, &self.cache)?;
         if explicit_settings && !self.settings.is_dir() {
@@ -180,6 +221,24 @@ impl Context {
     }
 }
 
+fn validate_app_root(root: &std::path::Path) -> Result<()> {
+    match std::fs::metadata(paths::read_path(root)?) {
+        Ok(metadata) if metadata.is_dir() => Ok(()),
+        Ok(_) => Err(Error::new("root_not_directory", root.display().to_string())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn validate_scope_path(key: &str, path: &std::path::Path) -> Result<()> {
+    paths::read_path(path).map(|_| ()).map_err(|_| {
+        Error::new(
+            "invalid_scope_path",
+            format!("作用域环境变量 {key} 必须是允许的绝对路径"),
+        )
+    })
+}
+
 fn scope(
     home: &std::path::Path,
     isolated: bool,
@@ -216,12 +275,7 @@ fn scope(
         let (path, warning) = crate::policy::layout::scope_value(key, path.as_deref());
         warnings.extend(warning);
         if let Some(ref p) = path {
-            crate::paths::read_path(p).map_err(|_| {
-                Error::new(
-                    "invalid_scope_path",
-                    format!("作用域环境变量 {key} 必须是允许的绝对路径"),
-                )
-            })?;
+            validate_scope_path(key, p)?;
         }
         paths.insert(key.into(), path);
     }

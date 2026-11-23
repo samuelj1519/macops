@@ -258,6 +258,16 @@ pub fn write_new(path: &Path, value: &impl Serialize) -> Result<()> {
     parent.verify()
 }
 pub fn write_cas(path: &Path, before: Option<&[u8]>, after: &[u8]) -> Result<()> {
+    write_cas_checked(path, before, after, || Ok(()))
+}
+
+pub(crate) fn write_cas_checked(
+    path: &Path,
+    before: Option<&[u8]>,
+    after: &[u8],
+    guard: impl Fn() -> Result<()>,
+) -> Result<()> {
+    guard()?;
     private(path.parent().ok_or_else(invalid)?)?;
     let namespace = files::namespace(path)?;
     let (state, current) = files::observe(&namespace, 16 * 1024 * 1024)?;
@@ -265,7 +275,7 @@ pub fn write_cas(path: &Path, before: Option<&[u8]>, after: &[u8]) -> Result<()>
         return Err(invalid());
     }
     let candidate = files::stage(&namespace, Some(after), 0o600)?;
-    files::publish_checked(&namespace, &state, &candidate, || Ok(()))
+    files::publish_checked(&namespace, &state, &candidate, guard)
 }
 pub fn lock_path(ctx: &Context) -> PathBuf {
     crate::policy::delivery::native_lock_path(&ctx.home, &ctx.scope)

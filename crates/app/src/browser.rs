@@ -3,13 +3,10 @@ use crate::{
     cli::{Cli, Command, SkillCmd},
     context::Context,
     error::{Error, Result},
+    operations::RecoveryState,
 };
 use serde::Serialize;
-use std::{
-    io::{IsTerminal, Write},
-    path::PathBuf,
-    process::ExitCode,
-};
+use std::{io::IsTerminal, path::PathBuf};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Kind {
@@ -163,9 +160,14 @@ pub(crate) fn browse_marketplaces(ctx: &Context, data: &serde_json::Value) -> Re
     Ok(())
 }
 
-pub(crate) fn entry(cli: &Cli) -> Option<ExitCode> {
+pub(crate) struct Output {
+    pub text: Option<String>,
+    pub incomplete: bool,
+}
+
+pub(crate) fn run(cli: &Cli, ctx: &Context) -> Result<Option<Output>> {
     if cli.json {
-        return None;
+        return Ok(None);
     }
     let interactive = !cli.dry_run && !cli.yes && interactive_terminal();
     let kind = match &cli.command {
@@ -188,74 +190,49 @@ pub(crate) fn entry(cli: &Cli) -> Option<ExitCode> {
             project: None,
         } => Kind::Agents,
         Command::History { query: None } if interactive => Kind::History,
-        _ => return None,
+        _ => return Ok(None),
     };
-    let mut warnings = Vec::new();
-    let result = execute(
-        cli,
-        kind,
-        &mut warnings,
-        interactive,
-        interactive && kind == Kind::Apps,
-    );
-    for warning in &warnings {
-        eprintln!("macops: {warning}");
-    }
-    let code = match result {
-        Ok(view) => {
-            if !interactive
-                && std::io::stdout()
-                    .lock()
-                    .write_all(plain(&view, kind).as_bytes())
-                    .is_err()
-            {
-                1
-            } else if view.incomplete {
-                3
-            } else {
-                0
-            }
-        }
-        Err(error) => {
-            eprintln!("macops: {error}");
-            error.exit
-        }
+    let (mut session, view) = Session::load(ctx, kind)?;
+    let view = if interactive {
+        crate::terminal::browse(ctx, kind, &mut session, view, kind == Kind::Apps)?
+    } else {
+        view
     };
-    Some(ExitCode::from(code))
+    Ok(Some(Output {
+        text: (!interactive).then(|| plain(&view, kind)),
+        incomplete: view.incomplete,
+    }))
 }
 
 fn history_view(ctx: &Context) -> Result<View> {
-    let mut history = crate::store::history(ctx)?;
-    history.sort_by(|a, b| {
+    let (mut history, active_unreadable) = crate::operations::recovery_history(ctx)?;
+    history.sort_by(|(a, _), (b, _)| {
         b.started_at
             .cmp(&a.started_at)
             .then_with(|| b.id.cmp(&a.id))
     });
-    let empty = history.is_empty();
+    let note = if active_unreadable {
+        "活动操作记录无法读取，仅显示历史"
+    } else if history.is_empty() {
+        "暂无操作记录"
+    } else {
+        "按开始时间排序"
+    };
     Ok(View {
         scope: "global".into(),
         items: history
             .into_iter()
-            .map(|journal| {
-                let awaiting_publication =
-                    crate::codex_install::awaiting_publication(ctx, &journal).ok();
-                history_item(journal, awaiting_publication)
-            })
+            .map(|(journal, state)| history_item(journal, state))
             .collect(),
         coverage: "observed",
         difference_coverage: "not_applicable",
         observed_at: Some(crate::store::now()),
-        note: if empty {
-            "暂无操作记录"
-        } else {
-            "按开始时间排序"
-        }
-        .into(),
-        incomplete: false,
+        note: note.into(),
+        incomplete: active_unreadable,
     })
 }
 
-fn history_item(journal: crate::domain::Journal, awaiting_publication: Option<bool>) -> Item {
+fn history_item(journal: crate::domain::Journal, recovery: RecoveryState) -> Item {
     use crate::{
         domain::{Action, Phase},
         resource::Management,
@@ -274,14 +251,15 @@ fn history_item(journal: crate::domain::Journal, awaiting_publication: Option<bo
         Action::Restore => "还原",
         Action::Reconcile => "核对",
     };
-    let phase = match journal.phase {
-        Phase::Prepared => "已准备",
-        Phase::Running => "运行中",
-        Phase::Unknown => "待核对",
-        Phase::Failed => "失败",
-        Phase::Succeeded if awaiting_publication == Some(true) => "原生安装完成，待登记",
-        Phase::Succeeded if awaiting_publication.is_none() => "原生阶段完成，登记状态待查",
-        Phase::Succeeded => "已完成",
+    let phase = match (journal.phase, recovery) {
+        (Phase::Prepared, _) => "已准备",
+        (Phase::Running, _) => "运行中",
+        (Phase::Unknown, _) => "待核对",
+        (Phase::Failed, _) => "失败",
+        (Phase::Succeeded, RecoveryState::CodexPublication) => "原生安装完成，待登记",
+        (Phase::Succeeded, RecoveryState::ClaudeFollowup) => "原生阶段完成，待核对后续步骤",
+        (Phase::Succeeded, RecoveryState::Unverified) => "原生阶段完成，登记状态待查",
+        (Phase::Succeeded, _) => "已完成",
     };
     let summary = format!("{operation} · {phase}");
     let mut details = vec![
@@ -290,7 +268,7 @@ fn history_item(journal: crate::domain::Journal, awaiting_publication: Option<bo
         format!("目标 {}", journal.plan.package.id),
         format!("原状态目录 {}", journal.state.display()),
     ];
-    if crate::policy::state::pending(journal.phase) || awaiting_publication == Some(true) {
+    if recovery.can_confirm() {
         details.push("保留当前运行环境及作用域参数".into());
         details.push(format!("只读预演  mo recover {} --dry-run", journal.id));
         details.push(format!("核对原结果  mo recover {}", journal.id));
@@ -307,28 +285,6 @@ fn history_item(journal: crate::domain::Journal, awaiting_publication: Option<bo
         agents: vec![],
         loaded: None,
         details,
-    }
-}
-
-fn execute(
-    cli: &Cli,
-    kind: Kind,
-    warnings: &mut Vec<String>,
-    interactive: bool,
-    unified: bool,
-) -> Result<View> {
-    crate::policy::cli::config_scope(
-        &cli.command,
-        cli.chezmoi_source.is_some()
-            || cli.chezmoi_destination.is_some()
-            || cli.chezmoi_config.is_some(),
-    )?;
-    let ctx = Context::from_cli(cli, warnings)?;
-    let (mut session, view) = Session::load(&ctx, kind)?;
-    if interactive {
-        crate::terminal::browse(&ctx, kind, &mut session, view, unified)
-    } else {
-        Ok(view)
     }
 }
 

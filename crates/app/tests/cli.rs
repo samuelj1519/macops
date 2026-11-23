@@ -322,6 +322,23 @@ esac"#,
     assert_eq!(fs::read(&path)?, original);
     chezmoi_native::run_browser_pty(&f, &["app"], "inventory-upgrade-cancel", name, "110", "0")?;
     assert_eq!(fs::read(&path)?, original);
+    let active = fs::read(f.file("state/active.json"))?;
+    let receipts = fs::read(f.file("state/receipts.json"))?;
+    chezmoi_native::run_browser_pty(
+        &f,
+        &["app"],
+        "inventory-upgrade-migration",
+        name,
+        "110",
+        "0",
+    )?;
+    assert_eq!(fs::read(&path)?, original);
+    assert_eq!(fs::read(f.file("state/active.json"))?, active);
+    assert_eq!(fs::read(f.file("state/receipts.json"))?, receipts);
+    assert!(!f.home.join("native-called").exists());
+    let marker = f.file("state/migration-active.json");
+    assert_eq!(fs::read_to_string(&marker)?, "interrupted migration");
+    fs::remove_file(marker)?;
     chezmoi_native::run_browser_pty(&f, &["app"], "inventory-remove", name, "110", "0")?;
     assert!(!path.exists());
     assert!(!f.home.join("native-called").exists());
@@ -858,6 +875,46 @@ fn github_skill_selectors_work_without_adding_public_aliases() -> TestResult {
 }
 
 #[test]
+fn recommend_reports_pending_operation_before_any_install_confirmation() -> TestResult {
+    for scenario in ["recommend-already-blocked", "recommend-blocked-after-menu"] {
+        let f = Fixture::new()?;
+        let (out, installed) = f.run(&["app", "install", "demo", "--version", "1.0.0"])?;
+        assert_code(&out, 0);
+        let mut pending = installed["data"].clone();
+        pending["phase"] = json!("unknown");
+        let active = f.file("state/active.json");
+        let seed = f.file("pending-fixture.json");
+        write_json(&seed, &pending)?;
+        let original = fs::read(&seed)?;
+        if scenario == "recommend-already-blocked" {
+            fs::write(&active, &original)?;
+        } else {
+            fs::remove_file(&active)?;
+        }
+
+        let mut catalog = f.read_json("catalog.json")?;
+        catalog["packages"][0]["provider"] = json!({"type":"mise","package":"demo"});
+        write_json(&f.catalog, &catalog)?;
+        f.script(
+            "mise",
+            r#"printf unexpected > "$MACOPS_TEST_HOME/mise-called"; exit 8"#,
+        )?;
+        let receipts = fs::read(f.file("state/receipts.json"))?;
+
+        chezmoi_native::run_browser_pty(&f, &["recommend", "demo"], scenario, &seed, "110", "3")?;
+        assert_eq!(fs::read(active)?, original);
+        assert_eq!(fs::read(f.file("state/receipts.json"))?, receipts);
+        assert_eq!(fs::read_to_string(f.file("calls"))?, "install\n");
+        assert!(!f.home.join("mise-called").exists());
+
+        let (out, recommendation) = f.run(&["recommend", "demo"])?;
+        assert_code(&out, 0);
+        assert_eq!(recommendation["data"]["known"][0]["id"], "fixture:demo");
+    }
+    Ok(())
+}
+
+#[test]
 fn recommend_accepts_repository_subjects_without_a_second_argument() -> TestResult {
     let f = Fixture::new()?;
     for subject in ["owner/example", "https://github.com/owner/example/"] {
@@ -869,6 +926,28 @@ fn recommend_accepts_repository_subjects_without_a_second_argument() -> TestResu
         assert_eq!(data["canExecute"], false);
         assert_eq!(data["persistentWrites"], false);
     }
+    assert!(!f.file("state").exists());
+    Ok(())
+}
+
+#[test]
+fn setup_without_a_terminal_requires_an_explicit_terminal_session() -> TestResult {
+    let f = Fixture::new()?;
+    let base = f.command();
+    let out = std::process::Command::new(base.get_program())
+        .args(base.get_args().filter(|arg| *arg != "--json"))
+        .args(["recommend", "--setup"])
+        .output()?;
+    assert_code(&out, 3);
+    let stderr = String::from_utf8(out.stderr)?;
+    assert!(stderr.contains("model_setup_terminal_required"), "{stderr}");
+    assert!(stderr.contains("mo recommend --setup"));
+    let preview = std::process::Command::new(base.get_program())
+        .args(base.get_args().filter(|arg| *arg != "--json"))
+        .args(["recommend", "--setup", "--dry-run"])
+        .output()?;
+    assert_code(&preview, 0);
+    assert!(String::from_utf8(preview.stdout)?.contains("local"));
     assert!(!f.file("state").exists());
     Ok(())
 }
@@ -961,6 +1040,37 @@ fn setup_metadata_and_pty_actions_use_only_the_isolated_credential_scope() -> Te
 }
 
 #[test]
+fn explicit_home_works_without_ambient_home_and_ignores_ambient_scope() -> TestResult {
+    let f = Fixture::new()?;
+    let xdg = f.file("ambient-config");
+    for args in [&["dirs", "--roots"][..], &["recommend", "--setup"][..]] {
+        let output = f
+            .roots_command()
+            .env_remove("HOME")
+            .env("XDG_CONFIG_HOME", &xdg)
+            .env("CODEX_HOME", "relative-ambient-codex")
+            .arg("--home")
+            .arg(&f.home)
+            .args(args)
+            .output()?;
+        assert_code(&output, 0);
+        let response: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+        if args[0] == "dirs" {
+            assert_eq!(response["data"]["home"], json!(f.home));
+            assert_eq!(
+                response["data"]["config"],
+                json!(f.home.join(".config/macops"))
+            );
+        } else {
+            assert_eq!(response["data"]["mode"], "local");
+        }
+    }
+    assert!(!xdg.exists());
+    assert!(!f.home.join(".config/macops").exists());
+    Ok(())
+}
+
+#[test]
 fn setup_masked_input_can_cancel_or_reject_isolated_network_before_publishing() -> TestResult {
     let f = Fixture::new()?;
     for (scenario, status) in [
@@ -979,6 +1089,293 @@ fn setup_masked_input_can_cancel_or_reject_isolated_network_before_publishing() 
         assert!(!f.file("state").exists());
         assert!(!f.home.join(".config/macops").exists());
     }
+    Ok(())
+}
+
+#[test]
+fn setup_reports_a_pending_fixed_slot_from_the_real_preferences_entry_point() -> TestResult {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let f = Fixture::new()?;
+    let config = f.home.join(".config/macops");
+    fs::create_dir_all(&config)?;
+    fs::set_permissions(&config, fs::Permissions::from_mode(0o700))?;
+    let profile_file = config.join("recommend-model.json");
+    let pending_file = config.join("recommend-model-pending.json");
+    let first = json!({"schemaVersion":2,"enabled":true,"model":"original",
+        "endpoint":"https://example.test/chat/completions","account":format!("setup-{}", "a".repeat(64))});
+    let mut next = first.clone();
+    next["account"] = json!(format!("setup-{}", "b".repeat(64)));
+    next["model"] = json!("replacement");
+    write_json(&profile_file, &first)?;
+    write_json(
+        &pending_file,
+        &json!({"profile":next,"previous":first,"added":false,"tagged":true}),
+    )?;
+    let original_profile = fs::read(&profile_file)?;
+    let original_pending = fs::read(&pending_file)?;
+    for scenario in [
+        "setup-single-pending-edit",
+        "setup-single-pending-confirm",
+        "setup-single-pending-retain",
+    ] {
+        chezmoi_native::run_browser_pty(
+            &f,
+            &["recommend", "--setup"],
+            scenario,
+            &f.home,
+            "100",
+            "3",
+        )?;
+        assert_eq!(fs::read(&profile_file)?, original_profile);
+        assert_eq!(fs::read(&pending_file)?, original_pending);
+    }
+    fs::remove_file(&pending_file)?;
+    chezmoi_native::run_browser_pty(
+        &f,
+        &["recommend", "--setup"],
+        "setup-single-invalid-model",
+        &f.home,
+        "100",
+        "3",
+    )?;
+    assert_eq!(fs::read(&profile_file)?, original_profile);
+    fs::remove_file(&profile_file)?;
+    let mut first_attempt: serde_json::Value = serde_json::from_slice(&original_pending)?;
+    first_attempt["previous"] = serde_json::Value::Null;
+    write_json(&pending_file, &first_attempt)?;
+    let first_pending = fs::read(&pending_file)?;
+    chezmoi_native::run_browser_pty(
+        &f,
+        &["recommend", "--setup"],
+        "setup-single-pending-confirm",
+        &f.home,
+        "100",
+        "3",
+    )?;
+    assert!(!profile_file.exists());
+    assert_eq!(fs::read(&pending_file)?, first_pending);
+    fs::write(&profile_file, &original_profile)?;
+    fs::remove_file(&pending_file)?;
+    let (out, installed) = f.run(&["app", "install", "demo", "--version", "1.0.0"])?;
+    assert_code(&out, 0);
+    let mut active = installed["data"].clone();
+    active["phase"] = json!("unknown");
+    let state = f.file("state/active.json");
+    write_json(&state, &active)?;
+    let active_before = fs::read(&state)?;
+    chezmoi_native::run_browser_pty(
+        &f,
+        &["recommend", "--setup"],
+        "setup-key-escape",
+        &f.home,
+        "100",
+        "0",
+    )?;
+    assert_eq!(fs::read(&profile_file)?, original_profile);
+    chezmoi_native::run_browser_pty(
+        &f,
+        &["recommend", "--setup"],
+        "setup-pause-saved",
+        &f.home,
+        "100",
+        "0",
+    )?;
+    assert_eq!(fs::read(&state)?, active_before);
+    let saved = serde_json::from_slice::<serde_json::Value>(&fs::read(&profile_file)?)?;
+    assert_eq!(saved["enabled"], false);
+    assert_eq!(saved["account"], first["account"]);
+    let (out, blocked) = f.run(&["app", "refresh", "demo"])?;
+    assert_code(&out, 3);
+    assert_eq!(blocked["error"]["code"], "recovery_required");
+    assert_eq!(fs::read(&state)?, active_before);
+    assert!(!pending_file.exists());
+    Ok(())
+}
+
+#[test]
+fn setup_does_not_resolve_maintenance_state_or_migration() -> TestResult {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let f = Fixture::new()?;
+    fs::write(f.file("state"), "unavailable maintenance path")?;
+    let (out, setup) = f.run(&["recommend", "--setup"])?;
+    assert_code(&out, 0);
+    assert_eq!(setup["data"]["mode"], "local");
+    chezmoi_native::run_browser_pty(
+        &f,
+        &["recommend", "--setup"],
+        "setup-recover-clean",
+        &f.home,
+        "100",
+        "0",
+    )?;
+    assert!(!f.home.join(".config/macops").exists());
+    let invalid_config = f.file("config-file");
+    fs::write(&invalid_config, "not a config directory")?;
+    let (out, invalid) = f.run(&[
+        "--config-dir",
+        invalid_config.to_str().ok_or("invalid config")?,
+        "recommend",
+        "--setup",
+    ])?;
+    assert_code(&out, 1);
+    assert_eq!(invalid["error"]["code"], "root_not_directory");
+
+    let old = f.home.join(".local/state/macops");
+    fs::create_dir_all(&old)?;
+    let redirected = f
+        .roots_command()
+        .env("XDG_STATE_HOME", f.file("new-maintenance-state"))
+        .args(["recommend", "--setup"])
+        .output()?;
+    assert_code(&redirected, 0);
+    let marker = old.join("migration-active.json");
+    fs::write(&marker, "unresolved migration")?;
+    let read_setup = f.roots_command().args(["recommend", "--setup"]).output()?;
+    assert_code(&read_setup, 0);
+    let config = f.home.join(".config/macops");
+    fs::create_dir_all(&config)?;
+    fs::set_permissions(&config, fs::Permissions::from_mode(0o700))?;
+    let profile = config.join("recommend-model.json");
+    write_json(
+        &profile,
+        &json!({"schemaVersion":2,"enabled":true,"model":"fixture",
+        "endpoint":"https://example.test/chat/completions","account":format!("setup-{}", "a".repeat(64))}),
+    )?;
+    fs::remove_file(f.file("state"))?;
+    fs::create_dir(f.file("state"))?;
+    fs::write(
+        f.file("state/migration-active.json"),
+        "unresolved migration",
+    )?;
+    chezmoi_native::run_browser_pty(
+        &f,
+        &["recommend", "--setup"],
+        "setup-pause-saved",
+        &f.home,
+        "100",
+        "0",
+    )?;
+    let saved: serde_json::Value = serde_json::from_slice(&fs::read(profile)?)?;
+    assert_eq!(saved["enabled"], false);
+    assert_eq!(
+        fs::read_to_string(f.file("state/migration-active.json"))?,
+        "unresolved migration"
+    );
+    let maintenance = f.roots_command().arg("history").output()?;
+    assert_code(&maintenance, 3);
+    assert_eq!(fs::read_to_string(marker)?, "unresolved migration");
+    assert!(!f.file("new-maintenance-state").exists());
+    Ok(())
+}
+
+#[test]
+fn setup_resolves_its_explicit_xdg_and_default_configuration_paths() -> TestResult {
+    let f = Fixture::new()?;
+    let xdg = f.file("xdg-config");
+    let home_default = f.home.join(".config/macops");
+    for (directory, model) in [
+        (&xdg.join("macops"), "xdg-model"),
+        (&home_default, "default-model"),
+    ] {
+        fs::create_dir_all(directory)?;
+        write_json(
+            &directory.join("recommend-model.json"),
+            &json!({"schemaVersion":2,"enabled":true,
+            "endpoint":"https://example.test/chat/completions","model":model,"account":format!("setup-{}", "a".repeat(64))}),
+        )?;
+    }
+    for (variable, explicit, model) in [
+        (xdg.as_path(), None, "xdg-model"),
+        (xdg.as_path(), Some(home_default.as_path()), "default-model"),
+        (
+            std::path::Path::new("relative/ignored"),
+            None,
+            "default-model",
+        ),
+    ] {
+        let mut run = f.roots_command();
+        run.env("XDG_CONFIG_HOME", variable);
+        if let Some(config) = explicit {
+            run.arg("--config-dir").arg(config);
+        }
+        let out = run.args(["recommend", "--setup"]).output()?;
+        assert_code(&out, 0);
+        let reply: serde_json::Value = serde_json::from_slice(&out.stdout)?;
+        assert_eq!(reply["data"]["model"], model);
+        assert_eq!(
+            reply["warnings"].as_array().ok_or("warnings")?.is_empty(),
+            variable.is_absolute()
+        );
+    }
+    let bad_base = f
+        .roots_command()
+        .env("XDG_CONFIG_HOME", "/Users/example/job/config")
+        .args(["recommend", "--setup"])
+        .output()?;
+    assert_code(&bad_base, 1);
+    let envelope: serde_json::Value = serde_json::from_slice(&bad_base.stdout)?;
+    assert_eq!(envelope["error"]["code"], "invalid_scope_path");
+    let bad_home = f
+        .roots_command()
+        .args(["--home", "relative-home", "recommend", "--setup"])
+        .output()?;
+    assert_code(&bad_home, 1);
+    let envelope: serde_json::Value = serde_json::from_slice(&bad_home.stdout)?;
+    assert_eq!(envelope["error"]["code"], "absolute_path_required");
+    let missing_home = f
+        .roots_command()
+        .env_remove("HOME")
+        .args(["recommend", "--setup"])
+        .output()?;
+    assert_code(&missing_home, 1);
+    let envelope: serde_json::Value = serde_json::from_slice(&missing_home.stdout)?;
+    assert_eq!(envelope["error"]["code"], "home_missing");
+    let ambiguous_config = f
+        .roots_command()
+        .arg("--config-dir")
+        .arg(f.home.join("../other-config"))
+        .args(["recommend", "--setup"])
+        .output()?;
+    assert_code(&ambiguous_config, 1);
+    let envelope: serde_json::Value = serde_json::from_slice(&ambiguous_config.stdout)?;
+    assert_eq!(envelope["error"]["code"], "parent_path_forbidden");
+    assert!(!f.home.join(".local/state/macops").exists());
+    assert!(!home_default.join("recommend-model.lock").exists());
+    Ok(())
+}
+
+#[test]
+fn setup_write_lock_is_shared_by_config_roots_across_processes() -> TestResult {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let f = Fixture::new()?;
+    let config = f.file("alternate-config");
+    fs::create_dir(&config)?;
+    fs::set_permissions(&config, fs::Permissions::from_mode(0o700))?;
+    let profile = config.join("recommend-model.json");
+    write_json(
+        &profile,
+        &json!({"schemaVersion":2,"enabled":true,"model":"fixture",
+        "endpoint":"https://example.test/chat/completions","account":format!("setup-{}", "a".repeat(64))}),
+    )?;
+    let before = fs::read(&profile)?;
+    let lease = f.home.join(".config/macops/recommend-model.lock");
+    fs::create_dir_all(&lease)?;
+    fs::set_permissions(&lease, fs::Permissions::from_mode(0o700))?;
+    let args = [
+        "--config-dir",
+        config.to_str().ok_or("config path")?,
+        "recommend",
+        "--setup",
+    ];
+    chezmoi_native::run_browser_pty(&f, &args, "setup-write-busy", &lease, "100", "3")?;
+    assert_eq!(fs::read(&profile)?, before);
+    chezmoi_native::run_browser_pty(&f, &args, "setup-pause-saved", &f.home, "100", "0")?;
+    let after: serde_json::Value = serde_json::from_slice(&fs::read(&profile)?)?;
+    assert_eq!(after["enabled"], false);
+    assert!(!f.file("state").exists());
     Ok(())
 }
 
@@ -5528,6 +5925,33 @@ fn recommend_reads_explicit_evidence_without_native_calls_or_state_writes() -> T
 }
 
 #[test]
+fn explicit_legacy_model_account_is_validated_before_a_preview() -> TestResult {
+    let f = Fixture::new()?;
+    let (out, invalid) = f.run(&[
+        "recommend",
+        "jq",
+        "--dry-run",
+        "--model",
+        "--keychain-account",
+        "invalid/fixture",
+    ])?;
+    assert_code(&out, 1);
+    assert_eq!(invalid["error"]["code"], "recommend_model_account_invalid");
+    let (out, valid) = f.run(&[
+        "recommend",
+        "jq",
+        "--dry-run",
+        "--model",
+        "--keychain-account",
+        "synthetic",
+    ])?;
+    assert_code(&out, 0);
+    assert_eq!(valid["data"]["model"]["status"], "dry-run");
+    assert!(!f.file("state").exists());
+    Ok(())
+}
+
+#[test]
 fn recommend_previews_public_and_remote_evidence_without_a_model_or_network_request() -> TestResult
 {
     let f = Fixture::new()?;
@@ -6106,6 +6530,48 @@ fn operation_history_browses_newest_pending_record_without_mutating_state() -> T
 }
 
 #[test]
+fn operation_history_remains_readable_when_the_active_record_is_damaged() -> TestResult {
+    let f = Fixture::new()?;
+    let (out, result) = f.run(&["app", "install", "demo", "--version", "1.0.0", "--yes"])?;
+    assert_code(&out, 0);
+    let mut pending = result["data"].clone();
+    pending["id"] = json!("OP-fixture-unreadable-active");
+    pending["phase"] = json!("unknown");
+    pending["started_at"] = json!(pending["started_at"].as_u64().ok_or("started")? + 1);
+    write_json(
+        &f.file("state/operations/OP-fixture-unreadable-active.json"),
+        &pending,
+    )?;
+    let active = f.file("state/active.json");
+    fs::write(&active, b"{")?;
+    let receipts = fs::read(f.file("state/receipts.json"))?;
+    let calls = fs::read(f.file("calls"))?;
+    let (out, response) = f.run(&["history"])?;
+    assert_code(&out, 0);
+    assert!(
+        response["data"]
+            .as_array()
+            .ok_or("history rows")?
+            .contains(&pending)
+    );
+    let (out, response) = f.run(&["recover"])?;
+    assert_code(&out, 1);
+    assert_eq!(response["error"]["code"], "invalid_json");
+    chezmoi_native::run_browser_pty(
+        &f,
+        &["history"],
+        "history-active-unreadable",
+        &active,
+        "110",
+        "3",
+    )?;
+    assert_eq!(fs::read(active)?, b"{");
+    assert_eq!(fs::read(f.file("state/receipts.json"))?, receipts);
+    assert_eq!(fs::read(f.file("calls"))?, calls);
+    Ok(())
+}
+
+#[test]
 fn codex_launch_json_and_unknown_profiles_never_dispatch() -> TestResult {
     let f = Fixture::new()?;
     let (result, value) = f.run(&["agent", "launch", "codex:default"])?;
@@ -6161,6 +6627,21 @@ fn history_recovery_requires_confirmation_of_the_same_original_record() -> TestR
         changed["message"],
         "operation progress changed during confirmation"
     );
+    chezmoi_native::run_browser_pty(
+        &f,
+        &["history"],
+        "history-recover-migration",
+        &active,
+        "96",
+        "0",
+    )?;
+    assert_eq!(f.read_json("state/active.json")?, changed);
+    assert_eq!(fs::read(&history)?, frozen_record);
+    assert_eq!(fs::read(f.file("calls"))?, calls);
+    assert_eq!(fs::read(f.file("state/receipts.json"))?, receipts);
+    let migration = f.file("state/migration-active.json");
+    assert_eq!(fs::read_to_string(&migration)?, "interrupted migration");
+    fs::remove_file(migration)?;
     chezmoi_native::run_browser_pty(
         &f,
         &["history"],

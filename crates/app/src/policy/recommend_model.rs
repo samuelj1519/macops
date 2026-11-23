@@ -55,14 +55,21 @@ pub fn api_token(raw: &[u8]) -> Result<&str> {
 }
 
 pub fn request(findings: &super::recommend::Analysis) -> String {
+    request_for(findings, MODEL, true)
+}
+
+pub(crate) fn request_for(
+    findings: &super::recommend::Analysis,
+    model: &str,
+    deepseek: bool,
+) -> String {
     let candidates = findings.findings.iter().enumerate().map(|(index, finding)| {
         json!({"candidate":index,"facts":finding.candidate,"evidence":finding.evidence_urls})
     }).collect::<Vec<_>>();
     let facts = Value::Array(candidates).to_string();
-    let body = json!({
-        "model":MODEL,
+    let mut body = json!({
+        "model":model,
         "stream":false,
-        "thinking":{"type":"disabled"},
         "max_tokens":500,
         "response_format":{"type":"json_object"},
         "messages":[
@@ -70,6 +77,9 @@ pub fn request(findings: &super::recommend::Analysis) -> String {
             {"role":"user","content":facts}
         ]
     });
+    if deepseek {
+        body["thinking"] = json!({"type":"disabled"});
+    }
     body.to_string()
 }
 

@@ -108,20 +108,43 @@ fn resolve_scoped(ctx: &context::Context, noun: &str, key: &str) -> error::Resul
     }
 }
 
-fn run(cli: &cli::Cli, warnings: &mut Vec<String>) -> error::Result<Value> {
+enum CommandOutput {
+    Data(Value),
+    Browser(browser::Output),
+}
+
+fn run(cli: &cli::Cli, warnings: &mut Vec<String>) -> error::Result<CommandOutput> {
     if let Some(value) = run_worker(&cli.command)? {
-        return Ok(value);
+        return Ok(CommandOutput::Data(value));
     }
     let chezmoi_requested = cli.chezmoi_source.is_some()
         || cli.chezmoi_destination.is_some()
         || cli.chezmoi_config.is_some();
     policy::cli::config_scope(&cli.command, chezmoi_requested)?;
     validate_project_scope(&cli.command)?;
-    let ctx = context::Context::from_cli(cli, warnings)?;
-    if let Some(result) = migration_command(cli, &ctx)? {
-        return Ok(result);
+    if matches!(cli.command, cli::Command::Recommend { setup: true, .. }) {
+        let setup = context::RecommendSetupContext::from_cli(cli, warnings)?;
+        return recommend_setup::run(&setup, cli.json, cli.dry_run).map(CommandOutput::Data);
     }
-    if let Some(value) = run_scoped_entry(cli, &ctx, chezmoi_requested)? {
+    let ctx = context::Context::from_cli(cli, warnings)?;
+    if let cli::Command::Migrate { command } = &cli.command {
+        return migration::run(&ctx, command, cli.dry_run, cli.yes).map(CommandOutput::Data);
+    }
+    if migration_tx::pending(&ctx)? {
+        return Err(migration_tx::recovery_required(&ctx));
+    }
+    if let Some(output) = browser::run(cli, &ctx)? {
+        return Ok(CommandOutput::Browser(output));
+    }
+    run_scoped(cli, &ctx, chezmoi_requested).map(CommandOutput::Data)
+}
+
+fn run_scoped(
+    cli: &cli::Cli,
+    ctx: &context::Context,
+    chezmoi_requested: bool,
+) -> error::Result<Value> {
+    if let Some(value) = run_scoped_entry(cli, ctx, chezmoi_requested)? {
         return Ok(value);
     }
     if matches!(cli.command, cli::Command::Dirs { roots: true, .. }) {
@@ -129,25 +152,25 @@ fn run(cli: &cli::Cli, warnings: &mut Vec<String>) -> error::Result<Value> {
             json!({"home":ctx.home,"config":ctx.config,"data":ctx.data,"state":ctx.state,"cache":ctx.cache,"catalog":ctx.catalog,"settings":ctx.settings}),
         );
     }
-    if let Some(value) = run_recovery(cli, &ctx)? {
+    if let Some(value) = run_recovery(cli, ctx)? {
         return Ok(value);
     }
     if let cli::Command::History { query } = &cli.command {
         return Ok(json!(
-            store::history(&ctx)?
+            store::history(ctx)?
                 .into_iter()
                 .filter(|j| query.as_ref().is_none_or(|id| j.plan.package.id == *id))
                 .collect::<Vec<_>>()
         ));
     }
     if let cli::Command::Search { query } = &cli.command {
-        return run_search(&ctx, query);
+        return run_search(ctx, query);
     }
-    if let Some(value) = run_pipeline(cli, &ctx)? {
+    if let Some(value) = run_pipeline(cli, ctx)? {
         return Ok(value);
     }
-    let catalog = inventory::load(&ctx)?;
-    catalog_query(cli, &ctx, &catalog, chezmoi_requested)
+    let catalog = inventory::load(ctx)?;
+    catalog_query(cli, ctx, &catalog, chezmoi_requested)
 }
 
 fn validate_project_scope(command: &cli::Command) -> error::Result<()> {
@@ -312,9 +335,6 @@ fn run_scoped_entry(
         return Ok(Some(value));
     }
     match &cli.command {
-        cli::Command::Recommend { setup: true, .. } => {
-            recommend_setup::run(ctx, cli.json, cli.dry_run).map(Some)
-        }
         cli::Command::Recommend {
             product,
             evidence,
@@ -452,19 +472,6 @@ fn run_recommend(
     } else {
         Ok(Some(data))
     }
-}
-
-fn migration_command(cli: &cli::Cli, ctx: &context::Context) -> error::Result<Option<Value>> {
-    if let cli::Command::Migrate { command } = &cli.command {
-        return migration::run(ctx, command, cli.dry_run, cli.yes).map(Some);
-    }
-    if migration_tx::pending(ctx)? {
-        return Err(error::Error::attention(
-            "migration_recovery_required",
-            "迁移尚未收口；先执行 migrate recover",
-        ));
-    }
-    Ok(None)
 }
 
 fn run_recovery(cli: &cli::Cli, ctx: &context::Context) -> error::Result<Option<Value>> {
@@ -1221,9 +1228,6 @@ fn dispatch(cli: &cli::Cli) -> ExitCode {
             ExitCode::SUCCESS
         };
     }
-    if let Some(result) = browser::entry(cli) {
-        return result;
-    }
     let mut warnings = vec![];
     let result = run(cli, &mut warnings);
     if !cli.json {
@@ -1232,7 +1236,15 @@ fn dispatch(cli: &cli::Cli) -> ExitCode {
         }
     }
     match result {
-        Ok(data) => {
+        Ok(CommandOutput::Browser(browser::Output { text, incomplete })) => {
+            if let Some(text) = text
+                && std::io::stdout().lock().write_all(text.as_bytes()).is_err()
+            {
+                return ExitCode::FAILURE;
+            }
+            ExitCode::from(if incomplete { 3 } else { 0 })
+        }
+        Ok(CommandOutput::Data(data)) => {
             let code = if attention(&cli.command, &data) { 3 } else { 0 };
             if recommend::interactive(cli) || browser::interactive_marketplaces(cli) {
                 return ExitCode::from(code);

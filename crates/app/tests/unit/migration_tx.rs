@@ -823,6 +823,7 @@ fn public_recover_accepts_v2_retained_entries_without_replaying_the_migration() 
             .ok_or("pending verify")?;
         assert_eq!(error.code, "migration_recovery_required");
         assert!(error.message.contains(&id));
+        assert!(error.message.contains(&format!("mo migrate recover {id}")));
         let error = crate::migration::run(&ctx, &Migrate::Run, false, true)
             .err()
             .ok_or("pending run")?;

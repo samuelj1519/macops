@@ -487,12 +487,7 @@ impl Store {
         self.check_migration_pending()?;
         if let Some(journal) = Self::read::<Journal>(&self.root, "active.json")? {
             validate_journal(&journal)?;
-            if crate::policy::state::pending(journal.phase) {
-                return Err(Error::attention(
-                    "recovery_required",
-                    format!("操作 {} 未收口；先执行 recover，不会重跑安装器", journal.id),
-                ));
-            }
+            require_settled(&journal)?;
         }
         self.verify_namespace()
     }
@@ -503,7 +498,7 @@ impl Store {
                 Ok(_) => {
                     return Err(Error::attention(
                         "migration_recovery_required",
-                        "一次性迁移尚未收口；先执行 migrate recover",
+                        "检测到未完成的迁移，请核对原迁移记录后再试",
                     ));
                 }
                 Err(rustix::io::Errno::NOENT) => (),
@@ -512,6 +507,23 @@ impl Store {
         }
         Ok(())
     }
+}
+
+fn require_settled(journal: &Journal) -> Result<()> {
+    if crate::policy::state::pending(journal.phase) {
+        return Err(Error::attention(
+            "recovery_required",
+            format!(
+                "操作 {id} 尚待核对。运行 mo recover {id} 核对原操作。",
+                id = journal.id
+            ),
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn check_active_pending(ctx: &Context) -> Result<()> {
+    active(ctx)?.as_ref().map_or(Ok(()), require_settled)
 }
 
 pub(crate) fn active(ctx: &Context) -> Result<Option<Journal>> {

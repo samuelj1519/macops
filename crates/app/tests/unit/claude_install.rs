@@ -344,18 +344,102 @@ fn recovery_inventory_lists_only_the_latest_unpublished_claude_stage() -> TestRe
     assert!(!incomplete);
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].id, installed.id);
+    let preview = crate::operations::RecoveryPreview::read(&ctx, &installed.id)?;
+    assert_eq!(
+        crate::operations::RecoveryPreview::read(&ctx, input.step.prior().ok_or("prior stage")?)
+            .err()
+            .ok_or("superseded stage remained recoverable")?
+            .code,
+        "operation_finished"
+    );
+    let (_, history) = crate::browser::Session::load(&ctx, crate::browser::Kind::History)?;
+    let item = history
+        .items
+        .iter()
+        .find(|item| item.id == installed.id)
+        .ok_or("missing history item")?;
+    assert!(item.summary.contains("待核对后续步骤"), "{}", item.summary);
+    assert!(
+        item.details
+            .iter()
+            .any(|text| text.contains(&format!("mo recover {}", installed.id)))
+    );
     assert_eq!(fs::read(ctx.state.join("active.json"))?, original);
     assert_eq!(fs::read(ctx.home.join("native-calls"))?, calls);
     assert!(store.receipts()?.installations.is_empty());
 
     publish(&ctx, &store, &installed, &input, &FIXTURE)?;
     assert!(crate::operations::pending_recovery(&ctx)?.0.is_empty());
+    drop(store);
+    assert_eq!(
+        preview
+            .confirm(&ctx)
+            .err()
+            .ok_or("published stage accepted stale preview")?
+            .code,
+        "operation_finished"
+    );
     let receipt_before = fs::read(ctx.state.join("receipts.json"))?;
     fs::remove_file(ctx.state.join(sidecar(&installed, "plan")))?;
     let (_, incomplete) = crate::operations::pending_recovery(&ctx)?;
     assert!(incomplete);
     assert_eq!(fs::read(ctx.state.join("receipts.json"))?, receipt_before);
     assert_eq!(fs::read(ctx.home.join("native-calls"))?, calls);
+    Ok(())
+}
+
+#[test]
+fn history_recovery_refuses_an_older_claude_stage_if_followup_evidence_is_lost() -> TestResult {
+    let (_temp, ctx, offer, binary) = fixture()?;
+    let store = Store::lock(&ctx)?;
+    let prepared = prepare(&ctx, &store, offer, binary, true, &FIXTURE)?;
+    let market = stage(
+        &ctx,
+        &store,
+        &Frozen {
+            prepared: prepared.clone(),
+            step: Step::Market,
+        },
+        &FIXTURE,
+    )?;
+    let preview = crate::operations::RecoveryPreview::read(&ctx, &market.id)?;
+    let plugin = stage(
+        &ctx,
+        &store,
+        &Frozen {
+            prepared,
+            step: Step::Plugin {
+                market: market.id.clone(),
+            },
+        },
+        &FIXTURE,
+    )?;
+    let calls = fs::read(ctx.home.join("native-calls"))?;
+    let active = fs::read(ctx.state.join("active.json"))?;
+    fs::remove_file(ctx.state.join(sidecar(&plugin, "plan")))?;
+    let (candidates, incomplete) = crate::operations::pending_recovery(&ctx)?;
+    assert!(incomplete);
+    assert!(candidates.iter().any(|journal| journal.id == market.id));
+    let (_, view) = crate::browser::Session::load(&ctx, crate::browser::Kind::History)?;
+    let older = view
+        .items
+        .iter()
+        .find(|item| item.id == market.id)
+        .ok_or("missing market")?;
+    assert!(older.summary.contains("登记状态待查"));
+    assert!(!older.details.iter().any(|text| text.contains("mo recover")));
+    drop(store);
+    assert_eq!(
+        preview
+            .confirm(&ctx)
+            .err()
+            .ok_or("unverified preview accepted")?
+            .code,
+        "recovery_evidence_incomplete"
+    );
+    assert_eq!(fs::read(ctx.home.join("native-calls"))?, calls);
+    assert_eq!(fs::read(ctx.state.join("active.json"))?, active);
+    assert!(!ctx.state.join("receipts.json").exists());
     Ok(())
 }
 

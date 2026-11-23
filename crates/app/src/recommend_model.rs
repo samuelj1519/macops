@@ -39,22 +39,51 @@ impl Failure {
     }
 }
 
-pub fn annotate(ctx: &Context, analysis: &PublicAnalysis, account: &str) -> Value {
+pub fn annotate(ctx: &Context, analysis: &PublicAnalysis, account: Option<&str>) -> Value {
     if !cfg!(target_os = "macos") || ctx.isolated {
         return json!({"status":"keychain-unavailable"});
     }
+    let deadline = Instant::now() + Duration::from_secs(ctx.timeout_secs.min(15));
+    let curl = Path::new("/usr/bin/curl");
+    if account.is_none() {
+        match crate::recommend_setup::read(&ctx.config) {
+            Ok(Some(profile)) if profile.enabled => {
+                let clients = Clients {
+                    credentials: &|_, _, time| {
+                        keychain::load_quiet_until(&profile, &ctx.config, time)
+                            .map_err(keychain_failure)
+                    },
+                    curl,
+                };
+                return annotation(
+                    compare_configured(&clients, &profile, &ctx.config, analysis.facts(), deadline),
+                    &profile.model,
+                );
+            }
+            Ok(Some(_)) => return json!({"status":"local-only"}),
+            Err(_) => return json!({"status":"profile-unavailable"}),
+            Ok(None) => (),
+        }
+    }
     let clients = Clients {
         credentials: &native_legacy_credentials,
-        curl: Path::new("/usr/bin/curl"),
+        curl,
     };
-    let deadline = Instant::now() + Duration::from_secs(ctx.timeout_secs.min(15));
-    annotation(compare(&clients, analysis.facts(), account, deadline))
+    annotation(
+        compare(
+            &clients,
+            analysis.facts(),
+            account.unwrap_or("default"),
+            deadline,
+        ),
+        policy::MODEL,
+    )
 }
 
-fn annotation(result: Result<Notes, Failure>) -> Value {
+fn annotation(result: Result<Notes, Failure>, model: &str) -> Value {
     match result {
-        Ok(result) => json!({"status":"annotated","model":policy::MODEL,"result":result}),
-        Err(error) => json!({"status":error.label(),"model":policy::MODEL}),
+        Ok(result) => json!({"status":"annotated","model":model,"result":result}),
+        Err(error) => json!({"status":error.label(),"model":model}),
     }
 }
 
@@ -73,9 +102,49 @@ fn compare(
 ) -> Result<Notes, Failure> {
     let account = policy::account(account).map_err(|_| Failure::Keychain)?;
     let bytes = (clients.credentials)(policy::KEYCHAIN_SERVICE, account, deadline)?;
-    let token = policy::api_token(&bytes).map_err(|_| Failure::Keychain)?;
-    let body = policy::request(analysis);
-    let output = send(clients.curl, policy::ENDPOINT, token, &body, deadline)?;
+    send_annotation(
+        clients.curl,
+        analysis,
+        policy::ENDPOINT,
+        &bytes,
+        &policy::request(analysis),
+        deadline,
+    )
+}
+
+fn compare_configured(
+    clients: &Clients<'_>,
+    profile: &crate::recommend_setup::Profile,
+    config: &Path,
+    analysis: &Analysis,
+    deadline: Instant,
+) -> Result<Notes, Failure> {
+    let bytes = (clients.credentials)(&profile.service(config), profile.account(), deadline)?;
+    let body = policy::request_for(
+        analysis,
+        &profile.model,
+        profile.endpoint == policy::ENDPOINT,
+    );
+    send_annotation(
+        clients.curl,
+        analysis,
+        &profile.endpoint,
+        &bytes,
+        &body,
+        deadline,
+    )
+}
+
+fn send_annotation(
+    curl: &Path,
+    analysis: &Analysis,
+    endpoint: &str,
+    bytes: &[u8],
+    body: &str,
+    deadline: Instant,
+) -> Result<Notes, Failure> {
+    let token = policy::api_token(bytes).map_err(|_| Failure::Keychain)?;
+    let output = send(curl, endpoint, token, body, deadline)?;
     parse_annotation(&output, token, analysis.findings.len())
 }
 
@@ -225,7 +294,7 @@ pub(crate) fn suggest(
     }
     let deadline = Instant::now() + Duration::from_secs(ctx.timeout_secs.min(15));
     let lookup = |_: &str, _: &str, deadline| {
-        keychain::load_until(profile, &ctx.config, deadline).map_err(keychain_failure)
+        keychain::load_quiet_until(profile, &ctx.config, deadline).map_err(keychain_failure)
     };
     let clients = Clients {
         credentials: &lookup,

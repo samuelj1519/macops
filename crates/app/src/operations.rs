@@ -8,6 +8,7 @@ use crate::{
 };
 use serde_json::{Value, json};
 use std::{
+    collections::BTreeSet,
     io::{IsTerminal, Read, Seek, SeekFrom, Write},
     os::unix::process::CommandExt,
     path::Path,
@@ -492,42 +493,133 @@ impl RecoveryPreview {
     }
 }
 
-pub(crate) fn pending_recovery(ctx: &Context) -> Result<(Vec<Journal>, bool)> {
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RecoveryState {
+    Pending,
+    CodexPublication,
+    ClaudeFollowup,
+    Settled,
+    Unverified,
+}
+
+impl RecoveryState {
+    pub(crate) fn can_confirm(self) -> bool {
+        matches!(
+            self,
+            Self::Pending | Self::CodexPublication | Self::ClaudeFollowup
+        )
+    }
+}
+
+#[derive(Default)]
+struct ClaudeFollowups {
+    candidates: BTreeSet<String>,
+    incomplete: bool,
+}
+
+impl ClaudeFollowups {
+    fn read(ctx: &Context, records: &[Journal]) -> Self {
+        let (candidates, incomplete) = crate::claude_install::awaiting_followup(ctx, records)
+            .unwrap_or_else(|_| (BTreeSet::new(), true));
+        Self {
+            candidates,
+            incomplete,
+        }
+    }
+}
+
+fn recovery_records(ctx: &Context) -> Result<Vec<Journal>> {
     let mut records = store::history(ctx)?;
-    if let Some(active) = store::active(ctx)? {
+    merge_active(&mut records, store::active(ctx)?);
+    Ok(records)
+}
+
+fn merge_active(records: &mut Vec<Journal>, active: Option<Journal>) {
+    if let Some(active) = active {
         records.retain(|record| record.id != active.id);
         records.push(active);
         records.sort_by(|left, right| left.id.cmp(&right.id));
     }
-    let (claude, mut incomplete) = crate::claude_install::awaiting_followup(ctx, &records)
-        .unwrap_or_else(|_| (std::collections::BTreeSet::new(), true));
+}
+
+fn succeeded_claude_stage(journal: &Journal) -> bool {
+    journal.phase == Phase::Succeeded && crate::claude_install::is_install(journal)
+}
+
+fn recovery_state(ctx: &Context, journal: &Journal, claude: &ClaudeFollowups) -> RecoveryState {
+    if crate::policy::state::pending(journal.phase) {
+        return RecoveryState::Pending;
+    }
+    if succeeded_claude_stage(journal) {
+        return if claude.incomplete {
+            RecoveryState::Unverified
+        } else if claude.candidates.contains(&journal.id) {
+            RecoveryState::ClaudeFollowup
+        } else {
+            RecoveryState::Settled
+        };
+    }
+    match crate::codex_install::awaiting_publication(ctx, journal) {
+        Ok(true) => RecoveryState::CodexPublication,
+        Ok(false) => RecoveryState::Settled,
+        Err(_) => RecoveryState::Unverified,
+    }
+}
+
+pub(crate) fn recovery_history(ctx: &Context) -> Result<(Vec<(Journal, RecoveryState)>, bool)> {
+    let mut records = store::history(ctx)?;
+    let active = store::active(ctx);
+    let active_unreadable = active.is_err();
+    merge_active(&mut records, active.unwrap_or_default());
+    let claude = ClaudeFollowups::read(ctx, &records);
+    let rows = records
+        .into_iter()
+        .map(|journal| {
+            let state = recovery_state(ctx, &journal, &claude);
+            let state = if active_unreadable && state.can_confirm() {
+                RecoveryState::Unverified
+            } else {
+                state
+            };
+            (journal, state)
+        })
+        .collect();
+    Ok((rows, active_unreadable))
+}
+
+pub(crate) fn pending_recovery(ctx: &Context) -> Result<(Vec<Journal>, bool)> {
+    let mut records = recovery_records(ctx)?;
+    let claude = ClaudeFollowups::read(ctx, &records);
+    let mut incomplete = claude.incomplete;
     records.retain(|journal| {
-        if claude.contains(&journal.id) {
+        if claude.candidates.contains(&journal.id) {
             return true;
         }
-        if let Ok(pending) = recoverable(ctx, journal) {
-            pending
-        } else {
-            incomplete = true;
-            false
-        }
+        let state = recovery_state(ctx, journal, &claude);
+        incomplete |= state == RecoveryState::Unverified;
+        state.can_confirm()
     });
     Ok((records, incomplete))
 }
 
-fn recoverable(ctx: &Context, journal: &Journal) -> Result<bool> {
-    Ok(crate::policy::state::pending(journal.phase)
-        || crate::codex_install::awaiting_publication(ctx, journal)?)
-}
-
 fn require_recoverable_from_history(ctx: &Context, journal: &Journal) -> Result<()> {
-    if recoverable(ctx, journal)? {
-        Ok(())
+    let claude = if succeeded_claude_stage(journal) {
+        ClaudeFollowups::read(ctx, &recovery_records(ctx)?)
     } else {
-        Err(Error::attention(
+        ClaudeFollowups::default()
+    };
+    match recovery_state(ctx, journal, &claude) {
+        RecoveryState::Unverified => Err(Error::attention(
+            "recovery_evidence_incomplete",
+            "缺少原操作或后续阶段的证据，请刷新清单并核对记录",
+        )),
+        RecoveryState::Settled => Err(Error::attention(
             "operation_finished",
             "此操作已结束，请刷新清单",
-        ))
+        )),
+        RecoveryState::Pending
+        | RecoveryState::CodexPublication
+        | RecoveryState::ClaudeFollowup => Ok(()),
     }
 }
 

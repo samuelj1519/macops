@@ -766,14 +766,15 @@ pub fn pending_in(state: &Path) -> Result<bool> {
 }
 
 pub fn recovery_required(ctx: &Context) -> Error {
-    let id = pending_id(ctx).unwrap_or_else(|| "unknown".into());
-    Error::attention(
-        "migration_recovery_required",
-        format!("迁移 {id} 尚未收口；先执行 migrate recover {id} 核验原操作"),
-    )
+    let message = if let Some(id) = pending_id(ctx) {
+        format!("迁移 {id} 尚待核对。运行 mo migrate recover {id} 核对原迁移。")
+    } else {
+        "迁移尚待核对，但无法识别迁移编号。请检查原状态目录中的迁移记录。".into()
+    };
+    Error::attention("migration_recovery_required", message)
 }
 
-pub fn pending_id(ctx: &Context) -> Option<String> {
+fn pending_id(ctx: &Context) -> Option<String> {
     let (bytes, _) = fs::snapshot(&ctx.state.join(ACTIVE)).ok().flatten()?;
     let value = crate::policy::json::parse(&bytes).ok()?;
     let crate::policy::json::Object(record) =

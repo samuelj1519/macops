@@ -498,7 +498,7 @@ fn public_model_status_reports_only_redacted_outcomes_without_host_authenticatio
         "model": "fixture", "account": "fixture-account"
     }))?;
     assert_eq!(
-        annotate(&ctx, &brief()?, "synthetic")["status"],
+        annotate(&ctx, &brief()?, Some("synthetic"))["status"],
         "keychain-unavailable"
     );
     assert_eq!(
@@ -511,10 +511,13 @@ fn public_model_status_reports_only_redacted_outcomes_without_host_authenticatio
         "local-only"
     );
     assert_eq!(
-        annotation(Ok(Notes { notes: vec![] }))["status"],
+        annotation(Ok(Notes { notes: vec![] }), policy::MODEL)["status"],
         "annotated"
     );
-    assert_eq!(annotation(Err(Failure::Deadline))["status"], "deadline");
+    assert_eq!(
+        annotation(Err(Failure::Deadline), policy::MODEL)["status"],
+        "deadline"
+    );
     assert_eq!(suggestion(Ok(vec![]))["status"], "suggested");
     assert_eq!(
         suggestion(Err(Failure::Keychain))["status"],
@@ -559,7 +562,10 @@ fn exhausted_public_model_budget_exits_before_any_native_or_remote_read() -> Tes
         "schemaVersion": 1, "enabled": true, "endpoint": "https://example.test/chat/completions",
         "model": "fixture", "account": "fixture-account"
     }))?;
-    assert_eq!(annotate(&ctx, &brief()?, "synthetic")["status"], "deadline");
+    assert_eq!(
+        annotate(&ctx, &brief()?, Some("synthetic"))["status"],
+        "deadline"
+    );
     assert_eq!(
         suggest(&ctx, &profile, "fixture/repo", &[])["status"],
         "local-only"
@@ -573,5 +579,142 @@ fn exhausted_public_model_budget_exits_before_any_native_or_remote_read() -> Tes
         )["status"],
         "deadline"
     );
+    Ok(())
+}
+
+#[test]
+fn explicit_model_request_uses_the_same_fixed_key_and_configured_endpoint() -> TestResult {
+    let temp = tempfile::tempdir_in("/private/tmp")?;
+    let profile = serde_json::from_value::<crate::recommend_setup::Profile>(json!({
+        "schemaVersion":2,"enabled":true,"endpoint":"https://models.example.test/v1/chat/completions",
+        "model":"selected-model","account":"setup-test"
+    }))?;
+    let curl = script(
+        temp.path(),
+        "annotation",
+        r#"
+IFS= read -r header
+[ "$header" = 'Authorization: Bearer synthetic-token-do-not-log' ]
+found=
+last=
+for arg; do
+  case "$arg" in *'"model":"selected-model"'*) found=yes ;; esac
+  case "$arg" in *synthetic-token-do-not-log*|*'"thinking"'*) exit 7 ;; esac
+  last=$arg
+done
+[ "$found" = yes ] && [ "$last" = 'https://models.example.test/v1/chat/completions' ]
+printf '%s\n200' '{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"{\"notes\":[{\"candidate\":0,\"summary\":\"fixture\"}]}"}}]}'
+"#,
+    )?;
+    let clients = Clients {
+        credentials: &|service, account, _| {
+            assert_eq!(service, "org.macops.recommend.api-key");
+            assert_eq!(account, "default");
+            Ok(FIXTURE_TOKEN.as_bytes().to_vec())
+        },
+        curl: &curl,
+    };
+    let result = compare_configured(
+        &clients,
+        &profile,
+        temp.path(),
+        brief()?.facts(),
+        Instant::now() + Duration::from_secs(4),
+    )
+    .map_err(Failure::label)?;
+    assert_eq!(result.notes[0].summary, "fixture");
+    Ok(())
+}
+
+#[test]
+fn default_explicit_model_respects_paused_or_unreadable_settings() -> TestResult {
+    use clap::Parser as _;
+
+    let dir = tempfile::tempdir_in("/private/tmp")?;
+    let cli = crate::cli::Cli::try_parse_from([
+        "mo",
+        "--home",
+        dir.path().to_str().ok_or("home")?,
+        "recommend",
+        "--setup",
+    ])?;
+    let mut ctx = Context::from_cli(&cli, &mut vec![])?;
+    ctx.isolated = false;
+    ctx.timeout_secs = 0;
+    let path = ctx.config.join("recommend-model.json");
+    let analysis = brief()?;
+    let mut configured = json!({"schemaVersion":2, "enabled":false,
+        "endpoint":"https://example.test/chat/completions","model":"fixture-model",
+        "account":format!("setup-{}", "a".repeat(64))});
+    crate::native_skills_files::write_cas(&path, None, &serde_json::to_vec(&configured)?)?;
+    assert_eq!(annotate(&ctx, &analysis, None)["status"], "local-only");
+    let before = fs::read(&path)?;
+    configured["enabled"] = json!(true);
+    crate::native_skills_files::write_cas(&path, Some(&before), &serde_json::to_vec(&configured)?)?;
+    let annotation = annotate(&ctx, &analysis, None);
+    assert_eq!(annotation["model"], "fixture-model");
+    assert_eq!(annotation["status"], "deadline");
+    let before = fs::read(&path)?;
+    crate::native_skills_files::write_cas(&path, Some(&before), b"{}")?;
+    assert_eq!(
+        annotate(&ctx, &analysis, None)["status"],
+        "profile-unavailable"
+    );
+    fs::remove_file(path)?;
+    let fallback = annotate(&ctx, &analysis, None);
+    assert_eq!(fallback["status"], "deadline");
+    assert_eq!(fallback["model"], policy::MODEL);
+    Ok(())
+}
+
+#[test]
+fn invalid_legacy_account_exits_before_loading_any_credential() -> TestResult {
+    let analysis = brief()?;
+    let clients = Clients {
+        credentials: &|_, _, _| panic!("invalid account attempted Keychain access"),
+        curl: Path::new("/unreachable"),
+    };
+    assert_eq!(
+        compare(
+            &clients,
+            analysis.facts(),
+            "invalid account",
+            Instant::now()
+        )
+        .err(),
+        Some(Failure::Keychain)
+    );
+    Ok(())
+}
+
+#[test]
+fn configured_annotation_stops_if_silent_credentials_are_denied_or_corrupt() -> TestResult {
+    let temp = tempfile::tempdir_in("/private/tmp")?;
+    let profile = serde_json::from_value::<crate::recommend_setup::Profile>(json!({
+        "schemaVersion":2,"enabled":true,"endpoint":"https://models.example.test/chat/completions",
+        "model":"current-model","account":"setup-test"
+    }))?;
+    let analysis = brief()?;
+    let marker = temp.path().join("http-called");
+    let never_send = script(
+        temp.path(),
+        "no-http",
+        &format!("printf ran > '{}'; exit 7", marker.display()),
+    )?;
+    for scenario in [Err(Failure::Keychain), Ok(b"corrupt".to_vec())] {
+        let clients = Clients {
+            credentials: &|_, _, _| scenario.clone(),
+            curl: &never_send,
+        };
+        let result = compare_configured(
+            &clients,
+            &profile,
+            temp.path(),
+            analysis.facts(),
+            Instant::now() + Duration::from_secs(5),
+        );
+        assert_eq!(result.err(), Some(Failure::Keychain));
+    }
+    assert!(!marker.exists());
     Ok(())
 }

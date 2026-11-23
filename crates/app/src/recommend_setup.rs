@@ -1,20 +1,24 @@
 use crate::{
-    context::Context,
+    context::RecommendSetupContext,
     error::{Error, Result},
-    native_skills_files::{regular, write_cas},
+    native_skills_files::{private, regular, write_cas_checked},
+    paths::Directory,
     policy::recommend_model,
-    recommend_keychain::{self as keychain, BorrowedItem, ExternalItem, ReadFailure, Secret},
-    store::Store,
+    recommend_keychain::{
+        self as keychain, BorrowedItem, EntryState, ExternalItem, ReadFailure, Secret,
+    },
 };
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
     terminal,
 };
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
     io,
+    os::unix::{ffi::OsStrExt, fs::MetadataExt},
     path::Path,
     time::{Duration, Instant},
 };
@@ -102,7 +106,7 @@ fn profile(base: &str, model: &str) -> Result<Profile> {
     let mut nonce = [0_u8; 32];
     getrandom::fill(&mut nonce).map_err(|_| keychain_error())?;
     Ok(Profile {
-        schema_version: 1,
+        schema_version: 2,
         endpoint,
         model: model.into(),
         account: format!("setup-{:x}", Sha256::digest(nonce)),
@@ -112,7 +116,9 @@ fn profile(base: &str, model: &str) -> Result<Profile> {
 
 impl Profile {
     pub(crate) fn service(&self, config: &Path) -> String {
-        use std::os::unix::ffi::OsStrExt;
+        if self.uses_single_entry() {
+            return "org.macops.recommend.api-key".into();
+        }
         let mut binding = Sha256::new();
         binding.update(config.as_os_str().as_bytes());
         binding.update([0]);
@@ -121,6 +127,18 @@ impl Profile {
     }
 
     pub(crate) fn account(&self) -> &str {
+        if self.uses_single_entry() {
+            "default"
+        } else {
+            &self.account
+        }
+    }
+
+    pub(super) fn uses_single_entry(&self) -> bool {
+        self.schema_version == 2
+    }
+
+    pub(super) fn credential_version(&self) -> &str {
         &self.account
     }
 }
@@ -136,7 +154,7 @@ fn optional_record<T: serde::de::DeserializeOwned>(bytes: Option<&[u8]>) -> Resu
 }
 
 fn validate(p: &Profile) -> Result<()> {
-    if p.schema_version != 1
+    if !matches!(p.schema_version, 1 | 2)
         || p.endpoint != endpoint(&p.endpoint)?
         || p.account
             .strip_prefix("setup-")
@@ -157,13 +175,31 @@ fn decode(bytes: Option<&[u8]>) -> Result<Option<Profile>> {
     Ok(value)
 }
 
-pub(crate) fn read(ctx: &Context) -> Result<Option<Profile>> {
-    decode(regular(&ctx.config.join(PROFILE))?.as_deref())
+pub(crate) fn read(config: &Path) -> Result<Option<Profile>> {
+    decode(regular(&config.join(PROFILE))?.as_deref())
 }
 
 trait KeyStore {
-    fn add(&self, profile: &Profile, source: Secret<'_>) -> Result<()>;
-    fn remove(&self, profile: &Profile, require_tag: bool) -> Result<()>;
+    fn add(
+        &self,
+        profile: &Profile,
+        source: Secret<'_>,
+        guard: &dyn Fn() -> Result<()>,
+    ) -> Result<()>;
+    fn write_single(
+        &self,
+        previous: Option<&Profile>,
+        next: &Profile,
+        source: Secret<'_>,
+        guard: &dyn Fn() -> Result<()>,
+    ) -> Result<()>;
+    fn entry_state(&self, previous: Option<&Profile>, next: &Profile) -> Result<EntryState>;
+    fn remove(
+        &self,
+        profile: &Profile,
+        require_tag: bool,
+        guard: &dyn Fn() -> Result<()>,
+    ) -> Result<()>;
     fn contains(&self, profile: &Profile) -> Result<bool>;
     fn load(&self, profile: &Profile, deadline: Instant) -> Result<Vec<u8>>;
     fn external(&self, item: &ExternalItem, deadline: Instant) -> Result<Vec<u8>>;
@@ -177,12 +213,36 @@ impl<'a> NativeKeychain<'a> {
 }
 
 impl KeyStore for NativeKeychain<'_> {
-    fn add(&self, profile: &Profile, source: Secret<'_>) -> Result<()> {
-        keychain::add(self.config()?, profile, source)
+    fn add(
+        &self,
+        profile: &Profile,
+        source: Secret<'_>,
+        guard: &dyn Fn() -> Result<()>,
+    ) -> Result<()> {
+        keychain::add(self.config()?, profile, source, guard)
     }
 
-    fn remove(&self, profile: &Profile, require_tag: bool) -> Result<()> {
-        keychain::remove(self.config()?, profile, require_tag)
+    fn write_single(
+        &self,
+        previous: Option<&Profile>,
+        next: &Profile,
+        source: Secret<'_>,
+        guard: &dyn Fn() -> Result<()>,
+    ) -> Result<()> {
+        keychain::write_single(self.config()?, previous, next, source, guard)
+    }
+
+    fn entry_state(&self, previous: Option<&Profile>, next: &Profile) -> Result<EntryState> {
+        keychain::entry_state(self.config()?, previous, next)
+    }
+
+    fn remove(
+        &self,
+        profile: &Profile,
+        require_tag: bool,
+        guard: &dyn Fn() -> Result<()>,
+    ) -> Result<()> {
+        keychain::remove(self.config()?, profile, require_tag, guard)
     }
 
     fn contains(&self, profile: &Profile) -> Result<bool> {
@@ -212,14 +272,131 @@ struct Pending {
 }
 
 fn same_entry(a: &Profile, b: &Profile) -> bool {
-    a.account() == b.account() && a.endpoint == b.endpoint
+    a.schema_version == b.schema_version && a.account == b.account && a.endpoint == b.endpoint
 }
 
-fn recover_pending(dir: &Path, current: Option<&Profile>, keys: &impl KeyStore) -> Result<()> {
-    let path = dir.join(PENDING);
-    let raw = regular(&path)?;
+#[derive(Debug)]
+struct ProfileLock {
+    lease: Directory,
+    config: Directory,
+}
+
+impl ProfileLock {
+    fn verify(&self) -> Result<()> {
+        for directory in [&self.lease, &self.config] {
+            directory.verify()?;
+            let metadata = directory.file().metadata()?;
+            if metadata.uid() != nix::unistd::geteuid().as_raw()
+                || metadata.mode() & 0o7777 != 0o700
+            {
+                return Err(Error::attention(
+                    "model_setup_lock_changed",
+                    "设置锁或配置目录的权限已改变",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn check_record(&self, name: &str, expected: Option<&[u8]>) -> Result<()> {
+        if regular(&self.config.path.join(name))?.as_deref() != expected {
+            return Err(single_pending());
+        }
+        Ok(())
+    }
+
+    fn verify_records(&self, profile: Option<&[u8]>, pending: Option<&[u8]>) -> Result<()> {
+        self.verify()?;
+        self.check_record(PROFILE, profile)?;
+        self.check_record(PENDING, pending)?;
+        self.verify()
+    }
+
+    fn empty_intent(&self) -> Result<Option<Vec<u8>>> {
+        let raw = regular(&self.config.path.join(PENDING))?;
+        if optional_record::<Pending>(raw.as_deref())?.is_some() {
+            return Err(single_pending());
+        }
+        Ok(raw)
+    }
+
+    fn write_profile(
+        &self,
+        before: Option<&[u8]>,
+        after: &[u8],
+        pending: Option<&[u8]>,
+    ) -> Result<()> {
+        write_cas_checked(&self.config.path.join(PROFILE), before, after, || {
+            self.verify_records(before, pending)
+        })
+    }
+
+    fn write(&self, name: &str, before: Option<&[u8]>, after: &[u8]) -> Result<()> {
+        write_cas_checked(&self.config.path.join(name), before, after, || {
+            self.verify()
+        })
+    }
+}
+
+fn lock_path(ctx: &RecommendSetupContext) -> Result<std::path::PathBuf> {
+    let home = if ctx.isolated {
+        ctx.home.clone()
+    } else {
+        nix::unistd::User::from_uid(nix::unistd::geteuid())
+            .map_err(|_| keychain_error())?
+            .ok_or_else(keychain_error)?
+            .dir
+    };
+    Ok(home.join(".config/macops/recommend-model.lock"))
+}
+
+fn lock_profile(ctx: &RecommendSetupContext, before: Option<&[u8]>) -> Result<ProfileLock> {
+    let lease = private(&lock_path(ctx)?)?;
+    lease.file().try_lock_exclusive().map_err(|error| {
+        if error.kind() == io::ErrorKind::WouldBlock {
+            Error::attention("model_setup_busy", "另一进程正在保存或核对推荐模型设置")
+        } else {
+            error.into()
+        }
+    })?;
+    if regular(&ctx.config.join(PROFILE))?.as_deref() != before {
+        return Err(Error::attention(
+            "model_setup_stale",
+            "模型设置已改变，请重新打开设置",
+        ));
+    }
+    let lock = ProfileLock {
+        lease,
+        config: private(&ctx.config)?,
+    };
+    lock.verify()?;
+    Ok(lock)
+}
+
+fn recover_pending(
+    lock: &ProfileLock,
+    current: Option<&Profile>,
+    keys: &impl KeyStore,
+) -> Result<()> {
+    let raw = regular(&lock.config.path.join(PENDING))?;
+    let guard = || {
+        lock.verify()?;
+        if read(&lock.config.path)?.as_ref() != current {
+            return Err(single_pending());
+        }
+        lock.check_record(PENDING, raw.as_deref())?;
+        lock.verify()
+    };
     if let Some(staged) = optional_record::<Pending>(raw.as_deref())? {
         validate(&staged.profile)?;
+        if staged.profile.uses_single_entry()
+            || staged
+                .previous
+                .as_ref()
+                .is_some_and(Profile::uses_single_entry)
+        {
+            return Err(single_pending());
+        }
         if let Some(previous) = &staged.previous {
             validate(previous)?;
             if same_entry(previous, &staged.profile) {
@@ -244,48 +421,172 @@ fn recover_pending(dir: &Path, current: Option<&Profile>, keys: &impl KeyStore) 
                             "新钥匙串凭据暂不可用，原条目已保留",
                         ));
                     }
-                    keys.remove(previous, true)?;
+                    keys.remove(previous, true, &guard)?;
                 }
             } else {
-                keys.remove(&staged.profile, staged.tagged)?;
+                keys.remove(&staged.profile, staged.tagged, &guard)?;
             }
         }
-        write_cas(&path, raw.as_deref(), b"null")?;
+        lock.write(PENDING, raw.as_deref(), b"null")?;
     }
     Ok(())
 }
 
-fn lock_profile(ctx: &Context, before: Option<&[u8]>) -> Result<Store> {
-    let store = Store::lock(ctx)?;
-    store.check_pending()?;
-    if regular(&ctx.config.join(PROFILE))?.as_deref() != before {
+fn single_pending() -> Error {
+    Error::attention(
+        "model_keychain_update_pending",
+        "钥匙串更新尚待核对。在 mo recommend --setup 中选择 c 继续。",
+    )
+}
+
+fn retire_legacy(
+    lock: &ProfileLock,
+    previous: Option<&Profile>,
+    next: &Profile,
+    pending: &[u8],
+    keys: &impl KeyStore,
+) -> Result<()> {
+    if let Some(profile) = previous.filter(|p| !p.uses_single_entry()) {
+        let cleanup_pending = |_| {
+            Error::attention(
+                "model_keychain_cleanup_pending",
+                "新凭据已保存。选择 c 继续核对旧条目。",
+            )
+        };
+        let verified = keys.load(next, deadline(15)).map_err(cleanup_pending)?;
+        recommend_model::api_token(&verified).map_err(cleanup_pending)?;
+        let guard = || {
+            lock.verify()?;
+            if read(&lock.config.path)?.as_ref() != Some(next) {
+                return Err(single_pending());
+            }
+            lock.check_record(PENDING, Some(pending))?;
+            lock.verify()
+        };
+        guard()?;
+        keys.remove(profile, true, &guard)
+            .map_err(cleanup_pending)?;
+    }
+    Ok(())
+}
+
+fn clear_single_record(
+    lock: &ProfileLock,
+    profile: Option<&[u8]>,
+    pending: Option<&[u8]>,
+) -> Result<()> {
+    write_cas_checked(&lock.config.path.join(PENDING), pending, b"null", || {
+        lock.verify_records(profile, pending)
+    })
+}
+
+fn recover_single(
+    lock: &ProfileLock,
+    before: Option<&[u8]>,
+    current: Option<Profile>,
+    raw: &[u8],
+    staged: Pending,
+    keys: &impl KeyStore,
+) -> Result<Option<Profile>> {
+    validate(&staged.profile)?;
+    if let Some(previous) = &staged.previous {
+        validate(previous)?;
+        if same_entry(previous, &staged.profile) {
+            return Err(invalid());
+        }
+    }
+    if staged.added
+        || !staged.tagged
+        || (current != staged.previous && current.as_ref() != Some(&staged.profile))
+    {
+        return Err(single_pending());
+    }
+    let previous = staged.previous.as_ref();
+    let state = keys
+        .entry_state(previous, &staged.profile)
+        .map_err(|_| single_pending())?;
+    let mut published = None;
+    let active = match state {
+        EntryState::Next => {
+            if current == staged.previous {
+                let latest = serde_json::to_vec(&staged.profile)?;
+                lock.write_profile(before, &latest, Some(raw))?;
+                published = Some(latest);
+            }
+            retire_legacy(lock, previous, &staged.profile, raw, keys)?;
+            Some(staged.profile)
+        }
+        EntryState::Previous | EntryState::Missing if current == staged.previous => current,
+        _ => return Err(single_pending()),
+    };
+    clear_single_record(lock, published.as_deref().or(before), Some(raw))?;
+    Ok(active)
+}
+
+fn publish_single(
+    lock: &ProfileLock,
+    before: Option<&[u8]>,
+    previous: Option<Profile>,
+    next: &Profile,
+    source: Secret<'_>,
+    keys: &impl KeyStore,
+) -> Result<()> {
+    if previous.as_ref().is_some_and(|old| same_entry(old, next)) {
+        return Err(invalid());
+    }
+    let raw = lock.empty_intent()?;
+    if !previous.as_ref().is_some_and(Profile::uses_single_entry) && keys.contains(next)? {
         return Err(Error::attention(
-            "model_setup_stale",
-            "模型设置已改变，请重新打开设置",
+            "model_keychain_slot_conflict",
+            "固定钥匙串条目已存在，当前设置无法证明归属。",
         ));
     }
-    Ok(store)
+    let staged = Pending {
+        profile: next.clone(),
+        previous,
+        added: false,
+        tagged: true,
+    };
+    let intent = serde_json::to_vec(&staged)?;
+    lock.write(PENDING, raw.as_deref(), &intent)?;
+    let guard = || lock.verify_records(before, Some(&intent));
+    keys.write_single(staged.previous.as_ref(), next, source, &guard)
+        .map_err(|_| single_pending())?;
+    if keys
+        .entry_state(staged.previous.as_ref(), next)
+        .map_err(|_| single_pending())?
+        != EntryState::Next
+    {
+        return Err(single_pending());
+    }
+    let expected = serde_json::to_vec(next)?;
+    lock.write_profile(before, &expected, Some(&intent))?;
+    retire_legacy(lock, staged.previous.as_ref(), next, &intent, keys)?;
+    clear_single_record(lock, Some(&expected), Some(&intent))
 }
 
 fn publish(
-    ctx: &Context,
+    ctx: &RecommendSetupContext,
     before: Option<&[u8]>,
     new: &Profile,
     source: Option<Secret<'_>>,
     keys: &impl KeyStore,
 ) -> Result<()> {
-    let _store = lock_profile(ctx, before)?;
-    let target = ctx.config.join(PROFILE);
+    let lock = lock_profile(ctx, before)?;
     let previous = decode(before)?;
-    recover_pending(&ctx.config, previous.as_ref(), keys)?;
+    recover_pending(&lock, previous.as_ref(), keys)?;
+    if let Some(source) = source
+        && new.uses_single_entry()
+    {
+        return publish_single(&lock, before, previous, new, source, keys);
+    }
     let encoded = serde_json::to_vec(new)?;
-    let pending = ctx.config.join(PENDING);
+    let mut pending = lock.empty_intent()?;
     let replacing = source.is_some();
     if let Some(source) = source {
         if previous.as_ref().is_some_and(|old| same_entry(old, new)) {
             return Err(invalid());
         }
-        let raw = regular(&pending)?;
         let mut staged = Pending {
             profile: new.clone(),
             added: false,
@@ -293,15 +594,16 @@ fn publish(
             tagged: true,
         };
         let intent = serde_json::to_vec(&staged)?;
-        write_cas(&pending, raw.as_deref(), &intent)?;
-        keys.add(new, source)?;
+        lock.write(PENDING, pending.as_deref(), &intent)?;
+        keys.add(new, source, &|| lock.verify_records(before, Some(&intent)))?;
         staged.added = true;
         let written = serde_json::to_vec(&staged)?;
-        write_cas(&pending, Some(&intent), &written)?;
+        lock.write(PENDING, Some(&intent), &written)?;
+        pending = Some(written);
     }
-    write_cas(&target, before, &encoded)?;
+    lock.write_profile(before, &encoded, pending.as_deref())?;
     if replacing {
-        recover_pending(&ctx.config, Some(new), keys).map_err(|_| {
+        recover_pending(&lock, Some(new), keys).map_err(|_| {
             Error::attention(
                 "model_keychain_cleanup_pending",
                 "设置已保存，钥匙串清理待重试",
@@ -311,39 +613,69 @@ fn publish(
     Ok(())
 }
 
-fn recover_setup(ctx: &Context, before: Option<&[u8]>, keys: &impl KeyStore) -> Result<Value> {
-    let _store = lock_profile(ctx, before)?;
+fn recover_setup(
+    ctx: &RecommendSetupContext,
+    before: Option<&[u8]>,
+    keys: &impl KeyStore,
+) -> Result<Value> {
     let current = decode(before)?;
-    recover_pending(&ctx.config, current.as_ref(), keys)?;
+    let pending_path = ctx.config.join(PENDING);
+    if optional_record::<Pending>(regular(&pending_path)?.as_deref())?.is_none() {
+        return Ok(status(current.as_ref()));
+    }
+    let lock = lock_profile(ctx, before)?;
+    if let Some(raw) = regular(&lock.config.path.join(PENDING))?
+        && let Some(staged) = optional_record::<Pending>(Some(&raw))?
+        && staged.profile.uses_single_entry()
+    {
+        return recover_single(&lock, before, current, &raw, staged, keys)
+            .map(|profile| status(profile.as_ref()));
+    }
+    recover_pending(&lock, current.as_ref(), keys)?;
     Ok(status(current.as_ref()))
 }
 
-fn retainable(current: Option<&Profile>, raw: Option<&[u8]>) -> Result<()> {
+fn retainable(current: Option<&Profile>, raw: Option<&[u8]>) -> Result<Pending> {
     let unavailable = || {
         Error::attention(
             "model_keychain_cleanup_not_committed",
             "仅能结束已保存新配置的旧条目清理",
         )
     };
-    let staged = optional_record::<Pending>(raw)?
-        .filter(|entry| {
-            entry.added && entry.tagged && current.is_some_and(|p| same_entry(p, &entry.profile))
-        })
-        .ok_or_else(unavailable)?;
-    let previous = staged.previous.ok_or_else(unavailable)?;
-    validate(&previous)?;
+    let staged = optional_record::<Pending>(raw)?.ok_or_else(unavailable)?;
+    let previous = staged.previous.as_ref().ok_or_else(unavailable)?;
+    validate(previous)?;
     validate(&staged.profile)?;
-    if same_entry(&previous, &staged.profile) {
+    let committed = if staged.profile.uses_single_entry() {
+        !staged.added && current == Some(&staged.profile)
+    } else {
+        staged.added && current.is_some_and(|p| same_entry(p, &staged.profile))
+    };
+    if !staged.tagged
+        || !committed
+        || previous.uses_single_entry()
+        || same_entry(previous, &staged.profile)
+    {
         return Err(unavailable());
     }
-    Ok(())
+    Ok(staged)
 }
 
-fn retain_setup(ctx: &Context, before: Option<&[u8]>, pending: Option<&[u8]>) -> Result<Value> {
-    let _store = lock_profile(ctx, before)?;
+fn retain_setup(
+    ctx: &RecommendSetupContext,
+    before: Option<&[u8]>,
+    pending: Option<&[u8]>,
+    keys: &impl KeyStore,
+) -> Result<Value> {
+    let lock = lock_profile(ctx, before)?;
     let current = decode(before)?;
-    retainable(current.as_ref(), pending)?;
-    write_cas(&ctx.config.join(PENDING), pending, b"null")?;
+    let staged = retainable(current.as_ref(), pending)?;
+    if staged.profile.uses_single_entry()
+        && keys.entry_state(staged.previous.as_ref(), &staged.profile)? != EntryState::Next
+    {
+        return Err(single_pending());
+    }
+    clear_single_record(&lock, before, pending)?;
     let mut value = status(current.as_ref());
     value["cleanup"] = json!("previous-entry-retained");
     Ok(value)
@@ -357,14 +689,24 @@ fn status(current: Option<&Profile>) -> Value {
     })
 }
 
-fn disable_profile(ctx: &Context, before: Option<&[u8]>, profile: &Profile) -> Result<()> {
-    let store = Store::lock(ctx)?;
-    store.check_pending()?;
-    write_cas(
-        &ctx.config.join(PROFILE),
-        before,
-        &serde_json::to_vec(profile)?,
-    )
+fn disable_profile(
+    ctx: &RecommendSetupContext,
+    before: Option<&[u8]>,
+    profile: &Profile,
+) -> Result<()> {
+    let lock = lock_profile(ctx, before)?;
+    let pending = regular(&lock.config.path.join(PENDING))?;
+    reject_single_pending(ctx)?;
+    lock.write_profile(before, &serde_json::to_vec(profile)?, pending.as_deref())
+}
+
+fn reject_single_pending(ctx: &RecommendSetupContext) -> Result<()> {
+    let raw = regular(&ctx.config.join(PENDING))?;
+    if optional_record::<Pending>(raw.as_deref())?.is_some_and(|op| op.profile.uses_single_entry())
+    {
+        return Err(single_pending());
+    }
+    Ok(())
 }
 
 fn line(prompt: &str) -> Result<String> {
@@ -410,7 +752,7 @@ fn password() -> Result<String> {
     }
 }
 
-pub(crate) fn run(ctx: &Context, json: bool, dry_run: bool) -> Result<Value> {
+pub(crate) fn run(ctx: &RecommendSetupContext, json: bool, dry_run: bool) -> Result<Value> {
     let before = regular(&ctx.config.join(PROFILE))?;
     let current = decode(before.as_deref())?;
     if json || dry_run {
@@ -440,7 +782,7 @@ pub(crate) fn run(ctx: &Context, json: bool, dry_run: bool) -> Result<Value> {
 }
 
 fn wizard(
-    ctx: &Context,
+    ctx: &RecommendSetupContext,
     before: Option<&[u8]>,
     current: Option<Profile>,
     keys: &impl KeyStore,
@@ -460,6 +802,9 @@ fn wizard(
         "推荐模型\n  1 DeepSeek（新建或换钥）\n  2 自定义 OpenAI 兼容服务（新建或换钥）\n  3 本地分析\n  t 测试已保存密钥  r 重新启用  m 更改模型\n  b 绑定已有钥匙串条目  c 核对待完成的钥匙串操作\n  k 保留旧条目并结束待处理清理\n  Enter 取消"
     );
     let action = ask("选择")?;
+    if matches!(action.as_str(), "1" | "2" | "3" | "b" | "r" | "m") {
+        reject_single_pending(ctx)?;
+    }
     let next = match action.as_str() {
         "1" => profile("https://api.deepseek.com", recommend_model::MODEL)?,
         "2" | "b" => profile(&ask("HTTPS Base URL")?, &ask("模型名")?)?,
@@ -489,7 +834,7 @@ fn wizard(
             {
                 return Ok(cancelled());
             }
-            return retain_setup(ctx, before, pending.as_deref());
+            return retain_setup(ctx, before, pending.as_deref(), keys);
         }
         "" => return Ok(cancelled()),
         _ => return Err(invalid()),
@@ -498,11 +843,12 @@ fn wizard(
         let path = ask("已有钥匙串文件的绝对路径")?;
         let item =
             ExternalItem::bind(Path::new(&path), ask("钥匙串服务名")?, ask("钥匙串账户名")?)?;
-        if !confirm_test(&next, &mut ask)? {
+        if !confirm_test(ctx, &next, &mut ask, true)? {
             return Ok(cancelled());
         }
         let until = deadline(ctx.timeout_secs);
         let bytes = keys.external(&item, until)?;
+        reject_single_pending(ctx)?;
         let token = recommend_model::api_token(&bytes)?;
         test_before(&next, token, until, test_connection)?;
         let bound = BorrowedItem::verified(item, token);
@@ -520,7 +866,7 @@ fn wizard(
         return Ok(cancelled());
     }
     let token = recommend_model::api_token(token.as_bytes())?;
-    if !confirm_test(&next, &mut ask)? {
+    if !confirm_test(ctx, &next, &mut ask, true)? {
         return Ok(cancelled());
     }
     test_before(&next, token, deadline(ctx.timeout_secs), test_connection)?;
@@ -543,19 +889,31 @@ fn cancelled() -> Value {
     json!({"mode":"cancelled"})
 }
 
-fn confirm_test(profile: &Profile, ask: &mut impl FnMut(&str) -> Result<String>) -> Result<bool> {
+fn confirm_test(
+    ctx: &RecommendSetupContext,
+    profile: &Profile,
+    ask: &mut impl FnMut(&str) -> Result<String>,
+    saving: bool,
+) -> Result<bool> {
     eprintln!("测试地址 {} · 模型 {}", profile.endpoint, profile.model);
-    Ok(ask("发送最小测试请求？[y/N]")? == "y")
+    if ask("发送最小测试请求？[y/N]")? != "y" {
+        return Ok(false);
+    }
+    if saving {
+        reject_single_pending(ctx)?;
+    }
+    Ok(true)
 }
 
 fn save_after_test(
-    ctx: &Context,
+    ctx: &RecommendSetupContext,
     before: Option<&[u8]>,
     profile: &Profile,
     source: Option<Secret<'_>>,
     keys: &impl KeyStore,
     ask: &mut impl FnMut(&str) -> Result<String>,
 ) -> Result<Value> {
+    reject_single_pending(ctx)?;
     if ask("连接成功。保存设置？[y/N]")? != "y" {
         return Ok(cancelled());
     }
@@ -564,7 +922,7 @@ fn save_after_test(
 }
 
 fn reuse(
-    ctx: &Context,
+    ctx: &RecommendSetupContext,
     before: Option<&[u8]>,
     mut next: Profile,
     action: &str,
@@ -572,11 +930,14 @@ fn reuse(
     mut ask: impl FnMut(&str) -> Result<String>,
     test_connection: impl FnOnce(&Profile, &str, Instant) -> Result<()>,
 ) -> Result<Value> {
-    if !confirm_test(&next, &mut ask)? {
+    if !confirm_test(ctx, &next, &mut ask, action != "t")? {
         return Ok(cancelled());
     }
     let until = deadline(ctx.timeout_secs);
     let bytes = keys.load(&next, until)?;
+    if action != "t" {
+        reject_single_pending(ctx)?;
+    }
     test_before(
         &next,
         recommend_model::api_token(&bytes)?,

@@ -254,6 +254,44 @@ fn migration_pending_blocks_every_normal_entry_and_preserves_foreign_marker() ->
 }
 
 #[test]
+fn migration_pending_blocks_browser_before_display_in_all_output_modes() -> TestResult {
+    let f = Fixture::new()?;
+    fs::create_dir(f.file("state"))?;
+    let marker = f.file("state/migration-active.json");
+    let bytes = b"interrupted migration";
+    fs::write(&marker, bytes)?;
+    for noun in ["app", "config", "agent", "skill", "history"] {
+        let (json, data) = f.run(&[noun])?;
+        assert_code(&json, 3);
+        assert_eq!(
+            data["error"]["code"], "migration_recovery_required",
+            "{noun}"
+        );
+        let message = data["error"]["message"].as_str().ok_or("error message")?;
+        assert!(message.contains("无法识别迁移编号"));
+        assert!(!message.contains("migrate recover"));
+        let command = f.command();
+        let plain = std::process::Command::new(command.get_program())
+            .args(command.get_args().filter(|arg| *arg != "--json"))
+            .envs(
+                command
+                    .get_envs()
+                    .filter_map(|(name, value)| value.map(|value| (name, value))),
+            )
+            .arg(noun)
+            .output()?;
+        assert_code(&plain, 3);
+        assert!(plain.stdout.is_empty(), "displayed {noun} during migration");
+        assert!(String::from_utf8(plain.stderr)?.contains("migration_recovery_required"));
+        chezmoi_native::run_browser_pty(&f, &[noun], "migration-blocked", &marker, "96", "3")?;
+    }
+    assert_eq!(fs::read(marker)?, bytes);
+    assert!(!f.file("state/operations").exists());
+    assert!(!f.file("state/write.lock").exists());
+    Ok(())
+}
+
+#[test]
 fn migration_retains_all_claude_models_versions_and_codex_config_bytes() -> TestResult {
     let f = Fixture::new()?;
     migration_fixture(&f)?;

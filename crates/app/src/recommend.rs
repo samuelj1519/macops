@@ -22,7 +22,9 @@ pub fn show(
     dry_run: bool,
 ) -> Result<Value> {
     let query = policy::query_name(product)?;
-    let account = crate::policy::recommend_model::account(account.unwrap_or("default"))?;
+    let account = account
+        .map(crate::policy::recommend_model::account)
+        .transpose()?;
     if let Some(path) = evidence {
         let mut result = from_evidence(query, path)?;
         result["model"] = json!({"status":if model {"local-evidence-only"} else {"not-requested"}});
@@ -238,12 +240,18 @@ pub(crate) fn choose(ctx: &Context, data: Value) -> Result<Value> {
             }
         }
     }
+    if data["model"]["status"] == "keychain-unavailable" {
+        eprintln!("推荐模型凭据暂不可读取，已继续使用本地分析。");
+    }
     show_codex_market(&data["codexMarketplace"]);
     let known = data["known"].as_array().map_or(&[][..], Vec::as_slice);
     if let Some(reason) = data["reason"].as_str() {
         eprintln!("来源核对未完成 · {}", sanitize(reason, false));
     }
     let installs = install_choices(ctx, &data, known)?;
+    if !installs.is_empty() {
+        check_install_ready(ctx)?;
+    }
     match installs.as_slice() {
         [] => {
             if let Some(repo) = search_repository(ctx, &data)? {
@@ -267,6 +275,7 @@ pub(crate) fn choose(ctx: &Context, data: Value) -> Result<Value> {
     let Some(package) = choice_index()?.and_then(|index| installs.get(index)) else {
         return Ok(json!({"mode":"cancelled"}));
     };
+    check_install_ready(ctx)?;
     match package {
         InstallChoice::Application(package) => install_selected(ctx, package),
         InstallChoice::Skill(recipe) => Ok(report_install(
@@ -279,6 +288,13 @@ pub(crate) fn choose(ctx: &Context, data: Value) -> Result<Value> {
             install_isolated_claude(ctx, (**offer).clone(), binary.clone())
         }
     }
+}
+
+fn check_install_ready(ctx: &Context) -> Result<()> {
+    crate::store::check_active_pending(ctx).map_err(|mut error| {
+        error.message = format!("暂不能安装。{}", error.message);
+        error
+    })
 }
 
 fn choice_index() -> Result<Option<usize>> {

@@ -439,19 +439,7 @@ impl Browser {
         let result = preview.confirm(ctx);
         self.refresh(ctx, session);
         self.notice = match result {
-            Ok(value) => {
-                let journal = value.get("journal").unwrap_or(&value);
-                let phase = journal
-                    .get("phase")
-                    .or_else(|| value.get("status"))
-                    .and_then(serde_json::Value::as_str);
-                let status = match phase {
-                    Some("succeeded") => "已完成",
-                    Some("failed") => "已记录失败",
-                    _ => "仍待核对",
-                };
-                format!("核对结果 {status} · {id}")
-            }
+            Ok(value) => recovery_notice(&id, &value),
             Err(error) => format!("{} · {id}", error.code),
         };
     }
@@ -696,6 +684,25 @@ fn item_details(item: &Item, session: Option<&crate::codex_install::session::Det
         );
     }
     text
+}
+
+fn recovery_notice(id: &str, value: &serde_json::Value) -> String {
+    let continuation = value["continuationRequired"].as_bool();
+    if continuation == Some(true) {
+        return format!("原阶段已核对。继续请运行 mo agent resume {id}");
+    }
+    let journal = value.get("journal").unwrap_or(value);
+    let phase = journal
+        .get("phase")
+        .or_else(|| value.get("status"))
+        .and_then(serde_json::Value::as_str);
+    let status = match phase {
+        Some("succeeded") if continuation == Some(false) => "后续步骤待核对",
+        Some("succeeded") => "已完成",
+        Some("failed") => "已记录失败",
+        _ => "仍待核对",
+    };
+    format!("核对结果 {status} · {id}")
 }
 
 fn operation_label(action: Action) -> &'static str {

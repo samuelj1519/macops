@@ -352,3 +352,168 @@ fn expired_bound_slot_read_cancels_before_opening_a_keychain() -> TestResult {
     assert_eq!(result.err(), Some(ReadFailure::Deadline));
     Ok(())
 }
+
+#[test]
+fn fixed_entry_is_bound_to_the_confirmed_endpoint_and_update_generation() -> TestResult {
+    let area = Path::new("/fixture/config");
+    let p = |endpoint, suffix: &str| -> Result<Profile> {
+        Ok(serde_json::from_value(serde_json::json!({
+            "schemaVersion":2,"enabled":true,"endpoint":endpoint,"model":"fixture",
+            "account":format!("setup-{}",suffix.repeat(64))
+        }))?)
+    };
+    let first = p("https://example.test/chat/completions", "a")?;
+    let next = p("https://other.example.test/chat/completions", "b")?;
+    let rebound = p("https://other.example.test/chat/completions", "a")?;
+    let raw = encode(&first, area, Secret::New("synthetic-token-original"))?;
+    assert!(matches!(
+        classify_entry(area, Some(&first), &next, Some(&raw))?,
+        EntryState::Previous
+    ));
+    assert!(matches!(
+        classify_entry(area, Some(&first), &next, None)?,
+        EntryState::Missing
+    ));
+    assert!(slot(&next, area, &raw).is_err());
+    assert!(slot(&rebound, area, &raw).is_err());
+    assert!(slot(&first, Path::new("/different/config"), &raw).is_err());
+    assert!(slot(&first, area, b"synthetic-foreign-key").is_err());
+    assert!(classify_entry(area, None, &next, Some(&raw)).is_err());
+    let changed = encode(&next, area, Secret::New("synthetic-token-new"))?;
+    assert!(matches!(
+        classify_entry(area, Some(&first), &next, Some(&changed))?,
+        EntryState::Next
+    ));
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn quiet_keychain_access_preserves_interaction_state_for_nested_reads_and_errors() -> TestResult {
+    use security_framework::os::macos::keychain::SecKeychain;
+
+    let initial = SecKeychain::user_interaction_allowed()?;
+    native::without_interaction(|| {
+        assert!(!SecKeychain::user_interaction_allowed().map_err(|_| unavailable())?);
+        assert!(native::without_interaction(|| Err::<(), _>(unavailable())).is_err());
+        assert!(!SecKeychain::user_interaction_allowed().map_err(|_| unavailable())?);
+        Ok(())
+    })?;
+    assert_eq!(SecKeychain::user_interaction_allowed()?, initial);
+    Ok(())
+}
+
+#[test]
+fn fixed_item_update_targets_the_verified_item_and_rejects_unowned_slots() -> TestResult {
+    use std::cell::Cell;
+
+    let present = Cell::new(false);
+    let cursor = || Ok(present.get());
+    let found = Cell::new(0);
+    let find = || {
+        found.set(found.get() + 1);
+        Ok((b"owned".as_slice(), 7))
+    };
+    assert!(
+        write_verified(cursor, find, None::<fn(&[u8]) -> bool>, |item| {
+            assert_eq!(item, None);
+            present.set(true);
+            Ok(())
+        })
+        .is_ok()
+    );
+    assert_eq!(found.get(), 0);
+    let reject_write = |_| Err(Error::new("unexpected-write", "synthetic"));
+    for eligible in [None, Some((|_: &[u8]| false) as fn(&[u8]) -> bool)] {
+        let failure = write_verified(cursor, find, eligible, reject_write)
+            .err()
+            .ok_or("unowned entry")?;
+        assert_eq!(failure.code, "model_keychain_unavailable");
+    }
+    assert_eq!(found.get(), 1);
+    assert!(
+        write_verified(
+            cursor,
+            find,
+            Some(|bytes: &[u8]| bytes == b"owned"),
+            |item| {
+                assert_eq!(item, Some(7));
+                Ok(())
+            }
+        )
+        .is_ok()
+    );
+    assert!(
+        write_verified(cursor, find, Some(|_: &[u8]| true), |item| {
+            assert_eq!(item, Some(7));
+            present.set(false);
+            Ok(())
+        })
+        .is_err()
+    );
+    assert_eq!(found.get(), 3);
+    Ok(())
+}
+
+#[test]
+fn fixed_entry_never_updates_after_the_original_item_disappears() -> TestResult {
+    use std::cell::Cell;
+
+    let probes = Cell::new(0);
+    let present = || {
+        probes.set(probes.get() + 1);
+        Ok(probes.get() == 1)
+    };
+    let find = || -> Result<(&'static [u8], u8)> { panic!("item no longer exists") };
+    let result = write_verified(present, find, Some(|_: &[u8]| true), |_| {
+        panic!("item identity changed")
+    });
+    assert!(result.is_err());
+    assert_eq!(probes.get(), 2);
+    let result = write_verified(
+        || Ok(true),
+        || Ok((b"owned".as_slice(), 7)),
+        Some(|_: &[u8]| true),
+        |_| Err(Error::attention("synthetic-write-denied", "fixture")),
+    );
+    assert_eq!(
+        result.err().ok_or("write failure")?.code,
+        "synthetic-write-denied"
+    );
+    Ok(())
+}
+
+#[test]
+fn fixed_slot_can_reference_an_external_key_without_copying_it() -> TestResult {
+    let temp = tempfile::tempdir_in("/private/tmp")?;
+    let external_path = temp.path().join("fixture.keychain");
+    std::fs::write(&external_path, b"synthetic metadata")?;
+    let external_item = ExternalItem::bind(&external_path, "provider".into(), "test".into())?;
+    let token = "synthetic-borrowed-key";
+    let borrowed = BorrowedItem::verified(external_item, token);
+    let mut raw_profile = serde_json::to_value(profile()?)?;
+    raw_profile["schemaVersion"] = serde_json::json!(2);
+    let current = serde_json::from_value::<Profile>(raw_profile)?;
+    let config = temp.path();
+    let pointer = encode(&current, config, Secret::Existing(&borrowed))?;
+    assert!(
+        !pointer
+            .windows(token.len())
+            .any(|bytes| bytes == token.as_bytes())
+    );
+    let result = load_from(&current, config, None, |scope, service, account| {
+        if let Some(item) = scope {
+            assert_eq!(item, external_path);
+            assert_eq!((service, account), ("provider", "test"));
+            Ok(Some(token.as_bytes().to_vec()))
+        } else {
+            assert_eq!(
+                (service, account),
+                ("org.macops.recommend.api-key", "default")
+            );
+            Ok(Some(pointer.clone()))
+        }
+    })?;
+    assert_eq!(result, token.as_bytes());
+    Ok(())
+}

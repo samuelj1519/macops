@@ -111,9 +111,13 @@ GitHub lookup checks a selected README and compares up to six npm or Homebrew co
 
 For a repository name or GitHub repository URL, macops pins a public commit and links to its README and `INSTALL.md` when available. Run `mo recommend --setup` in a terminal to configure a DeepSeek or custom HTTPS OpenAI-compatible endpoint. The wizard confirms a connection test and saves the key in Keychain. Repository recommendations use that profile when enabled and interactive. The model receives public document excerpts and tool names. Its structured proposals are advisory.
 
-Open `mo recommend --setup` again to test or re-enable the saved credential, change the model for the same endpoint, or replace the key. Changing the endpoint requires a new confirmed binding. Replacements keep the previous profile available until the new one is saved. macops can retire its own verified superseded Keychain entries. Legacy entries with no ownership marker are retained. If the new binding is unavailable during cleanup, choose `c` to retry, or explicitly retain the previous item with `k` before reconfiguring.
+macops uses one managed Keychain item, `org.macops.recommend.api-key`, for the configured recommendation model. Changing only the model on the same service reuses the saved key. To replace the key or switch services, rerun `mo recommend --setup` and confirm the connection test and replacement. The wizard updates the item in place. If a replacement is interrupted, choose `c` in setup to check the original update. Saving a replacement for an older profile also migrates it to the fixed item. Older entries with unverified ownership stay in Keychain. If the new credential is verified and old-entry cleanup is blocked, choose `k` to retain the old item and finish setup.
 
-For an existing generic password item, choose `b` and supply the absolute Keychain file path, service, and account. macops stores a reference bound to the selected endpoint. Rebind after changing the external item, and manage that item's lifetime in Keychain Access.
+Saving or recovering recommendation settings uses a per-user lock under `~/.config/macops/recommend-model.lock`. Custom configuration paths share the lock for the same Keychain account. Software maintenance has its own journal and lock. A pending software operation can block installation from `mo recommend` while the setup wizard can still save the model settings.
+
+Daily recommendations request Keychain access silently and continue with local analysis if macOS requires authentication. The explicit setup wizard can ask macOS to grant access to the saved item.
+
+To reference an existing generic password, choose `b` and supply the absolute Keychain file path, service, and account. The managed item stores a reference bound to the selected endpoint. Rebind after changing the external item and manage that item's lifetime in Keychain Access.
 
 When an interactive short-name lookup has no registered install candidate, macops can search public GitHub repositories by that name. Select a source to review its pinned installation evidence.
 
@@ -129,7 +133,7 @@ In `mo agent`, open a managed independent Codex or Claude Code profile and press
 
 Use `mo agent launch PROFILE` to launch by name or ID. For Codex, add `--native-profile NAME` to select an existing named configuration in that independent home. `mo agent launch PROFILE --dry-run --json` shows the launch arguments. The launcher uses a system program search path and inherits terminal and locale settings. A plugin that runs a non-system command needs that dependency available in its native profile environment.
 
-The explicit `--model` compatibility option asks DeepSeek to explain bundled public evidence. Its generic password has service `org.macops.recommend.deepseek` and account `default`. Use `--keychain-account` to select another account. Dry runs skip model requests.
+The explicit `--model` option uses the configured service to explain bundled public evidence. Without a saved profile, it uses the legacy DeepSeek Keychain service `org.macops.recommend.deepseek` and account `default`. Use `--keychain-account` to select an existing legacy DeepSeek account explicitly. Dry runs skip model requests.
 
 ## Configuration
 

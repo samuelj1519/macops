@@ -1,6 +1,31 @@
 use super::*;
 
 #[test]
+fn recovery_report_displays_the_explicit_continuation_command() {
+    let report = serde_json::json!({
+        "journal": {"phase": "succeeded"},
+        "continuationRequired": true,
+        "continuationCommand": "mo agent resume OP-fixture",
+    });
+    assert_eq!(
+        recovery_notice("OP-fixture", &report),
+        "原阶段已核对。继续请运行 mo agent resume OP-fixture"
+    );
+    assert_eq!(
+        recovery_notice("OP-fixture", &serde_json::json!({"status": "unknown"})),
+        "核对结果 仍待核对 · OP-fixture"
+    );
+    let unverified = serde_json::json!({
+        "journal": {"phase": "succeeded"},
+        "continuationRequired": false,
+    });
+    assert_eq!(
+        recovery_notice("OP-fixture", &unverified),
+        "核对结果 后续步骤待核对 · OP-fixture"
+    );
+}
+
+#[test]
 fn agent_details_announce_the_managed_session_without_claiming_it_is_loaded() {
     let mut browser = Browser::new(
         View {

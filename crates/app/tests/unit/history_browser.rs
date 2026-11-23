@@ -22,7 +22,7 @@ fn terminal_history_shows_typed_operations_and_limits_recovery_to_pending() -> T
         (Action::Reconcile, "核对"),
     ] {
         journal.plan.action = action;
-        let row = history_item(journal.clone(), Some(false));
+        let row = history_item(journal.clone(), RecoveryState::Settled);
         assert!(row.summary.starts_with(label), "{}", row.summary);
         assert_eq!(row.id, journal.id);
     }
@@ -35,7 +35,12 @@ fn terminal_history_shows_typed_operations_and_limits_recovery_to_pending() -> T
         (Phase::Succeeded, "已完成", 4),
     ] {
         journal.phase = phase;
-        let row = history_item(journal.clone(), Some(false));
+        let recovery = if crate::policy::state::pending(phase) {
+            RecoveryState::Pending
+        } else {
+            RecoveryState::Settled
+        };
+        let row = history_item(journal.clone(), recovery);
         assert!(row.summary.ends_with(label), "{}", row.summary);
         assert_eq!(row.details.len(), count);
         assert!(
@@ -48,10 +53,10 @@ fn terminal_history_shows_typed_operations_and_limits_recovery_to_pending() -> T
                 .any(|line| line.contains("SYNTHETIC_PRIVATE_COMMAND_OUTPUT"))
         );
     }
-    let unpublished = history_item(journal.clone(), Some(true));
+    let unpublished = history_item(journal.clone(), RecoveryState::CodexPublication);
     assert!(unpublished.summary.contains("原生安装完成，待登记"));
     assert_eq!(unpublished.details.len(), 7);
-    let unverifiable = history_item(journal, None);
+    let unverifiable = history_item(journal, RecoveryState::Unverified);
     assert!(unverifiable.summary.contains("登记状态待查"));
     assert_eq!(unverifiable.details.len(), 4);
     Ok(())

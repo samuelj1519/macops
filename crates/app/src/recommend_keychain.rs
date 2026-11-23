@@ -138,6 +138,15 @@ fn stamp(profile: &Profile, config: &Path) -> String {
     hash.update(profile.service(config));
     hash.update([0]);
     hash.update(profile.account());
+    if profile.uses_single_entry() {
+        use std::os::unix::ffi::OsStrExt;
+        hash.update([0]);
+        hash.update(config.as_os_str().as_bytes());
+        hash.update([0]);
+        hash.update(profile.endpoint.as_bytes());
+        hash.update([0]);
+        hash.update(profile.credential_version());
+    }
     format!("{:x}", hash.finalize())
 }
 
@@ -168,6 +177,9 @@ enum Slot {
 
 fn slot(profile: &Profile, config: &Path, bytes: &[u8]) -> Result<Slot> {
     let Some(rest) = bytes.strip_prefix(FORMAT) else {
+        if profile.uses_single_entry() {
+            return Err(unavailable());
+        }
         api_token(bytes)?;
         return Ok(Slot::Legacy);
     };
@@ -240,15 +252,91 @@ pub(super) fn load_until(
     bounded(deadline, move || load(&profile, &config, Some(deadline)))
 }
 
-pub(super) fn load_legacy(service: &str, account: &str) -> Result<Vec<u8>> {
-    native::read(None, service, account)?.ok_or_else(unavailable)
+pub(super) fn load_quiet_until(
+    profile: &Profile,
+    config: &Path,
+    deadline: Instant,
+) -> std::result::Result<Vec<u8>, ReadFailure> {
+    let profile = profile.clone();
+    let config = config.to_owned();
+    bounded(deadline, move || {
+        native::without_interaction(|| load(&profile, &config, Some(deadline)))
+    })
 }
 
-pub(super) fn add(config: &Path, profile: &Profile, source: Secret<'_>) -> Result<()> {
+#[derive(PartialEq, Eq)]
+pub(super) enum EntryState {
+    Missing,
+    Previous,
+    Next,
+}
+
+fn classify_entry(
+    config: &Path,
+    previous: Option<&Profile>,
+    next: &Profile,
+    bytes: Option<&[u8]>,
+) -> Result<EntryState> {
+    let Some(bytes) = bytes else {
+        return Ok(EntryState::Missing);
+    };
+    if slot(next, config, bytes).is_ok() {
+        return Ok(EntryState::Next);
+    }
+    if previous.is_some_and(|p| p.uses_single_entry() && slot(p, config, bytes).is_ok()) {
+        return Ok(EntryState::Previous);
+    }
+    Err(unavailable())
+}
+
+pub(super) fn entry_state(
+    config: &Path,
+    previous: Option<&Profile>,
+    next: &Profile,
+) -> Result<EntryState> {
+    let bytes = native::read(None, &next.service(config), next.account())?;
+    classify_entry(config, previous, next, bytes.as_deref())
+}
+
+pub(super) fn write_single(
+    config: &Path,
+    previous: Option<&Profile>,
+    next: &Profile,
+    source: Secret<'_>,
+    guard: &dyn Fn() -> Result<()>,
+) -> Result<()> {
+    let previous = previous.filter(|p| p.uses_single_entry());
+    let data = encode(next, config, source)?;
+    native::write_single(
+        &next.service(config),
+        next.account(),
+        &data,
+        previous.is_some(),
+        guard,
+        |bytes| {
+            matches!(
+                classify_entry(config, previous, next, Some(bytes)),
+                Ok(EntryState::Previous)
+            )
+        },
+    )
+}
+
+pub(super) fn load_legacy(service: &str, account: &str) -> Result<Vec<u8>> {
+    native::without_interaction(|| native::read(None, service, account)?.ok_or_else(unavailable))
+}
+
+pub(super) fn add(
+    config: &Path,
+    profile: &Profile,
+    source: Secret<'_>,
+    guard: &dyn Fn() -> Result<()>,
+) -> Result<()> {
     native::add(
         &profile.service(config),
         profile.account(),
         &encode(profile, config, source)?,
+        guard,
     )
 }
 
@@ -256,10 +344,24 @@ pub(super) fn contains(config: &Path, profile: &Profile) -> Result<bool> {
     native::contains(&profile.service(config), profile.account())
 }
 
-pub(super) fn remove(config: &Path, profile: &Profile, require_tag: bool) -> Result<()> {
-    native::remove(&profile.service(config), profile.account(), |data| {
-        eligible_removal(config, profile, data, require_tag)
-    })
+pub(super) fn remove(
+    config: &Path,
+    profile: &Profile,
+    require_tag: bool,
+    guard: &dyn Fn() -> Result<()>,
+) -> Result<()> {
+    native::remove(
+        &profile.service(config),
+        profile.account(),
+        require_tag,
+        |data| {
+            let eligible = eligible_removal(config, profile, data, require_tag)?;
+            if eligible {
+                guard()?;
+            }
+            Ok(eligible)
+        },
+    )
 }
 
 fn eligible_removal(
@@ -319,6 +421,26 @@ fn verified_item<P: AsRef<[u8]>, T>(
     Ok(Some((data, item)))
 }
 
+fn write_verified<P: AsRef<[u8]>, T>(
+    present: impl Fn() -> Result<bool>,
+    find: impl FnOnce() -> Result<(P, T)>,
+    eligible: Option<impl FnOnce(&[u8]) -> bool>,
+    write: impl FnOnce(Option<T>) -> Result<()>,
+) -> Result<()> {
+    let target = if present()? {
+        let eligible = eligible.ok_or_else(unavailable)?;
+        let (old, item) = verified_item(&present, find)?.ok_or_else(unavailable)?;
+        if !eligible(old.as_ref()) {
+            return Err(unavailable());
+        }
+        Some(item)
+    } else {
+        None
+    };
+    write(target)?;
+    present()?.then_some(()).ok_or_else(unavailable)
+}
+
 fn delete_verified<P: AsRef<[u8]>, T>(
     unique: impl Fn() -> Result<bool>,
     find: impl FnOnce() -> Result<(P, T)>,
@@ -339,7 +461,7 @@ fn delete_verified<P: AsRef<[u8]>, T>(
 
 #[cfg(target_os = "macos")]
 mod native {
-    use super::{Path, Result, delete_verified, unavailable, verified_item};
+    use super::{Path, Result, delete_verified, unavailable, verified_item, write_verified};
     use security_framework::{
         item::{ItemClass, ItemSearchOptions, SearchResult},
         os::macos::{keychain::SecKeychain, passwords::find_generic_password},
@@ -403,23 +525,80 @@ mod native {
         exists(None, service, account)
     }
 
-    pub(super) fn add(service: &str, account: &str, bytes: &[u8]) -> Result<()> {
-        SecKeychain::default()
-            .and_then(|keychain| keychain.add_generic_password(service, account, bytes))
+    pub(super) fn without_interaction<T>(load: impl FnOnce() -> Result<T>) -> Result<T> {
+        let allowed = SecKeychain::user_interaction_allowed().map_err(|_| unavailable())?;
+        let _guard = allowed
+            .then(SecKeychain::disable_user_interaction)
+            .transpose()
+            .map_err(|_| unavailable())?;
+        load()
+    }
+
+    pub(super) fn write_single(
+        service: &str,
+        account: &str,
+        password: &[u8],
+        replace: bool,
+        guard: &dyn Fn() -> Result<()>,
+        eligible: impl FnOnce(&[u8]) -> bool,
+    ) -> Result<()> {
+        let keychain = SecKeychain::default().map_err(|_| unavailable())?;
+        let local = Some(std::slice::from_ref(&keychain));
+        let present = || {
+            let global = exists(None, service, account)?;
+            (global == exists(Some(&keychain), service, account)?)
+                .then_some(global)
+                .ok_or_else(unavailable)
+        };
+        write_verified(
+            present,
+            || find_generic_password(local, service, account).map_err(|_| unavailable()),
+            replace.then_some(eligible),
+            |item| {
+                guard()?;
+                if let Some(mut item) = item {
+                    item.set_password(password).map_err(|_| unavailable())
+                } else {
+                    keychain
+                        .add_generic_password(service, account, password)
+                        .map_err(|_| unavailable())
+                }
+            },
+        )
+    }
+
+    pub(super) fn add(
+        service: &str,
+        account: &str,
+        bytes: &[u8],
+        guard: &dyn Fn() -> Result<()>,
+    ) -> Result<()> {
+        let keychain = SecKeychain::default().map_err(|_| unavailable())?;
+        guard()?;
+        keychain
+            .add_generic_password(service, account, bytes)
             .map_err(|_| unavailable())
     }
 
     pub(super) fn remove(
         service: &str,
         account: &str,
+        require_tag: bool,
         eligible: impl FnOnce(&[u8]) -> Result<bool>,
     ) -> Result<()> {
-        let keychain = SecKeychain::default().map_err(|_| unavailable())?;
+        let keychain = (!require_tag)
+            .then(SecKeychain::default)
+            .transpose()
+            .map_err(|_| unavailable())?;
         delete_verified(
-            || exists(Some(&keychain), service, account),
+            || exists(keychain.as_ref(), service, account),
             || {
-                find_generic_password(Some(std::slice::from_ref(&keychain)), service, account)
-                    .map_err(|_| unavailable())
+                find_generic_password(
+                    keychain.as_ref().map(std::slice::from_ref),
+                    service,
+                    account,
+                )
+                .map_err(|_| unavailable())
             },
             eligible,
             security_framework::os::macos::keychain_item::SecKeychainItem::delete,
@@ -439,11 +618,31 @@ mod native {
         Err(unavailable())
     }
 
-    pub(super) fn add(_: &str, _: &str, _: &[u8]) -> Result<()> {
+    pub(super) fn without_interaction<T>(_: impl FnOnce() -> Result<T>) -> Result<T> {
         Err(unavailable())
     }
 
-    pub(super) fn remove(_: &str, _: &str, _: impl FnOnce(&[u8]) -> Result<bool>) -> Result<()> {
+    pub(super) fn write_single(
+        _: &str,
+        _: &str,
+        _: &[u8],
+        _: bool,
+        _: &dyn Fn() -> Result<()>,
+        _: impl FnOnce(&[u8]) -> bool,
+    ) -> Result<()> {
+        Err(unavailable())
+    }
+
+    pub(super) fn add(_: &str, _: &str, _: &[u8], _: &dyn Fn() -> Result<()>) -> Result<()> {
+        Err(unavailable())
+    }
+
+    pub(super) fn remove(
+        _: &str,
+        _: &str,
+        _: bool,
+        _: impl FnOnce(&[u8]) -> Result<bool>,
+    ) -> Result<()> {
         Err(unavailable())
     }
 }
