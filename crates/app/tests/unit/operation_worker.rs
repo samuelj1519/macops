@@ -4,6 +4,39 @@ use clap::Parser;
 use std::{ffi::OsStr, fs, os::unix::fs::PermissionsExt as _};
 
 #[test]
+fn recovery_text_distinguishes_no_operations_from_incomplete_evidence() {
+    let empty = recovery_text(&json!({"pending":[],"incomplete":false}), false);
+    assert_eq!(empty, "目前没有要检查的操作。\n");
+    let incomplete = recovery_text(&json!({"pending":[],"incomplete":true}), false);
+    assert!(incomplete.contains("清单可能少了几项"));
+    assert!(!incomplete.contains("没有要检查的操作"));
+
+    let uncertain_followup = recovery_text(
+        &json!({
+            "journal":{"phase":"succeeded","id":"OP-fixture"},
+            "continuationRequired":false
+        }),
+        false,
+    );
+    assert!(uncertain_followup.contains("运行 mo recover 查看是否仍有待核对步骤"));
+    assert!(!uncertain_followup.contains("mo agent resume"));
+    let busy = recovery_text(
+        &json!({"reason":"operation_busy","journal":{"id":"OP-wait","phase":"running"}}),
+        false,
+    );
+    assert!(busy.contains("等它结束，再运行 mo recover OP-wait"));
+
+    let verified_preview = recovery_text(
+        &json!({
+            "mode":"dry-run","journal":{"phase":"unknown","id":"OP-fixture"},
+        }),
+        true,
+    );
+    assert!(!verified_preview.contains("运行 mo recover"));
+    assert!(crate::output::recovery_hint(&json!({"id":"OP-foo && a","phase":"unknown"})).is_none());
+}
+
+#[test]
 fn isolated_plugin_install_requires_its_native_supervisor() -> TestResult {
     let mut journal = crate::test_support::journal()?;
     journal.plan.action = Action::Install;
@@ -299,5 +332,44 @@ fn mise_worker_refuses_a_configuration_owner_discovered_after_planning() -> Test
     assert_eq!(blocked.code, "configuration_owner_requires_review");
     assert_eq!(fs::read(&source)?, b"[tools]\nfixture-tool='1.0.0'\n");
     assert!(!ctx.state.exists());
+    Ok(())
+}
+
+#[test]
+fn recovery_approval_cannot_follow_a_replaced_active_journal() -> TestResult {
+    let directory = tempfile::tempdir_in("/private/tmp")?;
+    let cli = Cli::try_parse_from([
+        "macops",
+        "--home",
+        directory.path().to_str().ok_or("home")?,
+        "app",
+    ])?;
+    let ctx = Context::from_cli(&cli, &mut Vec::new())?;
+    let first = new_journal(&ctx, crate::test_support::journal()?.plan)?;
+    let replacement = new_journal(&ctx, first.plan.clone())?;
+    let store = Store::lock(&ctx)?;
+    store.save(&first)?;
+    drop(store);
+    let operation = recover_before_write_with(
+        &ctx,
+        None,
+        |snapshot| {
+            assert_eq!(snapshot.id, first.id);
+            let changed = Store::lock(&ctx)?;
+            changed.save(&replacement)
+        },
+        |_| Ok(true),
+    );
+    assert_eq!(
+        operation
+            .err()
+            .ok_or("a replacement needs its own approval")?
+            .code,
+        "plan_stale"
+    );
+    let current = crate::store::active(&ctx)?.ok_or("active")?;
+    assert_eq!(current.id, replacement.id);
+    assert_eq!(current.phase, Phase::Prepared);
+    assert_eq!(crate::store::history(&ctx)?.len(), 2);
     Ok(())
 }

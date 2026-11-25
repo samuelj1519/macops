@@ -307,6 +307,21 @@ fn bounded_reads_cover_completion_expiry_and_keychain_failure() -> TestResult {
         .err(),
         Some(ReadFailure::Keychain)
     );
+    for (code, expected) in [
+        ("model_keychain_item_missing", ReadFailure::Missing),
+        (
+            "model_keychain_authorization_required",
+            ReadFailure::Authorization,
+        ),
+    ] {
+        assert_eq!(
+            bounded(Instant::now() + Duration::from_secs(2), move || {
+                Err(Error::attention(code, "fixture"))
+            })
+            .err(),
+            Some(expected),
+        );
+    }
     assert_eq!(
         bounded(
             Instant::now()
@@ -327,7 +342,10 @@ fn native_missing_and_denied_matches_stay_distinct_in_isolated_scope() -> TestRe
     assert!(!native::unique_search(Err(KeychainError::from_code(
         -25300
     )))?);
-    assert!(native::unique_search(Err(KeychainError::from_code(-25308))).is_err());
+    let denied = native::unique_search(Err(KeychainError::from_code(-25308)))
+        .err()
+        .ok_or("keychain authorization should be required")?;
+    assert_eq!(denied.code, "model_keychain_authorization_required");
     assert!(!native::unique_search(Ok(vec![]))?);
     let dir = tempfile::tempdir_in("/private/tmp")?;
     // The injected Keychain file path is explicit and never falls back to the user's domains.

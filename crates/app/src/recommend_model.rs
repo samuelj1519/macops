@@ -19,6 +19,8 @@ use std::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Failure {
     Keychain,
+    KeychainMissing,
+    KeychainAuthorization,
     Transport,
     Deadline,
     OutputLimit,
@@ -30,6 +32,8 @@ impl Failure {
     fn label(self) -> &'static str {
         match self {
             Self::Keychain => "keychain-unavailable",
+            Self::KeychainMissing => "keychain-missing",
+            Self::KeychainAuthorization => "keychain-authorization-required",
             Self::Transport => "transport-unavailable",
             Self::Deadline => "deadline",
             Self::OutputLimit => "output-limit",
@@ -152,6 +156,8 @@ fn keychain_failure(failure: ReadFailure) -> Failure {
     match failure {
         ReadFailure::Deadline => Failure::Deadline,
         ReadFailure::Keychain => Failure::Keychain,
+        ReadFailure::Missing => Failure::KeychainMissing,
+        ReadFailure::Authorization => Failure::KeychainAuthorization,
     }
 }
 
@@ -518,8 +524,43 @@ fn fetch_public_with(path: &Path, url: &str, deadline: Instant) -> crate::error:
         ])
         .stdin(Stdio::null());
     let data = run(&mut command, deadline, policy::RESPONSE_LIMIT + 4).map_err(|_| error())?;
-    let body = http_body(&data).map_err(|_| error())?;
+    let body = http_body(&data).map_err(|_| public_source_error(url, &data))?;
     crate::policy::json::parse(body).map_err(|_| error())
+}
+
+fn public_source_error(url: &str, response: &[u8]) -> crate::error::Error {
+    use crate::error::Error;
+    if url.starts_with("https://api.github.com/")
+        && let Some(border) = response.iter().rposition(|byte| *byte == b'\n')
+    {
+        match &response[border + 1..] {
+            b"404" => {
+                return Error::attention(
+                    "recommend_github_not_found",
+                    "GitHub 找不到公开仓库或文件",
+                );
+            }
+            b"429" => {
+                return Error::attention(
+                    "recommend_github_rate_limited",
+                    "GitHub API 暂时限制访问",
+                );
+            }
+            b"403"
+                if crate::policy::json::parse(&response[..border])
+                    .ok()
+                    .and_then(|value| value["message"].as_str().map(str::to_ascii_lowercase))
+                    .is_some_and(|message| message.contains("rate limit")) =>
+            {
+                return Error::attention(
+                    "recommend_github_rate_limited",
+                    "GitHub 匿名 API 额度已用完",
+                );
+            }
+            _ => (),
+        }
+    }
+    Error::attention("recommend_source_unavailable", "未能核验远端公开来源")
 }
 
 fn run(command: &mut Command, deadline: Instant, limit: usize) -> Result<Vec<u8>, Failure> {

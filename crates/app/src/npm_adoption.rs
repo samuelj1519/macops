@@ -201,7 +201,12 @@ fn prepare_plan(ctx: &Context, id: &str, receipts: &Receipts) -> Result<Plan> {
     })
 }
 
-pub fn recover(ctx: &Context, store: &Store, journal: &mut Journal) -> Result<Value> {
+pub fn recover(
+    ctx: &Context,
+    store: &Store,
+    journal: &mut Journal,
+    mark_failed: bool,
+) -> Result<Value> {
     let unknown = || {
         Error::attention(
             "npm_binding_outcome_unknown",
@@ -211,6 +216,15 @@ pub fn recover(ctx: &Context, store: &Store, journal: &mut Journal) -> Result<Va
     let proof = journal.plan.npm_binding.as_ref().ok_or_else(unknown)?;
     if !crate::policy::state::pending(journal.phase) {
         return Ok(json!(journal));
+    }
+    if mark_failed {
+        return Err(Error::attention(
+            "mark_failed_unsupported",
+            format!(
+                "这次操作要靠安装记录判断结果，不能手动记为失败。\n运行 mo recover {} 检查那次的结果。请带上原来的目录选项。",
+                journal.id
+            ),
+        ));
     }
     if journal.state != ctx.state || journal.home != ctx.home {
         return Err(unknown());

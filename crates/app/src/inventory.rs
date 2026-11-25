@@ -35,7 +35,7 @@ fn load_with_authority(
     let mut catalog = declared_catalog(ctx)?;
     let receipts = ctx.state.join("receipts.json");
     if paths::read_path(&receipts)?.exists() {
-        let state: crate::domain::Receipts = paths::regular_json(&receipts)?;
+        let state = crate::target::receipts(ctx)?;
         crate::policy::catalogue::merge_receipts(&mut catalog, state)?;
     }
     import_apps(ctx, authority, &mut catalog)?;

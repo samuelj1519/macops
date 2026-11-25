@@ -17,6 +17,7 @@ fn prepared(base: &Path) -> Result<Prepared> {
     }
     let manifest = br#"{"name":"item","version":"1.0.0"}"#;
     Ok(Prepared {
+        target: None,
         initially_disabled: false,
         identity: same_directory(&root)?.identity().clone(),
         directories: allocation_directories(&root)?,
@@ -118,6 +119,7 @@ pub(super) fn fixture_context() -> Result<(tempfile::TempDir, Context)> {
 }
 
 pub(super) const FIXTURE: NativeIo = NativeIo {
+    progress: |_| {},
     verify_binary: |reader, path| {
         if reader.binary(path)? != source::sha(b"fixture binary") {
             return Err(stale());
@@ -208,6 +210,502 @@ pub(super) fn fake_binary(ctx: &Context) -> Result<PathBuf> {
     fs::write(&binary, b"fixture binary")?;
     fs::set_permissions(&binary, fs::Permissions::from_mode(0o700))?;
     Ok(binary)
+}
+
+#[test]
+fn installs_into_an_existing_codex_profile_with_original_preferences() -> TestResult {
+    let (_temp, ctx) = fixture_context()?;
+    let profile = ctx.home.join(".codex");
+    fs::create_dir(&profile)?;
+    let settings = profile.join(CONFIG);
+    fs::write(
+        &settings,
+        b"model = 'fixture-existing'\n[features]\nfast_mode = true\n",
+    )?;
+    let candidate = crate::resource_agents::profile_roots(&ctx)?
+        .into_iter()
+        .find(|item| item.name == "codex:default")
+        .ok_or("missing target")?;
+    let target = crate::resource_agents::InstallTarget::capture(&ctx, &candidate)?;
+    crate::resource_agents::enroll(&ctx, &target)?;
+    let result = install_with_target(
+        &ctx,
+        offer()?,
+        fake_binary(&ctx)?,
+        &FIXTURE,
+        InitialActivation::Disabled,
+        Some(target),
+    )?;
+    assert_eq!(result["journal"]["phase"], "succeeded", "{result}");
+    let updated = fs::read_to_string(&settings)?;
+    assert!(updated.contains("fixture-existing"));
+    assert!(updated.contains("fast_mode = true"));
+    assert!(updated.contains("enabled = false"));
+    assert!(
+        profile
+            .join("plugins/cache/market/item/1.0.0/.codex-plugin/plugin.json")
+            .is_file()
+    );
+    assert!(
+        profile
+            .join(".tmp/marketplaces/market/.codex-plugin/plugin.json")
+            .is_file()
+    );
+    assert_eq!(managed_profiles(&ctx)?, []);
+    Ok(())
+}
+
+#[test]
+fn existing_codex_target_continues_verified_market_and_never_replaces_an_already_installed_offer()
+-> TestResult {
+    for plugin_done in [false, true] {
+        let (_temp, ctx) = fixture_context()?;
+        let profile = ctx.home.join(".codex");
+        fs::create_dir(&profile)?;
+        fs::write(profile.join(CONFIG), "model = 'fixture-existing'\n")?;
+        let candidate = crate::resource_agents::profile_roots(&ctx)?
+            .into_iter()
+            .find(|item| item.name == "codex:default")
+            .ok_or("missing target")?;
+        let target = crate::resource_agents::InstallTarget::capture(&ctx, &candidate)?;
+        let store = Store::lock(&ctx)?;
+        let offer = offer()?;
+        let binary = fake_binary(&ctx)?;
+        let mut prepared = prepare_source(
+            &ctx,
+            &store,
+            offer.clone(),
+            binary.clone(),
+            &FIXTURE,
+            InitialActivation::Enabled,
+        )?;
+        prepared.target = Some(target.clone());
+        let checkout = prepared.market();
+        let market = stage(
+            &ctx,
+            &store,
+            &Frozen {
+                prepared: prepared.clone(),
+                market_operation: None,
+            },
+            &FIXTURE,
+        )?;
+        assert_eq!(market.phase, Phase::Succeeded);
+        fs::create_dir(checkout.join(".git"))?;
+        fs::write(checkout.join(".git/HEAD"), b"ref: refs/heads/main\n")?;
+        assert!(crate::plugin_target::recovery_matches(
+            &market,
+            Some(&target)
+        )?);
+        assert!(!crate::plugin_target::recovery_matches(&market, None)?);
+        if plugin_done {
+            let installed = stage(
+                &ctx,
+                &store,
+                &Frozen {
+                    prepared,
+                    market_operation: Some(market.id),
+                },
+                &FIXTURE,
+            )?;
+            assert_eq!(installed.phase, Phase::Succeeded);
+        }
+        drop(store);
+        let run = |activation| {
+            install_with_target(
+                &ctx,
+                offer.clone(),
+                binary.clone(),
+                &FIXTURE,
+                activation,
+                Some(target.clone()),
+            )
+        };
+        assert!(run(InitialActivation::Disabled).is_err());
+        assert_eq!(
+            crate::store::history(&ctx)?.len(),
+            if plugin_done { 2 } else { 1 }
+        );
+        let first = run(InitialActivation::Enabled)?;
+        assert_eq!(first["journal"]["phase"], "succeeded");
+        assert_eq!(crate::store::history(&ctx)?.len(), 3);
+        assert_eq!(
+            fs::read(profile.join(".tmp/marketplaces/market/.git/HEAD"))?,
+            b"ref: refs/heads/main\n"
+        );
+        assert_eq!(
+            install_at(
+                &ctx,
+                offer.clone(),
+                binary.clone(),
+                InitialActivation::Enabled,
+                target.clone(),
+                |_| {},
+            )?,
+            first
+        );
+        assert_eq!(crate::store::history(&ctx)?.len(), 3);
+        fs::write(
+            profile.join("plugins/cache/market/item/1.0.0/.codex-plugin/plugin.json"),
+            b"unexpected modification",
+        )?;
+        assert!(run(InitialActivation::Enabled).is_err());
+        assert_eq!(crate::store::history(&ctx)?.len(), 3);
+    }
+    Ok(())
+}
+
+fn awaiting_publication(ctx: &Context, journal: &Journal) -> Result<bool> {
+    let records = crate::store::history(ctx)?;
+    let (candidates, _) = awaiting_followup(ctx, &records)?;
+    Ok(candidates.contains(&journal.id))
+}
+
+impl crate::test_support::PluginTargetFixture {
+    pub(crate) fn unstarted_isolated_codex(
+        activation: InitialActivation,
+    ) -> Result<(tempfile::TempDir, Context, Offer)> {
+        let (temporary, ctx) = fixture_context()?;
+        let offer = offer()?;
+        let store = Store::lock(&ctx)?;
+        let prepared = prepare_source(
+            &ctx,
+            &store,
+            offer.clone(),
+            fake_binary(&ctx)?,
+            &FIXTURE,
+            activation,
+        )?;
+        let no_start = NativeIo {
+            launch: |_, _, _| Err(stale()),
+            ..FIXTURE
+        };
+        assert!(
+            stage(
+                &ctx,
+                &store,
+                &Frozen {
+                    prepared,
+                    market_operation: None
+                },
+                &no_start,
+            )
+            .is_err()
+        );
+        Ok((temporary, ctx, offer))
+    }
+}
+
+#[test]
+fn recovery_inventory_keeps_incomplete_codex_evidence_out_of_the_confirmable_list() -> TestResult {
+    let (_temp, ctx) = fixture_context()?;
+    let store = Store::lock(&ctx)?;
+    let prepared = prepare_source(
+        &ctx,
+        &store,
+        offer()?,
+        fake_binary(&ctx)?,
+        &FIXTURE,
+        InitialActivation::Enabled,
+    )?;
+    let market = stage(
+        &ctx,
+        &store,
+        &Frozen {
+            prepared,
+            market_operation: None,
+        },
+        &FIXTURE,
+    )?;
+    drop(store);
+    let (pending, incomplete) = crate::operations::pending_recovery(&ctx)?;
+    assert_eq!(
+        pending.iter().map(|row| &row.id).collect::<Vec<_>>(),
+        [&market.id]
+    );
+    assert!(!incomplete);
+    fs::remove_file(ctx.state.join(name(&market, "plan")))?;
+    let (pending, incomplete) = crate::operations::pending_recovery(&ctx)?;
+    assert!(pending.is_empty() && incomplete);
+    let (history, _) = crate::operations::recovery_history(&ctx)?;
+    assert!(history.iter().any(|(entry, status)| {
+        entry.id == market.id && *status == crate::operations::RecoveryState::Unverified
+    }));
+    let error = crate::operations::RecoveryPreview::read(&ctx, &market.id)
+        .err()
+        .ok_or("unverifiable stage must stay out of recovery")?;
+    assert_eq!(error.code, "recovery_evidence_incomplete");
+    Ok(())
+}
+
+#[test]
+fn a_successor_completed_during_codex_resume_confirmation_is_never_replayed() -> TestResult {
+    let (_temp, ctx) = fixture_context()?;
+    let store = Store::lock(&ctx)?;
+    let offer = offer()?;
+    let binary = fake_binary(&ctx)?;
+    let prepared = prepare_source(
+        &ctx,
+        &store,
+        offer.clone(),
+        binary.clone(),
+        &FIXTURE,
+        InitialActivation::Enabled,
+    )?;
+    let market = stage(
+        &ctx,
+        &store,
+        &Frozen {
+            prepared,
+            market_operation: None,
+        },
+        &FIXTURE,
+    )?;
+    drop(store);
+    let chosen = resume_using(&ctx, &market, false, true, &FIXTURE, |_, _| {
+        let result = install_using(&ctx, offer, binary, &FIXTURE, InitialActivation::Enabled)?;
+        assert_eq!(result["journal"]["phase"], "succeeded");
+        Ok(())
+    });
+    assert!(chosen.is_err());
+    let history = crate::store::history(&ctx)?;
+    assert_eq!(history.len(), 3);
+    assert_eq!(
+        history
+            .iter()
+            .map(|entry| matches_prior(entry, &market.id))
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .filter(|matches| *matches)
+            .count(),
+        1
+    );
+    Ok(())
+}
+
+#[test]
+fn public_agent_resume_routes_to_codex_and_cannot_bypass_binary_verification() -> TestResult {
+    use clap::Parser as _;
+    let (_temp, ctx) = fixture_context()?;
+    let store = Store::lock(&ctx)?;
+    let prepared = prepare_source(
+        &ctx,
+        &store,
+        offer()?,
+        fake_binary(&ctx)?,
+        &FIXTURE,
+        InitialActivation::Enabled,
+    )?;
+    let market = stage(
+        &ctx,
+        &store,
+        &Frozen {
+            prepared,
+            market_operation: None,
+        },
+        &FIXTURE,
+    )?;
+    drop(store);
+    let cli =
+        crate::cli::Cli::try_parse_from(["macops", "agent", "resume", &market.id, "--dry-run"])?;
+    let crate::cli::Command::Agent {
+        command: Some(command),
+        ..
+    } = &cli.command
+    else {
+        return Err("fixture did not parse".into());
+    };
+    let error = crate::run_agent_entry(&cli, &ctx, command)
+        .err()
+        .ok_or("fake native binary is not authorized")?;
+    assert_eq!(error.code, "codex_install_binary_unverified");
+    assert_eq!(crate::store::history(&ctx)?.len(), 1);
+    Ok(())
+}
+
+#[test]
+fn isolated_market_retry_resumes_the_frozen_install_at_most_once() -> TestResult {
+    let (_temp, ctx) = fixture_context()?;
+    let store = Store::lock(&ctx)?;
+    let offer = offer()?;
+    let prepared = prepare_source(
+        &ctx,
+        &store,
+        offer.clone(),
+        fake_binary(&ctx)?,
+        &FIXTURE,
+        InitialActivation::Enabled,
+    )?;
+    let market = stage(
+        &ctx,
+        &store,
+        &Frozen {
+            prepared,
+            market_operation: None,
+        },
+        &FIXTURE,
+    )?;
+    drop(store);
+    assert_eq!(
+        matching_activation(&market, &offer, None)?,
+        Some(InitialActivation::Enabled)
+    );
+    let store = Store::lock(&ctx)?;
+    let mut checked = market.clone();
+    let status = recover_using(&ctx, &store, &mut checked, false, false, &FIXTURE)?;
+    assert_eq!(status["phase"], "succeeded");
+    assert_eq!(
+        status["continuationCommand"],
+        format!("mo agent resume {}", market.id)
+    );
+    drop(store);
+
+    let preview = resume_using(&ctx, &market, true, false, &FIXTURE, |_, _| {
+        panic!("read-only preview")
+    })?;
+    assert_eq!(preview["persistentWrites"], false);
+    assert_eq!(preview["enabled"], true);
+    let cancelled = resume_using(&ctx, &market, false, false, &FIXTURE, |_, _| {
+        Err(Error::attention("cancelled", "fixture"))
+    });
+    assert_eq!(cancelled.err().ok_or("refused")?.code, "cancelled");
+    assert_eq!(crate::store::history(&ctx)?.len(), 1);
+
+    let binary = fake_binary(&ctx)?;
+    let run = |mode| install_using(&ctx, offer.clone(), binary.clone(), &FIXTURE, mode);
+    assert_eq!(
+        run(InitialActivation::Disabled)
+            .err()
+            .ok_or("original choice")?
+            .code,
+        "plugin_install_activation_changed"
+    );
+    assert_eq!(crate::store::history(&ctx)?.len(), 1);
+    let result = run(InitialActivation::Enabled)?;
+    assert_eq!(result["journal"]["phase"], "succeeded");
+    let receipt = result["journal"]["id"]
+        .as_str()
+        .ok_or("published receipt")?;
+    assert!(receipt.ends_with("-receipt"));
+    assert_ne!(receipt, format!("{}-receipt", market.id));
+    assert!(result["codexHome"].is_string());
+    assert_eq!(crate::store::history(&ctx)?.len(), 3);
+    assert!(!awaiting_publication(&ctx, &market)?);
+    assert!(resume_using(&ctx, &market, false, true, &FIXTURE, |_, _| Ok(())).is_err());
+    let store = Store::lock(&ctx)?;
+    let status = recover_using(&ctx, &store, &mut checked, false, false, &FIXTURE)?;
+    assert_eq!(status["continuationRequired"], false);
+    assert_eq!(crate::store::history(&ctx)?.len(), 3);
+
+    Ok(())
+}
+
+#[test]
+fn explicit_codex_continuation_publishes_the_pinned_offer() -> TestResult {
+    let (_temp, ctx) = fixture_context()?;
+    let store = Store::lock(&ctx)?;
+    let prepared = prepare_source(
+        &ctx,
+        &store,
+        offer()?,
+        fake_binary(&ctx)?,
+        &FIXTURE,
+        InitialActivation::Disabled,
+    )?;
+    let market = stage(
+        &ctx,
+        &store,
+        &Frozen {
+            prepared,
+            market_operation: None,
+        },
+        &FIXTURE,
+    )?;
+    drop(store);
+    let result = resume_using(&ctx, &market, false, true, &FIXTURE, |summary, yes| {
+        assert!(yes);
+        assert!(summary.contains("保持停用"));
+        Ok(())
+    })?;
+    assert_eq!(result["journal"]["phase"], "succeeded");
+    let native = crate::store::history(&ctx)?
+        .into_iter()
+        .find(|journal| journal.id == market.id)
+        .ok_or("original market")?;
+    assert!(!awaiting_publication(&ctx, &native)?);
+    assert_eq!(crate::store::history(&ctx)?.len(), 3);
+    let mut another_scope = ctx.clone();
+    another_scope.cache = ctx.home.join("another-cache");
+    assert_eq!(
+        resume_using(
+            &another_scope,
+            &market,
+            false,
+            true,
+            &FIXTURE,
+            |_, _| panic!("wrong scope")
+        )
+        .err()
+        .ok_or("scope difference")?
+        .code,
+        "recovery_scope_changed"
+    );
+    let separate = install_using(
+        &another_scope,
+        offer()?,
+        fake_binary(&ctx)?,
+        &FIXTURE,
+        InitialActivation::Enabled,
+    )?;
+    assert_ne!(separate["codexHome"], result["codexHome"]);
+    assert_eq!(crate::store::history(&ctx)?.len(), 6);
+
+    Ok(())
+}
+
+#[test]
+fn codex_resume_rechecks_the_frozen_destination_after_confirmation() -> TestResult {
+    let (_temp, ctx) = fixture_context()?;
+    let target_path = ctx.home.join(".codex");
+    fs::create_dir(&target_path)?;
+    let row = crate::resource_agents::profile_roots(&ctx)?
+        .into_iter()
+        .find(|row| row.name == "codex:default")
+        .ok_or("existing config")?;
+    let target = crate::resource_agents::InstallTarget::capture(&ctx, &row)?;
+    let store = Store::lock(&ctx)?;
+    let mut prepared = prepare_source(
+        &ctx,
+        &store,
+        offer()?,
+        fake_binary(&ctx)?,
+        &FIXTURE,
+        InitialActivation::Enabled,
+    )?;
+    prepared.target = Some(target);
+    let market = stage(
+        &ctx,
+        &store,
+        &Frozen {
+            prepared,
+            market_operation: None,
+        },
+        &FIXTURE,
+    )?;
+    drop(store);
+    let result = resume_using(&ctx, &market, false, false, &FIXTURE, |message, _| {
+        assert!(message.contains(&target_path.display().to_string()));
+        fs::rename(&target_path, ctx.home.join("original-codex"))?;
+        fs::create_dir(&target_path)?;
+        Ok(())
+    });
+    assert_eq!(
+        result.err().ok_or("rebound directory")?.code,
+        "agent_install_target_changed"
+    );
+    assert_eq!(crate::store::history(&ctx)?.len(), 1);
+    assert!(!target_path.join("plugins").exists());
+    Ok(())
 }
 
 #[test]

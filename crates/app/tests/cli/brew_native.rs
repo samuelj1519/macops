@@ -1,4 +1,4 @@
-use super::{Fixture, TestResult, write_json};
+use super::{Fixture, TestResult, assert_code, write_json};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{fs, path::Path};
@@ -95,6 +95,15 @@ fn unregistered_bound_preview_never_executes_native_or_creates_state() -> TestRe
     let f = Fixture::new()?;
     let id = bound_catalog(&f)?;
     let (_output, data) = f.run(&["app", "upgrade", &id, "--dry-run"])?;
+    let output = super::plain(&f, &["app", "upgrade", &id, "--dry-run"])?;
+    assert_code(&output, 0);
+    let text = String::from_utf8(output.stdout)?;
+    assert!(text.contains("Homebrew 操作预演（未运行原生查询）"));
+    assert!(
+        text.contains("Formula foo") && text.contains("版本待核验 是"),
+        "{text}"
+    );
+    assert!(text.contains("Cellar") && !text.contains("SYNTHETIC_PRIVATE_CAPTURE"));
     assert!(!f.home.join("native-calls").exists(), "{data}");
     assert!(!f.root.path().join("state").exists());
     assert!(!f.root.path().join("cache").exists());
@@ -171,6 +180,7 @@ fn registered_doctor_uses_frozen_private_query_and_never_creates_install_owner()
         .env("PATH", "/usr/bin:/bin")
         .args(["app", "doctor", &id])
         .output()?;
+    assert_code(&output, 3);
     let data: Value = serde_json::from_slice(&output.stdout)?;
     assert_eq!(
         data["data"][0]["observation"]["status"],
@@ -263,6 +273,10 @@ if a[0]=='ruby':
   (h.parent/'catalog.json').write_text(json.dumps({'schema_version':1,'packages':[]}))
 else:
  assert a in [['upgrade','--formula','homebrew/core/foo'],['install','--formula','homebrew/core/foo'],['uninstall','--formula','--force','homebrew/core/foo']],a
+ if mode=='progress':
+  print('fixture brew stdout progress',flush=True)
+  print('fixture brew stderr progress',file=sys.stderr,flush=True)
+  while not (h/'progress-release').exists():time.sleep(.01)
  (h/'mutated').write_text('once')
  if mode=='nonzero':sys.exit(23)
  if mode=='signal':os.kill(os.getpid(),signal.SIGTERM)
@@ -506,7 +520,7 @@ fn recover_settles_the_authoritative_active_brew_record_across_a_terminal_histor
     assert_eq!(
         fs::read_to_string(f.home.join("events"))?
             .lines()
-            .filter(|line| line.starts_with("[\"upgrade\""))
+            .filter(|line| line.starts_with(r#"["upgrade""#))
             .count(),
         1
     );
@@ -713,7 +727,7 @@ while sel.get_map():
   data=os.read(key.fileobj.fileno(),65536)
   if not data:sel.unregister(key.fileobj);continue
   buf[key.data]+=data
-  prompts=buf['err'].decode('utf-8').count('继续？输入 yes：')
+  prompts=buf['err'].decode('utf-8').count('同意就输入 yes')
   while handled<prompts:
    path=pathlib.Path(q['events']);counts.append(len(path.read_text().splitlines()) if path.exists() else 0)
    os.write(master,b'yes\n' if handled==0 else b'no\n');handled+=1
@@ -1036,7 +1050,7 @@ while sel.get_map():
   data=os.read(key.fileobj.fileno(),65536)
   if not data:sel.unregister(key.fileobj);continue
   buf[key.data]+=data
-  prompts=buf['err'].decode('utf-8').count('继续？输入 yes：')
+  prompts=buf['err'].decode('utf-8').count('同意就输入 yes')
   while handled<prompts:
    path=pathlib.Path(q['events']);counts.append(len(path.read_text().splitlines()) if path.exists() else 0)
    os.write(master,b'yes\n' if handled==0 else b'no\n');handled+=1
@@ -1207,11 +1221,11 @@ fn adopt_brew_name_collision_refuses_but_explicit_id_still_works() -> TestResult
 #[test]
 fn inventory_confirms_adoption_upgrade_and_removal_with_native_brew() -> TestResult {
     for (key, result, mutation, approved, receipt_only) in [
-        ("a", "纳管结果 succeeded", None, true, false),
-        ("u", "cancelled", None, false, false),
-        ("u", "升级结果 succeeded", Some("upgrade"), true, false),
-        ("x", "卸载结果 succeeded", Some("uninstall"), true, false),
-        ("x", "卸载结果 succeeded", Some("uninstall"), true, true),
+        ("a", "纳入管理结果 已完成", None, true, false),
+        ("u", "已取消", None, false, false),
+        ("u", "升级结果 已完成", Some("upgrade"), true, false),
+        ("x", "卸载结果 已完成", Some("uninstall"), true, false),
+        ("x", "卸载结果 已完成", Some("uninstall"), true, true),
     ] {
         let f = Fixture::new()?;
         let (id, actual) = lifecycle_fixture(&f)?;
@@ -1312,11 +1326,137 @@ fn run_brew_pty(f: &Fixture, actual: &Path, invocation: &[&str], mut request: Va
 }
 
 #[test]
+fn declining_first_brew_use_stops_the_other_targets_in_an_application_batch() -> TestResult {
+    let f = Fixture::new()?;
+    let indexed = f.read_json("catalog.json")?["packages"][0].clone();
+    let (_, actual) = lifecycle_fixture(&f)?;
+    let mut catalog = f.read_json("catalog.json")?;
+    catalog["packages"]
+        .as_array_mut()
+        .ok_or("packages")?
+        .push(indexed);
+    write_json(&f.catalog, &catalog)?;
+    let registry = f.file("state/brew-contexts-v1.json");
+    write_json(&registry, &json!({"schema_version":1,"contexts":{}}))?;
+    fs::write(f.file("version"), "1.0.0")?;
+    run_brew_pty(
+        &f,
+        &actual,
+        &["app", "upgrade"],
+        json!({"mode":"batch-discovery-cancel"}),
+    )?;
+    assert_eq!(fs::read_to_string(f.file("version"))?, "1.0.0");
+    assert!(!f.file("calls").exists());
+    assert!(!f.home.join("mutated").exists());
+    assert_eq!(
+        f.read_json("state/brew-contexts-v1.json")?["contexts"],
+        json!({})
+    );
+    Ok(())
+}
+
+#[test]
+fn brew_recovery_reuses_the_frozen_recipe_and_requires_consent_for_a_changed_source() -> TestResult
+{
+    let f = Fixture::new()?;
+    let mut shadow = f.read_json("catalog.json")?["packages"][0].clone();
+    let (id, actual) = lifecycle_fixture(&f)?;
+    shadow["id"] = json!("app:foo");
+    let mut original_catalog = f.read_json("catalog.json")?;
+    original_catalog["packages"]
+        .as_array_mut()
+        .ok_or("packages")?
+        .push(shadow);
+    write_json(&f.catalog, &original_catalog)?;
+    let result = lifecycle_run(&f, &actual, &["app", "upgrade", &id, "--yes"])?;
+    let mut pending = f.read_json("state/active.json")?;
+    assert_eq!(pending["phase"], "succeeded", "{result}");
+    pending["phase"] = json!("unknown");
+    let active = f.file("state/active.json");
+    write_json(&active, &pending)?;
+    let before = fs::read(&active)?;
+    let events = fs::read(f.home.join("events"))?;
+
+    let mut changed = original_catalog.clone();
+    changed["packages"][0]["provider"]["recipe_ref"] = json!("a-different-recipe");
+    write_json(&f.catalog, &changed)?;
+    let blocked = lifecycle_run(&f, &actual, &["app", "upgrade", "app:foo"])?;
+    assert_eq!(
+        blocked["error"]["code"], "confirmation_required",
+        "{blocked}"
+    );
+    assert_eq!(fs::read(&active)?, before);
+    assert_eq!(fs::read(f.home.join("events"))?, events);
+
+    write_json(&f.catalog, &original_catalog)?;
+    let retry = lifecycle_run(&f, &actual, &["app", "upgrade", "app:foo"])?;
+    assert_eq!(retry["data"]["journal"]["id"], pending["id"], "{retry}");
+    assert_eq!(retry["data"]["journal"]["phase"], "succeeded");
+    let events = fs::read_to_string(f.home.join("events"))?;
+    assert_eq!(
+        events
+            .lines()
+            .filter(|line| line.starts_with(r#"["upgrade""#))
+            .count(),
+        1
+    );
+    Ok(())
+}
+
+#[test]
+fn recommendation_cannot_advance_an_unrelated_journal_when_recovery_consent_is_declined()
+-> TestResult {
+    let f = Fixture::new()?;
+    let generic = f.read_json("catalog.json")?["packages"][0].clone();
+    let (_, actual) = lifecycle_fixture(&f)?;
+    fs::remove_dir_all(f.home.join("native-cellar/foo"))?;
+    let mut catalog = f.read_json("catalog.json")?;
+    catalog["packages"][0]["provider"]["recipe_ref"] = json!("synthetic-declared-formula");
+    catalog["packages"]
+        .as_array_mut()
+        .ok_or("packages")?
+        .push(generic);
+    write_json(&f.catalog, &catalog)?;
+    let (out, completed) = f.run(&["app", "install", "demo", "--version", "1.0.0"])?;
+    assert_code(&out, 0);
+    let mut old = completed["data"].clone();
+    old["phase"] = json!("unknown");
+    let active = f.file("state/active.json");
+    write_json(&active, &old)?;
+    let before = fs::read(&active)?;
+    let history = f.file(&format!(
+        "state/operations/{}.json",
+        old["id"].as_str().ok_or("ID")?
+    ));
+    let history_before = fs::read(&history)?;
+    let batch = lifecycle_run(&f, &actual, &["app", "upgrade"])?;
+    assert_eq!(batch["error"]["code"], "confirmation_required", "{batch}");
+    assert_eq!(fs::read(&active)?, before);
+    assert_eq!(fs::read(&history)?, history_before);
+    assert!(!f.home.join("events").exists());
+
+    run_brew_pty(
+        &f,
+        &actual,
+        &["recommend", "foo"],
+        json!({"mode":"pending-cancel"}),
+    )?;
+    assert_eq!(fs::read(active)?, before);
+    assert_eq!(fs::read(history)?, history_before);
+    assert_eq!(fs::read_to_string(f.file("calls"))?, "install\n");
+    assert!(!f.home.join("events").exists());
+    Ok(())
+}
+
+#[test]
 fn recommend_brew_confirms_selected_native_install_even_in_a_trusted_context() -> TestResult {
     for mode in ["cancel", "confirm", "stale", "trust-stale"] {
         let approved = mode == "confirm";
         let f = Fixture::new()?;
         let (id, actual) = lifecycle_fixture(&f)?;
+        if approved {
+            fs::write(f.home.join("mode"), "progress")?;
+        }
         fs::remove_dir_all(f.home.join("native-cellar/foo"))?;
         let mut catalog = f.read_json("catalog.json")?;
         catalog["packages"][0]["provider"]["recipe_ref"] = json!("synthetic-declared-formula");

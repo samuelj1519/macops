@@ -19,7 +19,7 @@ use std::{
 fn review() -> Error {
     Error::attention(
         "consumer_review_required",
-        "仅可卸载已纳管、在所选范围内停用的单个 mise 版本；其他情况请核对项目后使用原生命令",
+        "仅可卸载已纳入管理、在所选范围内停用的单个 mise 版本；其他情况请核对项目后使用原生命令",
     )
 }
 

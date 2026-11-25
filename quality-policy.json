@@ -158,6 +158,8 @@
     "native_plugins.rs",
     "native_plugins_files.rs",
     "plugin_marketplaces.rs",
+    "plugin_target.rs",
+    "profile_install.rs",
     "brew.rs",
     "native_skills.rs",
     "native_skills_assets.rs",

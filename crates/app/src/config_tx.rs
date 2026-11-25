@@ -608,8 +608,7 @@ pub fn restore(ctx: &Context, operation_id: &str, dry_run: bool, yes: bool) -> R
         &format!("Restore {} from {}", backup.config_id, operation_id),
         yes,
     )?;
-    let store = Store::lock(ctx)?;
-    store.check_pending()?;
+    let store = operations::lock_after_recovery(ctx)?;
     let (plan, query) = restore_plan(ctx, &backup, leaf)?;
     let Observation::ConfigFile { target: locked, .. } = &plan.before else {
         return Err(Error::new("invalid_config_plan", "配置观察结构异常"));

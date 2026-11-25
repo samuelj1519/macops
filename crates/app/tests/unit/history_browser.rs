@@ -13,7 +13,7 @@ fn terminal_history_shows_typed_operations_and_limits_recovery_to_pending() -> T
         (Action::Upgrade, "升级"),
         (Action::Uninstall, "卸载"),
         (Action::Update, "刷新索引"),
-        (Action::Adopt, "纳管"),
+        (Action::Adopt, "纳入管理"),
         (Action::Cleanup, "清理"),
         (Action::Start, "启动"),
         (Action::Stop, "停止"),
@@ -113,5 +113,40 @@ fn browser_rows_keep_application_and_profile_resource_ids() -> TestResult {
             }
         }
     }
+    Ok(())
+}
+
+#[test]
+fn agent_row_hides_the_generated_label_suffix_and_keeps_the_profile_identity() -> TestResult {
+    use crate::resource::{Data, Management, Model, Resource, RuntimeBinding, State};
+    let path = std::path::PathBuf::from("/fixture/claude-profile.AbC123/home/.claude");
+    let item = resource_item(
+        Resource {
+            id: "agent:stable".into(),
+            name: "claude:mo-example-AbC123".into(),
+            aliases: vec![],
+            management: Management::Adopted,
+            status: State::Present,
+            data: Data::Agent {
+                client: "claude".into(),
+                profile: "mo-example-AbC123".into(),
+                config_dir: path.clone(),
+                model: Model::default(),
+                runtime: RuntimeBinding {
+                    selector: "fixture".into(),
+                    context: path.clone(),
+                    binary: None,
+                    install_ref: None,
+                    evidence: None,
+                },
+            },
+        },
+        false,
+    )
+    .ok_or("agent row")?;
+    assert_eq!(item.name, "Claude Code · example");
+    assert_eq!(item.summary, "claude · 单独配置");
+    assert_eq!(item.id, "agent:stable");
+    assert_eq!(item.path.as_ref(), Some(&path));
     Ok(())
 }

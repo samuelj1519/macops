@@ -1034,7 +1034,7 @@ pub fn recover_journal(
     }
     store.save(journal)?;
     Ok(
-        json!({"backend":"rust","status":journal.phase,"operation_id":journal.id,"change_id":manifest.change_id,"persistentWrites":true}),
+        json!({"backend":"rust","status":journal.phase,"phase":journal.phase,"operation_id":journal.id,"change_id":manifest.change_id,"persistentWrites":true}),
     )
 }
 

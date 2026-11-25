@@ -92,13 +92,20 @@ pub(crate) fn recommended_recipes(ctx: &Context, subject: &str) -> Result<Vec<Re
 pub(crate) fn install_recommended(ctx: &Context, recipe: Recipe) -> Result<Value> {
     native_config_scope(ctx)?;
     let scope = format!(
-        "安装并纳管 {} · Skills CLI\n来源 https://github.com/{} · {}\n目标 Codex 用户级 · 仅手动触发 {}\n安装到共享技能目录，其他支持的 Agent 也可能发现",
+        "安装并纳入管理 {} · Skills CLI\n来源 https://github.com/{} · {}\n目标 Codex 用户级 · 仅手动触发 {}\n安装到共享技能目录，其他支持的 Agent 也可能发现",
         recipe.install_name,
         recipe.source.repository,
         recipe.source.commit,
         if recipe.manual_only { "是" } else { "否" }
     );
     crate::operations::confirm(&scope, false)?;
+    if let Some(previous) = crate::operations::recover_before_write(ctx, None)?
+        && previous.succeeded
+        && previous.original.plan.action == Action::Install
+        && matches_recommendation(&previous.original, &recipe)?
+    {
+        return Ok(previous.result);
+    }
     let (_, book) = load_book(ctx)?;
     verify_registered_recipe(&book, &recipe)?;
     execute_with_origin(
@@ -527,18 +534,13 @@ fn query_capture(
     directory: &crate::paths::Directory,
     guard: impl FnMut() -> Result<()>,
 ) -> Result<crate::process::BinaryOutput> {
-    let captured = crate::process::capture_bytes_guarded_process_in(
+    let captured = crate::process::capture_owned_group_in(
         query,
         std::time::Duration::from_secs(10),
         8192,
         &directory.path,
         guard,
     );
-    if let Some(pid) = captured.pid {
-        while crate::process::group_alive(pid) {
-            std::thread::sleep(std::time::Duration::from_millis(250));
-        }
-    }
     captured.result
 }
 fn original_state(frozen: &Frozen) -> Result<crate::paths::Directory> {
@@ -1466,6 +1468,12 @@ fn inventory_maintenance(
         ),
         false,
     )?;
+    if let Some(previous) = crate::operations::recover_before_write(ctx, None)?
+        && previous.matches(action, &current.id, None)
+        && matches_recommendation(&previous.original, &recipe)?
+    {
+        return Ok(previous.result);
+    }
     let fence = InputFence {
         files: vec![book_witness, lock_witness, owner_witness],
     };
@@ -1632,6 +1640,42 @@ fn selected_recipes(ctx: &Context, selection: &crate::cli::SkillSelection) -> Re
         .into_iter()
         .map(|id| by_id.get(&id).cloned().ok_or_else(invalid))
         .collect()
+}
+
+pub(crate) fn matches_recommendation(journal: &Journal, recipe: &Recipe) -> Result<bool> {
+    if !is_native(journal) {
+        return Ok(false);
+    }
+    Ok(fingerprint(&frozen(journal)?.recipe)? == fingerprint(recipe)?)
+}
+
+pub(crate) fn matches_recipe_file(journal: &Journal, path: &Path) -> Result<bool> {
+    if !is_native(journal) {
+        return Ok(false);
+    }
+    let (recipe, _) = read_recipe(path)?;
+    matches_recommendation(journal, &recipe)
+}
+
+pub(crate) fn matches_upgrade(
+    ctx: &Context,
+    journal: &Journal,
+    selection: &crate::cli::SkillSelection,
+) -> Result<bool> {
+    if !is_native(journal) {
+        return Ok(false);
+    }
+    let recipes = selected_recipes(ctx, selection)?;
+    let [recipe] = recipes.as_slice() else {
+        return Ok(false);
+    };
+    let previous = frozen(journal)?.recipe;
+    Ok(recipe.id == previous.id
+        && recipe.source.repository == previous.source.repository
+        && selection
+            .revision
+            .as_ref()
+            .is_none_or(|commit| &previous.source.commit == commit))
 }
 
 fn explicit_recipe(

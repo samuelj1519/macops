@@ -447,6 +447,7 @@ pub(crate) fn configure_using(
         &format!("{} · {} · {}", selected.name, selected.plugin, mode.label()),
         false,
     )?;
+    crate::operations::recover_before_write(ctx, None)?;
     set_mode(ctx, &selected, mode, native)
 }
 
@@ -511,7 +512,7 @@ fn admit(
     name: Option<&str>,
     named: Option<&FileWitness>,
     native: &SessionIo<'_>,
-) -> Result<Command> {
+) -> Result<(Command, std::fs::File)> {
     let store = Store::lock(ctx)?;
     store.check_pending()?;
     let current = select(ctx, &selected.selector, native)?;
@@ -522,7 +523,12 @@ fn admit(
     store.verify_namespace()?;
     current.verify_scope(ctx)?;
     workspace.verify()?;
-    native_command(&current, workspace, name)
+    let lease = current.root.file().try_clone()?;
+    fs2::FileExt::try_lock_shared(&lease)
+        .map_err(|_| Error::attention("agent_profile_in_use", "该档案正在执行卸载或维护操作。"))?;
+    rustix::io::fcntl_setfd(&lease, rustix::io::FdFlags::empty())
+        .map_err(|error| std::io::Error::from_raw_os_error(error.raw_os_error()))?;
+    Ok((native_command(&current, workspace, name)?, lease))
 }
 
 pub(crate) fn launch(
@@ -588,7 +594,7 @@ pub(crate) fn launch_using(
     if !interactive {
         return Err(Error::attention(
             "interactive_terminal_required",
-            "启动独立档案需要交互终端",
+            "启动单独配置需要交互终端",
         ));
     }
     let safe = |s: &str| crate::browser::sanitize(s, false);
@@ -603,7 +609,8 @@ pub(crate) fn launch_using(
         ),
         yes,
     )?;
-    let command = admit(ctx, &selected, &workspace, name, named.as_ref(), native)?;
+    crate::operations::recover_before_write(ctx, None)?;
+    let (command, _lease) = admit(ctx, &selected, &workspace, name, named.as_ref(), native)?;
     let actual = std::fs::metadata(".")?;
     let inherited = FileId {
         device: actual.dev(),

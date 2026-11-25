@@ -10,7 +10,9 @@ use std::path::PathBuf;
     long_about = "统一文法：mo <类型> [对象] [动作]。无对象即列表，带对象即详情；安装、升级、卸载各类型同名。写命令默认执行，使用 --dry-run 预演。未知来源和恢复状态不会自动跳过。"
 )]
 pub struct Cli {
-    #[arg(long,global=true,default_value_t=120,value_parser=clap::value_parser!(u64).range(1..=3600),help="单次写入操作超时秒数")]
+    #[arg(long = "timeout", alias = "timeout-secs", value_name = "SECONDS", global = true,
+        default_value_t = 120, value_parser = clap::value_parser!(u64).range(1..=3600),
+        help = "每次运行外部程序最多等多少秒")]
     pub timeout_secs: u64,
     #[arg(long, global = true, help = "输出结构化 JSON")]
     pub json: bool,
@@ -18,6 +20,8 @@ pub struct Cli {
     pub dry_run: bool,
     #[arg(long, global = true, help = "跳过交互确认，仍执行所有校验")]
     pub yes: bool,
+    #[arg(long, global = true, action = clap::ArgAction::Count, help = "显示安装时的原生工具诊断")]
+    pub verbose: u8,
     #[arg(long, global = true)]
     pub home: Option<PathBuf>,
     #[arg(long, global = true)]
@@ -53,7 +57,10 @@ pub struct Detail {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    #[command(about = "应用：列表、详情、安装、升级、卸载与纳管；终端环境自动进入浏览")]
+    #[command(
+        about = "应用：列表、详情、安装、升级、卸载与纳入管理；终端环境自动进入浏览",
+        after_help = "按任务使用  mo app adopt [名称] 查找已有安装并纳入管理\n  mo app refresh / mo app outdated 查看可用版本\n  mo app <名称> upgrade --dry-run 预演升级\n  mo app service list 查看已声明的服务"
+    )]
     App {
         #[arg(
             long,
@@ -65,7 +72,10 @@ pub enum Command {
         #[command(subcommand)]
         command: Option<AppCmd>,
     },
-    #[command(about = "配置：chezmoi 归属、状态与治理")]
+    #[command(
+        about = "配置：chezmoi 归属、状态与治理",
+        after_help = "按任务使用  mo config enroll 登记配置范围\n  mo config list --refresh 刷新受管路径\n  mo config diff 查看差异方向\n  mo config apply <路径> --dry-run 预演应用"
+    )]
     Config {
         #[arg(
             long,
@@ -77,7 +87,10 @@ pub enum Command {
         #[command(subcommand)]
         command: Option<Config>,
     },
-    #[command(about = "技能：技能与插件的安装、升级与检查")]
+    #[command(
+        about = "技能：技能与插件的安装、升级与检查",
+        after_help = "按任务使用  mo skill market 浏览市场\n  mo skill plugins --help 核对本地插件绑定与版本\n  mo skill sync --all --dry-run 预演技能与档案同步\n  mo skill policy --help 查看策略和恢复入口"
+    )]
     Skill {
         #[arg(
             long,
@@ -93,7 +106,10 @@ pub enum Command {
         #[command(subcommand)]
         command: Option<SkillCmd>,
     },
-    #[command(about = "Agent 与 Harness：CLI 工具、档案、凭据与启动")]
+    #[command(
+        about = "Agent 与 Harness：CLI 工具、档案、凭据与启动",
+        after_help = "按任务使用  mo agent tools 查看 CLI 版本与固定版本\n  mo agent launch <档案> --dry-run 查看启动范围\n  mo agent credential list 查看凭据状态"
+    )]
     Agent {
         #[arg(
             long,
@@ -123,17 +139,18 @@ pub enum Command {
         #[arg(long, conflicts_with_all = ["product", "evidence", "github", "model"], help = "配置推荐模型与连接")]
         setup: bool,
     },
-    #[command(about = "收口未完结操作；省略编号时列出待收口项")]
+    #[command(about = "检查上次操作的结果。省略操作号时显示待检查的操作")]
     Recover {
         operation_id: Option<String>,
         #[arg(
-            long,
+            long = "mark-failed",
+            alias = "resolve-failed",
             requires = "operation_id",
-            help = "人工核对后记录失败并解除阻断；不修复软件"
+            help = "把支持的未完成操作记为失败。保留当前安装和设置"
         )]
         resolve_failed: bool,
     },
-    #[command(about = "查看操作历史")]
+    #[command(about = "查看操作历史，可按操作号或目标 ID 查询")]
     History { query: Option<String> },
     #[command(about = "查询任意对象；按名称或 ID 跨类型搜索")]
     Search { query: String },
@@ -179,12 +196,16 @@ pub enum Command {
     #[command(name = "__worker", hide = true)]
     Worker { journal: PathBuf },
     #[command(name = "__native_worker", hide = true)]
-    NativeWorker { journal: PathBuf },
+    NativeWorker {
+        journal: PathBuf,
+        #[arg(long)]
+        capture_progress: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
 pub enum AppCmd {
-    #[command(about = "安装官方渠道声明的应用并自动纳管")]
+    #[command(about = "安装官方渠道声明的应用并自动纳入管理")]
     Install {
         id: String,
         #[arg(long)]
@@ -198,7 +219,7 @@ pub enum AppCmd {
     },
     #[command(about = "卸载明确对象，保留配置与用户数据")]
     Uninstall { id: String },
-    #[command(about = "按名称或 ID 纳管本机已有安装，省略目标可交互选择")]
+    #[command(about = "按名称或 ID 将本机已有安装纳入管理，省略目标可交互选择")]
     Adopt {
         #[arg(value_name = "NAME_OR_ID", group = "adopt_target")]
         target: Option<String>,
@@ -270,13 +291,13 @@ pub enum SkillCmd {
         #[arg(long)]
         recipe: PathBuf,
     },
-    #[command(about = "按固定配方纳管已有技能")]
+    #[command(about = "按固定配方将已有技能纳入管理")]
     Adopt {
         id: String,
         #[arg(long)]
         recipe: PathBuf,
     },
-    #[command(name = "uninstall", alias = "remove", about = "卸载已纳管的技能")]
+    #[command(name = "uninstall", alias = "remove", about = "卸载已纳入管理的技能")]
     Remove {
         id: String,
     },
@@ -361,24 +382,35 @@ pub enum AgentCmd {
         #[arg(value_parser=crate::ai::parse_tool)]
         tool: String,
         version: Option<String>,
-        #[arg(long, help = "只更新本机版本，不改动配置")]
+        #[arg(
+            long = "local",
+            alias = "force-live",
+            help = "用于 mise 管理的工具。只改本机安装和本机 mise 设置，保留设置来源"
+        )]
         force_live: bool,
     },
     #[command(about = "升级 Agent CLI；省略对象时检查全部工具的配置差异")]
     Upgrade {
         #[arg(value_parser=crate::ai::parse_tool)]
         tool: Option<String>,
-        #[arg(long, requires = "tool", help = "只更新本机版本，不改动配置")]
+        #[arg(
+            long = "local",
+            alias = "force-live",
+            requires = "tool",
+            help = "用于 mise 管理的工具。只改本机安装和本机 mise 设置，保留设置来源"
+        )]
         force_live: bool,
     },
-    #[command(about = "确认并继续已核验的 Claude Code 首装")]
+    #[command(about = "确认并继续已核验的插件安装")]
     Resume { operation_id: String },
-    #[command(about = "启动 macops 纳管的独立 Agent 档案")]
+    #[command(about = "启动已纳入管理的独立 Agent 档案")]
     Launch {
         profile: String,
         #[arg(long)]
         native_profile: Option<String>,
     },
+    #[command(about = "卸载单独配置并将其移入本机归档")]
+    Uninstall { profile: String },
     #[command(about = "凭据元信息；永不读取密钥值")]
     Credential {
         #[command(subcommand)]
@@ -408,7 +440,7 @@ pub enum Config {
         #[arg(long)]
         refresh: bool,
     },
-    #[command(about = "用已登记的 chezmoi 纳管一个现有普通文件")]
+    #[command(about = "将现有普通文件纳入已登记的 chezmoi 管理范围")]
     Adopt {
         target: PathBuf,
     },

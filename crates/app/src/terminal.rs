@@ -5,6 +5,7 @@ use crate::{
     domain::{Action, Package, Plan, Provider},
     error::{Error, Result},
     operations::RecoveryPreview,
+    profile_install::Stage,
     resource::Management,
 };
 use crossterm::{
@@ -20,7 +21,10 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
 };
-use std::io::{self, Stdout};
+use std::{
+    fmt::Write as _,
+    io::{self, Stdout},
+};
 
 #[derive(Debug)]
 pub(crate) struct SignalHold {
@@ -75,6 +79,35 @@ fn screen() -> Result<(Terminal<CrosstermBackend<Stdout>>, Restore)> {
     Ok((Terminal::new(CrosstermBackend::new(io::stdout()))?, restore))
 }
 
+pub(crate) fn feedback(kind: crate::output::TerminalLine, text: &str) {
+    use std::io::IsTerminal as _;
+    let color = std::io::stderr().is_terminal()
+        && std::env::var_os("NO_COLOR").is_none()
+        && std::env::var_os("TERM").is_some_and(|term| term != "dumb");
+    eprintln!("{}", crate::output::terminal_line(kind, text, color));
+}
+
+pub(crate) fn report_install_stage(stage: Stage) {
+    use std::io::IsTerminal as _;
+    let human = std::io::stderr().is_terminal() && !std::env::args_os().any(|arg| arg == "--json");
+    if let Some(text) = install_stage_text(stage, human) {
+        feedback(crate::output::TerminalLine::Step, text);
+    }
+}
+
+fn install_stage_text(stage: Stage, human: bool) -> Option<&'static str> {
+    if !human {
+        return None;
+    }
+    Some(match stage {
+        Stage::VerifySource => "核对固定提交与插件文件",
+        Stage::RegisterMarketplace => "在隔离目录登记插件市场",
+        Stage::InstallPlugin => "在隔离目录安装插件",
+        Stage::CheckActivation => "核对插件启用设置",
+        Stage::Publish => "校验后写入选定配置",
+    })
+}
+
 enum Page {
     List,
     Detail(Box<Details>),
@@ -88,6 +121,7 @@ struct Details {
     source: Option<Result<ViewerFile>>,
     recovery: Option<Box<RecoveryPreview>>,
     agent_session: Option<crate::codex_install::session::Details>,
+    agent_removable: bool,
     skills_native: bool,
 }
 
@@ -98,6 +132,7 @@ enum NativeAction {
     },
     AgentPreference(String),
     AgentLaunch(String),
+    AgentUninstall(String),
     Skills {
         action: Action,
         id: String,
@@ -221,6 +256,8 @@ impl Browser {
                 .then(|| RecoveryPreview::read(ctx, &id).ok().map(Box::new))
                 .flatten(),
             agent_session,
+            agent_removable: kind == Kind::Agents
+                && crate::resource_agents::resolve_session_profile(ctx, &id).is_ok(),
             skills_native,
         }));
     }
@@ -272,14 +309,14 @@ impl Browser {
             || ctx.chezmoi.destination.is_some()
             || ctx.chezmoi.config.is_some()
         {
-            self.notice = "config_scope_unsupported · 已限定配置源，不能维护软件或能力".into();
+            self.notice = "这次只选了配置文件的位置。要维护软件或技能，请去掉 chezmoi 目录选项。\n错误编号 config_scope_unsupported".into();
             return None;
         }
         let id = self.selected()?;
         let package = match crate::target::resolve(ctx, &id) {
             Ok(package) => package,
             Err(error) => {
-                self.notice = error.to_string();
+                self.notice = crate::output::error_text(&error);
                 return None;
             }
         };
@@ -325,7 +362,7 @@ impl Browser {
                 self.offset = 0;
                 self.page = Page::Operation(Box::new(plan));
             }
-            Err(error) => self.notice = error.to_string(),
+            Err(error) => self.notice = crate::output::error_text(&error),
         }
         None
     }
@@ -335,7 +372,27 @@ impl Browser {
             return;
         };
         let action = plan.action;
-        let result = crate::operations::execute(ctx, *plan, false, true);
+        let result = match crate::operations::recover_before_write(ctx, None) {
+            Ok(Some(recovered))
+                if recovered.matches(action, &plan.package.id, plan.target.as_deref()) =>
+            {
+                Ok(recovered.result)
+            }
+            Ok(Some(_)) => {
+                match crate::target::refresh(ctx, &plan.package).and_then(|package| {
+                    crate::operations::plan(ctx, &package, action, None, action == Action::Adopt)
+                }) {
+                    Ok(current) => {
+                        self.page = Page::Operation(Box::new(current));
+                        self.notice = "已检查上一次操作。请确认重新准备的计划。".into();
+                        return;
+                    }
+                    Err(error) => Err(error),
+                }
+            }
+            Ok(None) => crate::operations::execute(ctx, *plan, false, true),
+            Err(error) => Err(error),
+        };
         self.operation_result(ctx, session, action, result);
     }
 
@@ -343,8 +400,13 @@ impl Browser {
         let Page::Detail(details) = &self.page else {
             return None;
         };
-        details.agent_session.as_ref()?;
         let selector = self.visible().get(self.row)?.id.clone();
+        if key == 'x' {
+            return details
+                .agent_removable
+                .then_some(NativeAction::AgentUninstall(selector));
+        }
+        details.agent_session.as_ref()?;
         Some(if key == 'e' {
             NativeAction::AgentPreference(selector)
         } else {
@@ -374,6 +436,18 @@ impl Browser {
     }
 
     fn run_native(&mut self, ctx: &Context, session: &mut Session, action: NativeAction) {
+        if let NativeAction::AgentUninstall(label) = &action {
+            let result = crate::resource_agents::uninstall(ctx, label, false, false);
+            self.refresh(ctx, session);
+            self.notice = match result {
+                Ok(data) => format!(
+                    "单独配置已归档 · {}",
+                    data["archive"].as_str().unwrap_or("")
+                ),
+                Err(error) => crate::output::error_text(&error),
+            };
+            return;
+        }
         let result = match action {
             NativeAction::Brew { action, package } => {
                 let result = crate::brew::execute_selected(ctx, &package, action, false, false);
@@ -391,11 +465,12 @@ impl Browser {
             NativeAction::AgentLaunch(label) => {
                 crate::codex_install::session::launch(ctx, &label, None, false, false).map(|_| ())
             }
+            NativeAction::AgentUninstall(_) => return,
         };
         self.refresh(ctx, session);
         self.notice = match result {
             Ok(()) => "已保存下次由 mo 启动时的插件设置".into(),
-            Err(error) => error.to_string(),
+            Err(error) => crate::output::error_text(&error),
         };
     }
 
@@ -411,13 +486,16 @@ impl Browser {
         self.notice = match result {
             Ok(value) => {
                 let receipt = value.get("journal").unwrap_or(&value);
-                format!(
-                    "{label}结果 {} · {}",
-                    receipt["phase"].as_str().unwrap_or("待核对"),
-                    receipt["id"].as_str().unwrap_or("待查")
-                )
+                let mut notice = format!(
+                    "{label}结果 {}",
+                    crate::output::phase_text(receipt["phase"].as_str().unwrap_or_default())
+                );
+                if let Some(hint) = crate::output::recovery_hint(&value) {
+                    let _ = write!(notice, "\n{hint}");
+                }
+                notice
             }
-            Err(error) => error.to_string(),
+            Err(error) => crate::output::error_text(&error),
         };
     }
 
@@ -435,12 +513,11 @@ impl Browser {
         let Page::Recovery(preview) = std::mem::replace(&mut self.page, Page::List) else {
             return;
         };
-        let id = preview.journal.id.clone();
         let result = preview.confirm(ctx);
         self.refresh(ctx, session);
         self.notice = match result {
-            Ok(value) => recovery_notice(&id, &value),
-            Err(error) => format!("{} · {id}", error.code),
+            Ok(value) => recovery_notice(&value),
+            Err(error) => crate::output::error_text(&error),
         };
     }
 
@@ -471,19 +548,24 @@ impl Browser {
                 if let Session::Config(browser) = session {
                     self.view = browser.view();
                 }
-                self.notice = error.to_string();
+                self.notice = crate::output::error_text(&error);
             }
         }
         self.preserve(id.as_deref());
     }
 
+    fn refresh_from_key(&mut self, ctx: &Context, session: &mut Session) {
+        if self.kind == Kind::Config
+            && let Err(error) = crate::operations::recover_before_write(ctx, None)
+        {
+            self.notice = crate::output::error_text(&error);
+            return;
+        }
+        self.refresh(ctx, session);
+    }
+
     fn draw(&mut self, ctx: &Context, frame: &mut Frame, kind: Kind, unified: bool) {
-        let [header, main, footer] = Layout::vertical([
-            Constraint::Length(if unified { 2 } else { 1 }),
-            Constraint::Min(1),
-            Constraint::Length(1),
-        ])
-        .areas(frame.area());
+        let [header, main, footer] = layout_with_notice(frame, &self.notice, unified);
         let visible = self.visible();
         let search = if self.typing { "搜索 " } else { "" };
         let filter = match kind {
@@ -570,12 +652,7 @@ impl Browser {
             }
             Page::List => self.list(frame, main, &visible),
         }
-        let help = if self.notice.is_empty() {
-            keys(kind, &self.page, unified)
-        } else {
-            &self.notice
-        };
-        frame.render_widget(Paragraph::new(sanitize(help, false)), footer);
+        frame.render_widget(Paragraph::new(keys(kind, &self.page, unified)), footer);
         self.offset = offset;
     }
 
@@ -590,7 +667,7 @@ impl Browser {
         let visible = self.visible();
         let search = if self.typing { " · 搜索 " } else { " " };
         let title = format!(
-            "纳管 · {} / {} · {}{search}{}",
+            "纳入管理 · {} / {} · {}{search}{}",
             visible.len(),
             self.view.items.len(),
             self.view.note,
@@ -686,28 +763,66 @@ fn item_details(item: &Item, session: Option<&crate::codex_install::session::Det
     text
 }
 
-fn recovery_notice(id: &str, value: &serde_json::Value) -> String {
-    let continuation = value["continuationRequired"].as_bool();
-    if continuation == Some(true) {
-        return format!("原阶段已核对。继续请运行 mo agent resume {id}");
+fn layout_with_notice(frame: &mut Frame, message: &str, unified: bool) -> [Rect; 3] {
+    let header_height = if unified { 2 } else { 1 };
+    let limit = frame.area().height.saturating_sub(header_height + 2).min(4);
+    let notice = Paragraph::new(sanitize(message, true)).wrap(Wrap { trim: true });
+    let height = if message.is_empty() {
+        0
+    } else {
+        u16::try_from(notice.line_count(frame.area().width))
+            .unwrap_or(limit)
+            .min(limit)
+    };
+    let [header, main, feedback, footer] = Layout::vertical([
+        Constraint::Length(header_height),
+        Constraint::Min(1),
+        Constraint::Length(height),
+        Constraint::Length(1),
+    ])
+    .areas(frame.area());
+    if height > 0 {
+        frame.render_widget(notice, feedback);
+    }
+    [header, main, footer]
+}
+
+fn recovery_notice(value: &serde_json::Value) -> String {
+    use crate::policy::cli::{Continuation, continuation};
+    if value["reason"] == "operation_busy" {
+        return "另一个操作正在使用记录。等它结束后再检查。".into();
+    }
+    match continuation(value) {
+        Some(Continuation::Ready) => {
+            return value["continuationCommand"].as_str().map_or_else(
+                || "原阶段已核对。运行 mo recover 查看下一步。".into(),
+                |command| format!("原阶段已核对。继续请运行 {}", sanitize(command, false)),
+            );
+        }
+        Some(Continuation::Unverified) => return "核对结果 后续步骤待核对".into(),
+        None => {}
     }
     let journal = value.get("journal").unwrap_or(value);
+    if value["recoveryBlocker"].is_string()
+        && let Some(message) = journal["message"].as_str()
+    {
+        return format!("仍待核对 · {message}");
+    }
     let phase = journal
         .get("phase")
         .or_else(|| value.get("status"))
         .and_then(serde_json::Value::as_str);
     let status = match phase {
-        Some("succeeded") if continuation == Some(false) => "后续步骤待核对",
         Some("succeeded") => "已完成",
         Some("failed") => "已记录失败",
         _ => "仍待核对",
     };
-    format!("核对结果 {status} · {id}")
+    format!("核对结果 {status}")
 }
 
 fn operation_label(action: Action) -> &'static str {
     match action {
-        Action::Adopt => "纳管",
+        Action::Adopt => "纳入管理",
         Action::Upgrade => "升级",
         _ => "卸载",
     }
@@ -724,19 +839,22 @@ fn keys(kind: Kind, page: &Page, unified: bool) -> &'static str {
         Page::List if kind == Kind::Marketplaces => "j/k 滚动  / 搜索  Enter 详情  q 退出",
         Page::List => "j/k 滚动  / 搜索  Enter 详情  r 刷新  q 退出",
         Page::Operation(plan) => match plan.action {
-            Action::Adopt => "Enter 确认纳管  Esc 返回  q 退出",
+            Action::Adopt => "Enter 确认纳入管理  Esc 返回  q 退出",
             Action::Upgrade => "Enter 确认升级  Esc 返回  q 退出",
             _ => "Enter 确认卸载  Esc 返回  q 退出",
         },
         Page::Recovery(_) => "Enter 确认核对  Esc 返回  q 退出",
         Page::Detail(details) if details.recovery.is_some() => "c 核对原操作  Esc 返回  q 退出",
         Page::Detail(details) if details.agent_session.is_some() => {
-            "e 插件设置  l 启动档案  Esc 返回  q 退出"
+            "e 插件设置  l 启动档案  x 卸载  Esc 返回  q 退出"
         }
+        Page::Detail(details) if details.agent_removable => "x 卸载  Esc 返回  q 退出",
         Page::Detail(details) if details.skills_native => "u 升级  x 卸载  Esc 返回  q 退出",
         Page::Detail(_) if kind == Kind::Config => "o 打开实际文件  s 打开管理源  Esc 返回  q 退出",
-        Page::Detail(_) if kind == Kind::Apps => "a 检查纳管  u 升级  x 卸载  Esc 返回  q 退出",
-        Page::Detail(_) if unified && kind == Kind::Capabilities => "a 检查纳管  Esc 返回  q 退出",
+        Page::Detail(_) if kind == Kind::Apps => "a 检查管理资格  u 升级  x 卸载  Esc 返回  q 退出",
+        Page::Detail(_) if unified && kind == Kind::Capabilities => {
+            "a 检查管理资格  Esc 返回  q 退出"
+        }
         Page::Detail(_) | Page::File { .. } => "j/k 滚动  Esc 返回  q 退出",
     }
 }
@@ -820,7 +938,7 @@ pub(crate) fn browse(
                 KeyCode::Tab | KeyCode::BackTab if unified => {
                     match switch_tab(ctx, session, kind, event.code == KeyCode::Tab) {
                         Ok(next) => browser = next,
-                        Err(error) => browser.notice = error.to_string(),
+                        Err(error) => browser.notice = crate::output::error_text(&error),
                     }
                 }
                 KeyCode::Char('q') => return Ok(browser.view),
@@ -834,7 +952,7 @@ pub(crate) fn browse(
                 }
                 KeyCode::Enter => browser.enter(ctx, session, kind),
                 KeyCode::Char('c') if kind == Kind::History => browser.preview_recovery(),
-                KeyCode::Char(key @ ('e' | 'l')) if kind == Kind::Agents => {
+                KeyCode::Char(key @ ('e' | 'l' | 'x')) if kind == Kind::Agents => {
                     if let Some(action) = browser.agent_action(key) {
                         break After::Native(action);
                     }
@@ -889,7 +1007,7 @@ pub(crate) fn browse(
             After::Native(action) => browser.run_native(ctx, session, action),
             After::FinishOperation => browser.finish_operation(ctx, session),
             After::FinishRecovery => browser.finish_recovery(ctx, session),
-            After::Refresh => browser.refresh(ctx, session),
+            After::Refresh => browser.refresh_from_key(ctx, session),
         }
     }
 }

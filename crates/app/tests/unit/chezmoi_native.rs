@@ -129,7 +129,7 @@ impl Fixture {
             command: journal.plan.command.clone().ok_or_else(io::changed)?,
             env: io::environment(&self.ctx),
             cwd: self.ctx.home.clone(),
-            timeout_secs: 1,
+            timeout_secs: journal.plan.timeout_secs,
         };
         Ok((
             Operation {
@@ -688,6 +688,8 @@ exit 90
             fs::write(f.ctx.home.join("verify-fails"), b"fixture flag")?;
         }
         let mut journal = f.journal()?;
+        journal.plan.timeout_secs = 5;
+        journal.plan_sha256 = fingerprint(&journal.plan)?;
         journal.phase = Phase::Running;
         journal.process_group = Some(std::process::id());
         let (operation, invocation) = f.operation(&journal)?;

@@ -3,7 +3,7 @@ use crate::{
     ai_state::{self, Snapshot, Step, Upgrade},
     config_tx,
     context::Context,
-    domain::{CommandSpec, Journal, Phase, Plan, fingerprint},
+    domain::{CommandSpec, Journal, Phase, Plan},
     error::{Error, Result},
     operations,
     paths::Directory,
@@ -60,7 +60,7 @@ fn frozen_context(journal: &Journal, upgrade: &Upgrade) -> Context {
     }
 }
 fn verify_inputs(ctx: &Context, upgrade: &Upgrade) -> Result<()> {
-    ai_state::verify_profiles(&upgrade.profiles)?;
+    upgrade.verify_profiles()?;
     if let Some(mise) = &upgrade.mise {
         if mise.live.current()? != mise.live
             || mise.source.current()? != mise.source
@@ -123,16 +123,19 @@ pub fn recover(
     if journal.process_group.is_some_and(process::group_alive) {
         return Err(Error::attention(
             "operation_still_running",
-            "原进程组仍在运行，拒绝恢复或重新执行",
+            format!(
+                "原进程组仍存在。等进程结束后再运行 mo recover {}。",
+                journal.id
+            ),
         ));
     }
     if resolve_failed {
         operations::confirm(
-            "确认已人工核对升级器、载荷、配置和源；仅记录失败解除阻断，不会重跑或修复。",
+            "请先检查这次升级的结果。确认后只把这次操作记为失败，保留现在的安装和设置。",
             yes,
         )?;
         journal.phase = Phase::Failed;
-        journal.message = "人工核对后记录失败；没有重新运行升级器或回滚".into();
+        journal.message = "已记为失败。这条记录不再挡住新操作。安装和设置照旧。".into();
         store.save(journal)?;
         return Ok(result(journal));
     }
@@ -159,12 +162,18 @@ pub fn recover(
 }
 
 fn finish(ctx: &Context, store: &Store, journal: &mut Journal, upgrade: &Upgrade) -> Result<Value> {
-    let outcome = store
+    if let Err(error) = store
         .verify_namespace()
-        .and_then(|()| continue_upgrade(ctx, store, journal, upgrade));
-    if let Err(error) = outcome {
+        .and_then(|()| continue_upgrade(ctx, store, journal, upgrade))
+    {
         journal.phase = Phase::Unknown;
-        journal.message = format!("{}；保留阻断，先核对配置及原操作", error.code);
+        journal.message = format!(
+            "{} · {}",
+            error.code,
+            crate::output::sanitize(&error.message, false)
+        );
+        store.save(journal)?;
+        return Ok(json!({"backend":"rust", "journal":journal, "recoveryBlocker":error.code}));
     }
     store.save(journal)?;
     Ok(result(journal))
@@ -189,7 +198,7 @@ fn continue_upgrade(
     journal: &mut Journal,
     upgrade: &Upgrade,
 ) -> Result<()> {
-    ai_state::verify_profiles(&upgrade.profiles)?;
+    upgrade.verify_profiles()?;
     let step = ai_state::read_step(store, journal)?;
     let Some(mise) = &upgrade.mise else {
         let observed = gate::version(ctx, program(journal)?, "mimo")?;
@@ -247,7 +256,7 @@ fn inspect(ctx: &Context, store: &Store, journal: &mut Journal, upgrade: &Upgrad
         .as_deref()
         .ok_or_else(|| Error::new("ai_plan_invalid", "缺少目标版本"))?;
     let gate = gate::payload(ctx, program(journal)?, &upgrade.tool, target).and_then(|evidence| {
-        ai_state::verify_profiles(&upgrade.profiles)?;
+        upgrade.verify_profiles()?;
         Ok(evidence)
     });
     let evidence = match gate {
@@ -297,7 +306,7 @@ fn verify_probe_fence(
             "载荷探测期间配置根解析改变",
         ));
     }
-    ai_state::verify_profiles(&upgrade.profiles)?;
+    upgrade.verify_profiles()?;
     store.verify_namespace()
 }
 
@@ -351,7 +360,7 @@ fn rollback(store: &Store, journal: &mut Journal, upgrade: &Upgrade) -> Result<(
             "回退结果不匹配原本机版本",
         ));
     }
-    ai_state::verify_profiles(&upgrade.profiles)?;
+    upgrade.verify_profiles()?;
     store.verify_namespace()?;
     ai_state::step(store, journal, Step::Reshim)?;
     reshim(store, journal, upgrade)
@@ -386,7 +395,7 @@ fn reshim(store: &Store, journal: &mut Journal, upgrade: &Upgrade) -> Result<()>
             "reshim 后配置或源改变",
         ));
     }
-    ai_state::verify_profiles(&upgrade.profiles)?;
+    upgrade.verify_profiles()?;
     complete(journal, false);
     Ok(())
 }
@@ -444,7 +453,7 @@ fn reconcile(ctx: &Context, store: &Store, journal: &mut Journal, upgrade: &Upgr
             fence: &fence,
         },
     )?;
-    ai_state::verify_profiles(&upgrade.profiles)?;
+    upgrade.verify_profiles()?;
     config_tx::ai_reconcile_completed(store, journal)?;
     evidence.verify()?;
     complete(journal, true);
@@ -457,9 +466,7 @@ pub fn worker_command(journal: &Journal) -> Result<Option<CommandSpec>> {
     }
     let upgrade: Upgrade =
         crate::paths::regular_json(&journal.state.join(format!("ai-{}.json", journal.id)))?;
-    if journal.plan.warnings.first() != Some(&format!("ai-native-v1:{}", fingerprint(&upgrade)?)) {
-        return Err(Error::attention("ai_plan_changed", "AI 输入与冻结摘要不同"));
-    }
+    ai_state::verify_plan(journal, &upgrade)?;
     let step: Step =
         crate::paths::regular_json(&journal.state.join(format!("ai-{}-step.json", journal.id)))?;
     if step == Step::Reshim {

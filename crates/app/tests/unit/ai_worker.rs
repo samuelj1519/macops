@@ -1,5 +1,5 @@
 use super::*;
-use crate::{ai_state::Mise, cli::Cli, test_support::TestResult};
+use crate::{ai_state::Mise, cli::Cli, domain::fingerprint, test_support::TestResult};
 use clap::Parser;
 use std::{fs, path::PathBuf};
 
@@ -14,6 +14,10 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> std::result::Result<Self, Box<dyn std::error::Error>> {
+        Self::for_tool("claude")
+    }
+
+    fn for_tool(tool: &str) -> std::result::Result<Self, Box<dyn std::error::Error>> {
         let root = tempfile::tempdir_in("/private/tmp")?;
         let home = root.path().join("home");
         let live = home.join(".config/mise/config.toml");
@@ -22,7 +26,7 @@ impl Fixture {
         for path in [&live, &source, &profile] {
             fs::create_dir_all(path.parent().ok_or("fixture parent")?)?;
         }
-        let key = crate::policy::config_tx::ai_mise_spec("claude")?;
+        let key = crate::policy::config_tx::ai_mise_spec(tool)?;
         let old_pin = format!("[tools]\n\"{key}\" = \"1.0.0\"\n");
         fs::write(&live, &old_pin)?;
         fs::write(&source, &old_pin)?;
@@ -32,7 +36,7 @@ impl Fixture {
         let target = old_pin.replace("1.0.0", "2.0.0");
         let recipe = Upgrade {
             isolated: context.isolated,
-            tool: "claude".into(),
+            tool: tool.into(),
             version: Some("2.0.0".into()),
             force_live: false,
             mise: Some(Mise {
@@ -47,7 +51,7 @@ impl Fixture {
             profiles: ai_state::profiles(&context)?,
         };
         let mut plan = crate::test_support::journal()?.plan;
-        plan.package.id = "ai-native:claude".into();
+        plan.package.id = format!("ai-native:{tool}");
         plan.recipe_sha256 = fingerprint(&plan.package)?;
         plan.action = crate::domain::Action::Upgrade;
         plan.command = Some(CommandSpec {
@@ -67,6 +71,65 @@ impl Fixture {
             profile,
         })
     }
+}
+
+#[test]
+fn legacy_codex_plan_ignores_claude_edits_and_still_checks_the_original_source() -> TestResult {
+    let mut fixture = Fixture::for_tool("codex")?;
+    let frozen = fixture.recipe.mise.as_ref().ok_or("mise")?;
+    let edited = br#"{"model":"independent edit"}"#;
+    fs::write(&fixture.profile, edited)?;
+    ai_state::step(&fixture.store, &fixture.operation, Step::Inspect)?;
+    assert_eq!(
+        worker_command(&fixture.operation)?,
+        fixture.operation.plan.command
+    );
+
+    fs::write(&frozen.live.anchor.requested, &frozen.expected_live)?;
+    let foreign = b"# independent source edit\n";
+    fs::write(&frozen.source.anchor.requested, foreign)?;
+    let blocked = finish(
+        &fixture.context,
+        &fixture.store,
+        &mut fixture.operation,
+        &fixture.recipe,
+    )?;
+    assert_eq!(blocked["recoveryBlocker"], "ai_source_changed");
+    assert_eq!(blocked["journal"]["phase"], "unknown");
+    assert_eq!(fs::read(&frozen.source.anchor.requested)?, foreign);
+    assert_eq!(fs::read(&fixture.profile)?, edited);
+    assert_eq!(
+        ai_state::read(&fixture.store, &fixture.operation)?
+            .profiles
+            .len(),
+        fixture.recipe.profiles.len()
+    );
+    Ok(())
+}
+
+#[test]
+fn legacy_codex_plan_still_binds_the_tool_and_all_frozen_profile_bytes() -> TestResult {
+    let fixture = Fixture::for_tool("codex")?;
+    ai_state::step(&fixture.store, &fixture.operation, Step::Inspect)?;
+    let mut wrong_tool = fixture.operation.clone();
+    wrong_tool.plan.package.id = "ai-native:claude".into();
+    let error = worker_command(&wrong_tool)
+        .err()
+        .ok_or("wrong target tool accepted")?;
+    assert_eq!(error.code, "ai_plan_changed");
+
+    let mut changed = fixture.recipe.clone();
+    changed.profiles[0].digest = Some("0".repeat(64));
+    Store::atomic(
+        &fixture.store.root,
+        &format!("ai-{}.json", fixture.operation.id),
+        &changed,
+    )?;
+    let error = ai_state::read(&fixture.store, &fixture.operation)
+        .err()
+        .ok_or("modified snapshot accepted")?;
+    assert_eq!(error.code, "ai_plan_changed");
+    Ok(())
 }
 
 #[test]

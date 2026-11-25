@@ -122,7 +122,7 @@ pub fn require_sync(live: &str, source: &str, force_live: bool) -> Result<()> {
     {
         return Err(Error::attention(
             "mise_config_drift",
-            "整份 mise 配置存在漂移；先对账，或显式使用 --force-live 仅更新本机",
+            "本机的 mise 设置和保存的来源不同。运行 mo config reconcile 查看差异。",
         ));
     }
     Ok(())

@@ -257,7 +257,14 @@ pub fn run(ctx: &Context, command: &Config, dry: bool, yes: bool) -> Result<Opti
         ));
     }
     let store = Store::lock(ctx)?;
-    store.check_pending()?;
+    if matches!(
+        command,
+        Config::Enroll | Config::List { refresh: true } | Config::Apply { .. }
+    ) {
+        store.check_pending()?;
+    } else {
+        store.check_migration_pending()?;
+    }
     let binding = if matches!(command, Config::Enroll) {
         io::discover(ctx)?
     } else {
@@ -317,12 +324,16 @@ fn register(ctx: &Context, store: &Store, binding: &Binding, enroll: bool) -> Re
     }
     Store::atomic(&store.root, "chezmoi-metadata.json", &cache)?;
     let mut result = cache_result(Some(&cache));
-    result["coverage"] = json!(if enroll {
-        "owner-enrolled"
+    if enroll {
+        result["coverage"] = json!("owner-enrolled");
+        result["incomplete"] = json!(false);
     } else {
-        "native-evaluated"
-    });
-    result["incomplete"] = json!(false);
+        result["coverage"] = json!(if cache.complete {
+            "native-evaluated"
+        } else {
+            "partial-native-entry-selection"
+        });
+    }
     result["effects"] = json!(binding.effects);
     if let Some(object) = result.as_object_mut() {
         object.remove("nativeInvocations");

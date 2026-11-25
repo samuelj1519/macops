@@ -157,7 +157,7 @@ fn native_query_waits_for_early_exit_peer_and_never_calls_it_certain() -> TestRe
 }
 
 #[test]
-fn native_query_does_not_signal_a_group_after_reaping_its_leader() -> TestResult {
+fn native_query_allows_a_peer_to_finish_within_its_budget() -> TestResult {
     let temp = tempfile::tempdir_in("/private/tmp")?;
     let home = temp.path().join("home");
     std::fs::create_dir(&home)?;
@@ -175,7 +175,7 @@ fn native_query_does_not_signal_a_group_after_reaping_its_leader() -> TestResult
             args: vec!["-c".into(), script],
         },
         &environment(&ctx),
-        1,
+        3,
         &ctx.state,
     )?;
     assert_eq!(output.code, Some(0));
@@ -195,7 +195,10 @@ fn failed_query_audit_cannot_release_before_its_peer_finishes() -> TestResult {
     let _store = Store::lock(&ctx)?;
     let marker = home.join("peer-finished");
     let script = format!(
-        "/bin/chmod 500 '{}'; (/bin/sleep 1; printf finished > '{}') >/dev/null 2>&1 & printf done",
+        r#"while ! /usr/bin/grep -Eqs '"phase":[[:space:]]*"running"' '{}'"/chezmoi-query-"*.json; do /bin/sleep .02; done
+/bin/chmod 500 '{}'
+(/bin/sleep 1; printf finished > '{}') >/dev/null 2>&1 & printf done"#,
+        ctx.state.display(),
         ctx.state.display(),
         marker.display()
     );

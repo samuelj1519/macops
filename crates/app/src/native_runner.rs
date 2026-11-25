@@ -324,6 +324,15 @@ pub fn launch(store: &Store, journal: &mut Journal, binding: &RunBinding) -> Res
     if home != binding.home {
         return Err(invalid());
     }
+    let verbose = std::env::args_os().any(|arg| arg == "--verbose");
+    let mut progress = shows_progress(journal, verbose)
+        .then(crate::process::LiveProgress::open)
+        .flatten();
+    let captured = if progress.is_some() {
+        Some([tempfile::tempfile()?, tempfile::tempfile()?])
+    } else {
+        None
+    };
     let mut command = Command::new(std::env::current_exe()?);
     command
         .arg("__native_worker")
@@ -338,6 +347,12 @@ pub fn launch(store: &Store, journal: &mut Journal, binding: &RunBinding) -> Res
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .process_group(0);
+    if let Some([out, err]) = &captured {
+        command
+            .arg("--capture-progress")
+            .stdout(out.try_clone()?)
+            .stderr(err.try_clone()?);
+    }
     if let Some(profile) = std::env::var_os("LLVM_PROFILE_FILE") {
         command.env("LLVM_PROFILE_FILE", profile);
     }
@@ -365,14 +380,54 @@ pub fn launch(store: &Store, journal: &mut Journal, binding: &RunBinding) -> Res
     let start = Instant::now();
     loop {
         if child.try_wait()?.is_some() {
+            if let (Some(progress), Some([out, err])) = (&mut progress, &captured) {
+                progress.relay([out, err], true);
+            }
             break;
         }
         if start.elapsed() > Duration::from_secs(binding.invocation.timeout_secs + 3) {
             return Ok(unknown("native_supervisor_timeout"));
         }
+        if let (Some(progress), Some([out, err])) = (&mut progress, &captured) {
+            progress.relay([out, err], false);
+        }
         std::thread::sleep(Duration::from_millis(15));
     }
     observe(store, journal, binding)
+}
+
+fn shows_progress(journal: &Journal, verbose: bool) -> bool {
+    progress_capture_allowed(journal)
+        && (!(crate::codex_install::is_install(journal)
+            || crate::claude_install::is_install(journal))
+            || verbose)
+}
+
+fn progress_capture_allowed(journal: &Journal) -> bool {
+    journal.plan.package.kind != crate::domain::Kind::Config
+        && !crate::policy::chezmoi_native::is_native(&journal.plan)
+}
+
+fn capture_files(directory: &Directory, progress: bool) -> Result<(std::fs::File, std::fs::File)> {
+    if !progress {
+        return Ok((
+            tempfile::tempfile_in(&directory.path)?,
+            tempfile::tempfile_in(&directory.path)?,
+        ));
+    }
+    let out =
+        std::fs::File::from(rustix::io::dup(std::io::stdout()).map_err(std::io::Error::from)?);
+    let err =
+        std::fs::File::from(rustix::io::dup(std::io::stderr()).map_err(std::io::Error::from)?);
+    let metadata = out.metadata()?;
+    let other = err.metadata()?;
+    if !metadata.is_file()
+        || !other.is_file()
+        || (metadata.dev(), metadata.ino()) == (other.dev(), other.ino())
+    {
+        return Err(invalid());
+    }
+    Ok((out, err))
 }
 
 pub fn observe(store: &Store, journal: &Journal, binding: &RunBinding) -> Result<NativeOutcome> {
@@ -438,6 +493,7 @@ fn inspect(journal: &Journal, binding: &RunBinding) -> Result<NativeOutcome> {
 
 pub fn worker(
     path: &Path,
+    capture_progress: bool,
     before_native: impl FnOnce(&Journal, &FrozenInvocation) -> Result<()>,
     after_native: impl FnOnce(&Journal, &FrozenInvocation, &NativeOutcome) -> Result<()>,
 ) -> Result<()> {
@@ -465,8 +521,10 @@ pub fn worker(
         ));
     }
     opened(&binding)?;
-    let stdout = tempfile::tempfile_in(&directory.path)?;
-    let stderr = tempfile::tempfile_in(&directory.path)?;
+    let (stdout, stderr) = capture_files(
+        &directory,
+        capture_progress && progress_capture_allowed(&journal),
+    )?;
     opened(&binding)?;
     Directory::open(&binding.invocation.cwd)?;
     let invocation = &binding.invocation;

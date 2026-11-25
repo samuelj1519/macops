@@ -1,28 +1,49 @@
 use super::*;
 
 #[test]
+fn install_progress_describes_the_stage_and_stays_quiet_for_machine_output() {
+    for (stage, expected) in [
+        (Stage::VerifySource, "核对固定提交与插件文件"),
+        (Stage::RegisterMarketplace, "在隔离目录登记插件市场"),
+        (Stage::InstallPlugin, "在隔离目录安装插件"),
+        (Stage::CheckActivation, "核对插件启用设置"),
+        (Stage::Publish, "校验后写入选定配置"),
+    ] {
+        assert_eq!(install_stage_text(stage, true), Some(expected));
+        assert_eq!(install_stage_text(stage, false), None);
+    }
+}
+
+#[test]
 fn recovery_report_displays_the_explicit_continuation_command() {
+    assert_eq!(
+        recovery_notice(&serde_json::json!({"reason":"operation_busy"})),
+        "另一个操作正在使用记录。等它结束后再检查。",
+    );
+    assert_eq!(
+        recovery_notice(
+            &serde_json::json!({"journal":{"phase":"unknown","message":"原载荷无法核验"},"recoveryBlocker":"ai_payload_changed"}),
+        ),
+        "仍待核对 · 原载荷无法核验",
+    );
     let report = serde_json::json!({
         "journal": {"phase": "succeeded"},
         "continuationRequired": true,
         "continuationCommand": "mo agent resume OP-fixture",
     });
     assert_eq!(
-        recovery_notice("OP-fixture", &report),
+        recovery_notice(&report),
         "原阶段已核对。继续请运行 mo agent resume OP-fixture"
     );
     assert_eq!(
-        recovery_notice("OP-fixture", &serde_json::json!({"status": "unknown"})),
-        "核对结果 仍待核对 · OP-fixture"
+        recovery_notice(&serde_json::json!({"status": "unknown"})),
+        "核对结果 仍待核对"
     );
     let unverified = serde_json::json!({
         "journal": {"phase": "succeeded"},
         "continuationRequired": false,
     });
-    assert_eq!(
-        recovery_notice("OP-fixture", &unverified),
-        "核对结果 后续步骤待核对 · OP-fixture"
-    );
+    assert_eq!(recovery_notice(&unverified), "核对结果 后续步骤待核对");
 }
 
 #[test]
@@ -57,6 +78,7 @@ fn agent_details_announce_the_managed_session_without_claiming_it_is_loaded() {
         source: None,
         recovery: None,
         agent_session: None,
+        agent_removable: false,
         skills_native: false,
     }));
     assert!(browser.agent_action('e').is_none());
@@ -76,6 +98,7 @@ fn agent_details_announce_the_managed_session_without_claiming_it_is_loaded() {
         source: None,
         recovery: None,
         agent_session: Some(session),
+        agent_removable: true,
         skills_native: false,
     }));
     assert!(keys(Kind::Agents, &browser.page, false).contains("e 插件设置"));

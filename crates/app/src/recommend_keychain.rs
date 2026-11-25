@@ -24,6 +24,13 @@ pub(super) fn unavailable() -> Error {
     Error::attention("model_keychain_unavailable", "无法读取或更新指定钥匙串条目")
 }
 
+fn missing() -> Error {
+    Error::attention(
+        "model_keychain_item_missing",
+        "钥匙串找不到推荐模型已保存的密钥",
+    )
+}
+
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ExternalItem {
@@ -95,7 +102,7 @@ fn external_from(
     if file_identity(&item.path)? != item.file {
         return Err(unavailable());
     }
-    let bytes = read(Some(&item.path), &item.service, &item.account)?.ok_or_else(unavailable)?;
+    let bytes = read(Some(&item.path), &item.service, &item.account)?.ok_or_else(missing)?;
     if file_identity(&item.path)? != item.file {
         return Err(unavailable());
     }
@@ -233,7 +240,7 @@ fn load_from(
     deadline: Option<Instant>,
     read: impl Fn(Option<&Path>, &str, &str) -> Result<Option<Vec<u8>>>,
 ) -> Result<Vec<u8>> {
-    let bytes = read(None, &profile.service(config), profile.account())?.ok_or_else(unavailable)?;
+    let bytes = read(None, &profile.service(config), profile.account())?.ok_or_else(missing)?;
     resolve(profile, config, bytes, |item| {
         if deadline.is_some_and(|limit| Instant::now() >= limit) {
             return Err(unavailable());
@@ -323,7 +330,7 @@ pub(super) fn write_single(
 }
 
 pub(super) fn load_legacy(service: &str, account: &str) -> Result<Vec<u8>> {
-    native::without_interaction(|| native::read(None, service, account)?.ok_or_else(unavailable))
+    native::without_interaction(|| native::read(None, service, account)?.ok_or_else(missing))
 }
 
 pub(super) fn add(
@@ -380,6 +387,8 @@ fn eligible_removal(
 pub(super) enum ReadFailure {
     Deadline,
     Keychain,
+    Missing,
+    Authorization,
 }
 
 pub(super) fn bounded(
@@ -404,7 +413,11 @@ pub(super) fn bounded(
     }
     result
         .map_err(|_| ReadFailure::Keychain)?
-        .map_err(|_| ReadFailure::Keychain)
+        .map_err(|error| match error.code.as_str() {
+            "model_keychain_item_missing" => ReadFailure::Missing,
+            "model_keychain_authorization_required" => ReadFailure::Authorization,
+            _ => ReadFailure::Keychain,
+        })
 }
 
 fn verified_item<P: AsRef<[u8]>, T>(
@@ -467,6 +480,17 @@ mod native {
         os::macos::{keychain::SecKeychain, passwords::find_generic_password},
     };
 
+    fn read_error(error: security_framework::base::Error) -> crate::error::Error {
+        // errSecInteractionNotAllowed
+        if error.code() == -25308 {
+            return crate::error::Error::attention(
+                "model_keychain_authorization_required",
+                "macOS 钥匙串需要授权或解锁",
+            );
+        }
+        unavailable()
+    }
+
     fn exists(keychain: Option<&SecKeychain>, service: &str, account: &str) -> Result<bool> {
         let mut options = ItemSearchOptions::new();
         if let Some(keychain) = keychain {
@@ -488,7 +512,7 @@ mod native {
         match results {
             Err(error) if error.code() == -25300 => Ok(false),
             Ok(rows) => unique_match(rows.len()),
-            Err(_) => Err(unavailable()),
+            Err(error) => Err(read_error(error)),
         }
     }
 
@@ -515,7 +539,7 @@ mod native {
                     service,
                     account,
                 )
-                .map_err(|_| unavailable())
+                .map_err(read_error)
             },
         )?;
         Ok(found.map(|(password, _)| password.to_vec()))

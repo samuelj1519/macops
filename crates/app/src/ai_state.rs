@@ -108,18 +108,6 @@ fn file_digest(path: &Path) -> Result<Option<String>> {
         Err(e) => Err(e.into()),
     }
 }
-pub fn verify_profiles(files: &[ProfileFile]) -> Result<()> {
-    for file in files {
-        if file_digest(&file.path)? != file.digest {
-            return Err(Error::attention(
-                "claude_profile_changed",
-                "Claude profile 配置或模型发生变化，保留阻断",
-            ));
-        }
-    }
-    Ok(())
-}
-
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Upgrade {
@@ -131,6 +119,25 @@ pub struct Upgrade {
     pub mise: Option<Mise>,
     #[serde(deserialize_with = "crate::policy::json::object_vec")]
     pub profiles: Vec<ProfileFile>,
+}
+
+impl Upgrade {
+    pub fn verify_profiles(&self) -> Result<()> {
+        if self.tool == "claude" {
+            for file in &self.profiles {
+                if file_digest(&file.path)? != file.digest {
+                    return Err(Error::attention(
+                        "claude_profile_changed",
+                        format!(
+                            "Claude 档案配置与原记录不同（{}）。已保留现有文件。",
+                            crate::output::sanitize(&file.path.to_string_lossy(), false),
+                        ),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -151,10 +158,20 @@ pub fn read(store: &Store, journal: &Journal) -> Result<Upgrade> {
         &format!("ai-{}.json", journal.id),
     )?
     .ok_or_else(|| Error::attention("ai_plan_missing", "缺少冻结的 AI 升级输入"))?;
-    if journal.plan.warnings.first() != Some(&format!("ai-native-v1:{}", fingerprint(&upgrade)?)) {
-        return Err(Error::attention("ai_plan_changed", "AI 升级输入摘要不匹配"));
-    }
+    verify_plan(journal, &upgrade)?;
     Ok(upgrade)
+}
+
+pub fn verify_plan(journal: &Journal, upgrade: &Upgrade) -> Result<()> {
+    if journal.plan.warnings.first() != Some(&format!("ai-native-v1:{}", fingerprint(upgrade)?))
+        || journal.plan.package.id.strip_prefix("ai-native:") != Some(upgrade.tool.as_str())
+    {
+        return Err(Error::attention(
+            "ai_plan_changed",
+            "目标工具或原操作输入摘要不一致",
+        ));
+    }
+    Ok(())
 }
 pub fn step(store: &Store, journal: &Journal, value: Step) -> Result<()> {
     Store::atomic(&store.root, &format!("ai-{}-step.json", journal.id), &value)

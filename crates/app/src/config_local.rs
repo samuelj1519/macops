@@ -287,7 +287,7 @@ fn package_for_target(
     if !authority_allows_untracked(&mapping.coverage.state, &mapping.coverage.issues) {
         return Err(Error::attention(
             "config_authority_uncertain",
-            "配置来源映射存在未求值属性或错误，不能假定目标未纳管",
+            "配置来源映射存在未求值属性或错误，不能假定目标未纳入管理",
         ));
     }
     let parent = target

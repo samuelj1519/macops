@@ -23,11 +23,14 @@ pub fn confirm(message: &str, yes: bool) -> Result<()> {
     if !std::io::stdin().is_terminal() {
         return Err(Error::attention(
             "confirmation_required",
-            "非交互环境需要 --yes",
+            "这里不能输入确认。请在终端里重新运行这条命令，先看清它会改什么。",
         ));
     }
     let mut error = std::io::stderr().lock();
-    writeln!(error, "{message}\n继续？输入 yes：")?;
+    writeln!(
+        error,
+        "{message}\n同意就输入 yes，再按 Enter。直接按 Enter 可以取消。"
+    )?;
     let mut value = String::new();
     std::io::stdin().read_line(&mut value)?;
     if value.trim() == "yes" {
@@ -208,6 +211,12 @@ pub(crate) fn execute_checked(
         Action::Uninstall | Action::Adopt | Action::Start | Action::Stop
     ) {
         confirm(&confirmation(ctx, &plan), yes)?;
+        if let Some(previous) = recover_before_write(ctx, None)?
+            && previous.original.plan.recipe_sha256 == plan.recipe_sha256
+            && previous.matches(plan.action, &plan.package.id, plan.target.as_deref())
+        {
+            return Ok(previous.result);
+        }
     }
     let store = Store::lock(ctx)?;
     store.check_pending()?;
@@ -297,7 +306,7 @@ fn confirmation(ctx: &Context, plan: &Plan) -> String {
         )
     } else if plan.action == Action::Adopt {
         format!(
-            "纳管 {}\n{}",
+            "纳入管理 {}\n{}",
             crate::browser::sanitize(&plan.package.name, false),
             crate::recommend::plan_scope(ctx, plan)
         )
@@ -407,7 +416,9 @@ fn recover_owned(
     resolve_failed: bool,
     yes: bool,
 ) -> Result<Option<Value>> {
-    let result = if crate::policy::chezmoi_native::is_native(&journal.plan) {
+    let result = if crate::plugin_target::is_publication(journal) {
+        crate::plugin_target::recover(ctx, store, journal, resolve_failed, yes)?
+    } else if crate::policy::chezmoi_native::is_native(&journal.plan) {
         crate::chezmoi_native::recover(ctx, store, journal, resolve_failed, yes)?
     } else if crate::native_skills::is_native(journal) {
         crate::native_skills::recover(ctx, store, journal, resolve_failed, yes)?
@@ -454,6 +465,195 @@ pub fn recover(
     recover_requested(ctx, id, dry_run, resolve_failed, yes, None)
 }
 
+pub(crate) struct Recovered {
+    pub original: Journal,
+    pub result: Value,
+    pub succeeded: bool,
+    pub local_ai: Option<bool>,
+}
+
+impl Recovered {
+    pub(crate) fn matches(&self, action: Action, target: &str, version: Option<&str>) -> bool {
+        self.succeeded && matches_intent(&self.original, action, target, version)
+    }
+}
+
+pub(crate) fn matches_intent(
+    journal: &Journal,
+    action: Action,
+    target: &str,
+    version: Option<&str>,
+) -> bool {
+    let plan = &journal.plan;
+    plan.action == action
+        && plan.package.id == target
+        && version.is_none_or(|version| plan.target.as_deref() == Some(version))
+}
+
+fn same_recovery_roots(ctx: &Context, journal: &Journal) -> bool {
+    journal.home == ctx.home
+        && journal.state == ctx.state
+        && journal.cache == ctx.cache
+        && journal.settings == ctx.settings
+}
+
+pub(crate) fn require_recovery_roots(ctx: &Context, journal: &Journal) -> Result<()> {
+    if same_recovery_roots(ctx, journal) {
+        return Ok(());
+    }
+    Err(Error::attention(
+        "recovery_scope_changed",
+        "请用上一次的目录选项核对原操作。",
+    ))
+}
+
+pub(crate) fn lock_after_recovery(ctx: &Context) -> Result<Store> {
+    recover_before_write(ctx, None)?;
+    let store = Store::lock(ctx)?;
+    store.check_pending()?;
+    Ok(store)
+}
+
+pub(crate) fn recover_before_write(
+    ctx: &Context,
+    local_tool: Option<&str>,
+) -> Result<Option<Recovered>> {
+    recover_before_write_checked(ctx, local_tool, |_| Ok(true))
+}
+
+pub(crate) fn recover_before_write_checked(
+    ctx: &Context,
+    local_tool: Option<&str>,
+    accepts: impl FnOnce(&Journal) -> Result<bool>,
+) -> Result<Option<Recovered>> {
+    recover_before_write_with(ctx, local_tool, |_| Ok(()), accepts)
+}
+
+pub(crate) fn recover_before_new_plan(
+    ctx: &Context,
+    yes: bool,
+    related: impl FnOnce(&Journal) -> Result<bool>,
+) -> Result<Option<Recovered>> {
+    recover_before_write_with(
+        ctx,
+        None,
+        |journal| {
+            if yes || related(journal)? {
+                return Ok(());
+            }
+            confirm(
+                &format!(
+                    "上一次操作「{}」还待核对。确认后只核对那次操作，再准备本次计划。",
+                    crate::output::sanitize(&journal.plan.package.name, false)
+                ),
+                false,
+            )
+        },
+        |_| Ok(true),
+    )
+}
+
+fn recover_before_write_with(
+    ctx: &Context,
+    local_tool: Option<&str>,
+    approve: impl FnOnce(&Journal) -> Result<()>,
+    accepts: impl FnOnce(&Journal) -> Result<bool>,
+) -> Result<Option<Recovered>> {
+    let Some(original) =
+        store::active(ctx)?.filter(|journal| crate::policy::state::pending(journal.phase))
+    else {
+        return Ok(None);
+    };
+    let id = &original.id;
+    let blocked =
+        |reason: &str| Error::attention("recovery_required", format!("还没开始新操作。\n{reason}"));
+    let scoped;
+    let ctx = if crate::policy::service::is_control(original.plan.action) {
+        scoped = crate::identity::service_context(ctx)?;
+        &scoped
+    } else {
+        ctx
+    };
+    if !same_recovery_roots(ctx, &original) || original.scope != ctx.scope {
+        return Err(blocked("请用上一次的目录选项运行原命令。"));
+    }
+    if original.process_group.is_some_and(process::group_alive) {
+        return Err(blocked(
+            "上一次操作还在运行。等它结束后，再运行同一条命令。",
+        ));
+    }
+    crate::identity::validate(&original.scope)?;
+    approve(&original)?;
+    let store = Store::lock(ctx)?;
+    store.check_migration_pending()?;
+    store.verify_namespace()?;
+    let expected = fingerprint(&original)?;
+    let current = Store::read::<Journal>(&store.root, "active.json")?
+        .ok_or_else(|| blocked("操作记录刚刚变了。请再运行一次命令。"))?;
+    verify_recovery_preview(Some(&expected), &current)?;
+    store::validate_journal(&current)?;
+    if !accepts(&current)? {
+        return Err(blocked(
+            "上一次操作不属于这次选择。请运行 mo recover 查看记录。",
+        ));
+    }
+    if current.process_group.is_some_and(process::group_alive) {
+        return Err(blocked(
+            "上一次操作还在运行。等它结束后，再运行同一条命令。",
+        ));
+    }
+    let local_ai = if crate::ai_tx::is_native(&current) {
+        let saved = crate::ai_state::read(&store, &current)?;
+        if let Some(mise) = &saved.mise {
+            if mise.roots != ctx.chezmoi {
+                return Err(blocked("请用上一次的配置文件和目录选项运行原命令。"));
+            }
+            if local_tool == Some(saved.tool.as_str()) && !saved.force_live {
+                return Err(blocked(
+                    "上一次需要保存设置来源。这次只改本机。请用原来的升级选项检查上一次。",
+                ));
+            }
+        }
+        Some(saved.force_live)
+    } else {
+        None
+    };
+    let result = if current.plan.brew.is_some() {
+        crate::brew::recover_locked(ctx, &store, &current, false, false, Some(&expected))
+    } else if matches!(
+        current.plan.package.provider,
+        Provider::Uv { binding: None, .. }
+    ) {
+        return Err(blocked(
+            "缺少原来安装位置的信息。请用 mo history 查看记录。",
+        ));
+    } else {
+        recover_locked(ctx, &store, current, false, false)
+    }
+    .map_err(|error| blocked(&crate::output::sanitize(&error.message, true)))?;
+    store.verify_namespace()?;
+    let active = Store::read::<Journal>(&store.root, "active.json")?
+        .ok_or_else(|| blocked("没能确认上一次操作是否结束。请用 mo history 查看记录。"))?;
+    store::validate_journal(&active)?;
+    if crate::policy::state::pending(active.phase) {
+        let reason = if result["recoveryBlocker"] == "claude_profile_changed" {
+            "Claude 设置后来有改动。请先确认要保留哪份设置。"
+        } else {
+            "现在还不能确认上一次操作是否完成。"
+        };
+        return Err(blocked(&format!(
+            "{reason}运行 mo recover 查看待检查的操作。"
+        )));
+    }
+    let settled = locked_journal(&store, id)?;
+    Ok(Some(Recovered {
+        original,
+        result,
+        succeeded: settled.phase == Phase::Succeeded,
+        local_ai,
+    }))
+}
+
 pub(crate) struct RecoveryPreview {
     pub journal: Journal,
     sha256: String,
@@ -466,12 +666,8 @@ impl RecoveryPreview {
             return Err(Error::attention("operation_conflict", "原操作标识不一致"));
         }
         require_recoverable_from_history(ctx, &journal)?;
-        if journal.home != ctx.home
-            || journal.state != ctx.state
-            || journal.cache != ctx.cache
-            || journal.settings != ctx.settings
-            || journal.scope != ctx.scope
-        {
+        require_recovery_roots(ctx, &journal)?;
+        if journal.scope != ctx.scope {
             return Err(Error::attention(
                 "recovery_scope_changed",
                 "请用原环境及作用域核对",
@@ -512,18 +708,55 @@ impl RecoveryState {
 }
 
 #[derive(Default)]
-struct ClaudeFollowups {
+struct ClientFollowups {
     candidates: BTreeSet<String>,
     incomplete: bool,
 }
 
-impl ClaudeFollowups {
-    fn read(ctx: &Context, records: &[Journal]) -> Self {
-        let (candidates, incomplete) = crate::claude_install::awaiting_followup(ctx, records)
-            .unwrap_or_else(|_| (BTreeSet::new(), true));
+impl From<Result<(BTreeSet<String>, bool)>> for ClientFollowups {
+    fn from(report: Result<(BTreeSet<String>, bool)>) -> Self {
+        let (candidates, incomplete) = report.unwrap_or_else(|_| (BTreeSet::new(), true));
         Self {
             candidates,
             incomplete,
+        }
+    }
+}
+
+#[derive(Default)]
+struct Followups {
+    codex: ClientFollowups,
+    claude: ClientFollowups,
+}
+
+impl Followups {
+    fn read(ctx: &Context, records: &[Journal]) -> Self {
+        Self {
+            codex: crate::codex_install::awaiting_followup(ctx, records).into(),
+            claude: crate::claude_install::awaiting_followup(ctx, records).into(),
+        }
+    }
+
+    fn state(&self, journal: &Journal) -> RecoveryState {
+        if crate::policy::state::pending(journal.phase) {
+            return RecoveryState::Pending;
+        }
+        if journal.phase != Phase::Succeeded {
+            return RecoveryState::Settled;
+        }
+        let (client, selected) = if crate::claude_install::is_install(journal) {
+            (&self.claude, RecoveryState::ClaudeFollowup)
+        } else if crate::codex_install::is_install(journal) {
+            (&self.codex, RecoveryState::CodexPublication)
+        } else {
+            return RecoveryState::Settled;
+        };
+        if client.incomplete {
+            RecoveryState::Unverified
+        } else if client.candidates.contains(&journal.id) {
+            selected
+        } else {
+            RecoveryState::Settled
         }
     }
 }
@@ -542,40 +775,16 @@ fn merge_active(records: &mut Vec<Journal>, active: Option<Journal>) {
     }
 }
 
-fn succeeded_claude_stage(journal: &Journal) -> bool {
-    journal.phase == Phase::Succeeded && crate::claude_install::is_install(journal)
-}
-
-fn recovery_state(ctx: &Context, journal: &Journal, claude: &ClaudeFollowups) -> RecoveryState {
-    if crate::policy::state::pending(journal.phase) {
-        return RecoveryState::Pending;
-    }
-    if succeeded_claude_stage(journal) {
-        return if claude.incomplete {
-            RecoveryState::Unverified
-        } else if claude.candidates.contains(&journal.id) {
-            RecoveryState::ClaudeFollowup
-        } else {
-            RecoveryState::Settled
-        };
-    }
-    match crate::codex_install::awaiting_publication(ctx, journal) {
-        Ok(true) => RecoveryState::CodexPublication,
-        Ok(false) => RecoveryState::Settled,
-        Err(_) => RecoveryState::Unverified,
-    }
-}
-
 pub(crate) fn recovery_history(ctx: &Context) -> Result<(Vec<(Journal, RecoveryState)>, bool)> {
     let mut records = store::history(ctx)?;
     let active = store::active(ctx);
     let active_unreadable = active.is_err();
     merge_active(&mut records, active.unwrap_or_default());
-    let claude = ClaudeFollowups::read(ctx, &records);
+    let followups = Followups::read(ctx, &records);
     let rows = records
         .into_iter()
         .map(|journal| {
-            let state = recovery_state(ctx, &journal, &claude);
+            let state = followups.state(&journal);
             let state = if active_unreadable && state.can_confirm() {
                 RecoveryState::Unverified
             } else {
@@ -589,26 +798,155 @@ pub(crate) fn recovery_history(ctx: &Context) -> Result<(Vec<(Journal, RecoveryS
 
 pub(crate) fn pending_recovery(ctx: &Context) -> Result<(Vec<Journal>, bool)> {
     let mut records = recovery_records(ctx)?;
-    let claude = ClaudeFollowups::read(ctx, &records);
-    let mut incomplete = claude.incomplete;
+    let followups = Followups::read(ctx, &records);
+    let mut incomplete = followups.claude.incomplete || followups.codex.incomplete;
     records.retain(|journal| {
-        if claude.candidates.contains(&journal.id) {
+        if followups.claude.candidates.contains(&journal.id)
+            || followups.codex.candidates.contains(&journal.id)
+        {
             return true;
         }
-        let state = recovery_state(ctx, journal, &claude);
+        let state = followups.state(journal);
         incomplete |= state == RecoveryState::Unverified;
         state.can_confirm()
     });
     Ok((records, incomplete))
 }
 
+fn pending_list_text(pending: &[Value], incomplete: bool) -> String {
+    use std::fmt::Write as _;
+    if pending.is_empty() && !incomplete {
+        return "目前没有要检查的操作。\n".into();
+    }
+    let mut text = String::from("还有这些操作要检查\n");
+    for journal in pending {
+        let id = journal["id"].as_str().unwrap_or_default();
+        let name = journal["plan"]["package"]["name"]
+            .as_str()
+            .unwrap_or_default();
+        let status = match journal["phase"].as_str() {
+            Some("prepared") => "已准备",
+            Some("running") => "最后记录为运行中",
+            Some("succeeded") => "原阶段已完成，待核对后续步骤",
+            _ => "结果还没确认",
+        };
+        let _ = writeln!(
+            text,
+            "  {id} · {} · {status}",
+            crate::browser::sanitize(name, false)
+        );
+    }
+    if incomplete {
+        text.push_str("有些记录没能读到，清单可能少了几项。\n");
+    }
+    if let [journal] = pending
+        && let Some(id) = journal["id"].as_str().filter(|id| store::valid_id(id))
+    {
+        let _ = writeln!(
+            text,
+            "运行 mo recover {id} 检查那次操作的结果。\n只想看计划时，运行 mo recover {id} --dry-run。"
+        );
+    } else if !pending.is_empty() {
+        text.push_str("挑一个操作号，放在 mo recover 后面。加 --dry-run 只看计划。\n");
+    }
+    if !pending.is_empty() {
+        text.push_str("请带上原来的目录选项。\n");
+    }
+    text
+}
+
+pub(crate) fn recovery_text(data: &Value, dry_run: bool) -> String {
+    use crate::policy::cli::{Continuation, continuation};
+    use std::fmt::Write as _;
+    let safe = |value: &Value| crate::browser::sanitize(value.as_str().unwrap_or_default(), false);
+
+    if let Some(pending) = data["pending"].as_array() {
+        return pending_list_text(pending, data["incomplete"] == true);
+    }
+    if dry_run {
+        let mut text = crate::output::human(data);
+        if let Some(journal) = data.get("journal") {
+            let plan = &journal["plan"];
+            let package = &plan["package"];
+            let _ = writeln!(
+                text,
+                "核对预演（只读）\n原目标 {} · {}\n原 HOME {}\n原状态目录 {}",
+                safe(&package["name"]),
+                safe(&package["id"]),
+                safe(&journal["home"]),
+                safe(&journal["state"]),
+            );
+            if let Some(version) = plan["target"].as_str() {
+                let _ = writeln!(
+                    text,
+                    "计划版本 {}",
+                    crate::browser::sanitize(version, false)
+                );
+            }
+        }
+        return text;
+    }
+    match continuation(data) {
+        Some(Continuation::Ready) => {
+            return data["continuationCommand"].as_str().map_or_else(
+                || "原阶段已核对。运行 mo recover 查看下一步。\n".into(),
+                |command| {
+                    format!(
+                        "原阶段已核对。沿用原来的目录选项，运行 {} 继续。\n",
+                        crate::browser::sanitize(command, false)
+                    )
+                },
+            );
+        }
+        Some(Continuation::Unverified) => {
+            return "这条记录只证明原阶段已完成。运行 mo agent 查看当前安装，或运行 mo recover 查看是否仍有待核对步骤。\n".into();
+        }
+        None => {}
+    }
+    let mut text = crate::output::human(data);
+    if data["reason"] == "operation_busy"
+        && let Some(id) = crate::output::original_operation(data)
+    {
+        let _ = writeln!(
+            text,
+            "另一个操作正在使用这份记录。等它结束，再运行 mo recover {id}。"
+        );
+    } else if let Some(code) = data["recoveryBlocker"].as_str()
+        && let Some(id) = crate::output::original_operation(data)
+    {
+        let next = match code {
+            "claude_profile_changed" => "先确认是否要保留上面列出的档案改动。",
+            "ai_live_changed"
+            | "ai_source_changed"
+            | "ai_roots_changed"
+            | "ai_gate_inputs_changed"
+            | "ai_rollback_cas_failed" => {
+                "沿用原作用域参数，运行 mo config reconcile 查看本机和管理源的差异。"
+            }
+            _ => "运行 mo agent tools 查看当前版本，并核对上方提示的证据。",
+        };
+        let _ = writeln!(
+            text,
+            "{next}\n如果确认要保留现在的安装和设置，并结束这次操作，请运行 mo recover {id} --mark-failed。它会再问一次，只把这次操作记为失败。",
+        );
+    } else if let Some(id) = crate::output::original_operation(data) {
+        let _ = writeln!(
+            text,
+            "现在还不能确认结果。先用 mo history {id} 查看记录，再检查当前安装和设置。"
+        );
+    }
+    text
+}
+
 fn require_recoverable_from_history(ctx: &Context, journal: &Journal) -> Result<()> {
-    let claude = if succeeded_claude_stage(journal) {
-        ClaudeFollowups::read(ctx, &recovery_records(ctx)?)
+    let followups = if journal.phase == Phase::Succeeded
+        && (crate::claude_install::is_install(journal) || crate::codex_install::is_install(journal))
+    {
+        Followups::read(ctx, &recovery_records(ctx)?)
     } else {
-        ClaudeFollowups::default()
+        Followups::default()
     };
-    match recovery_state(ctx, journal, &claude) {
+    match followups.state(journal) {
         RecoveryState::Unverified => Err(Error::attention(
             "recovery_evidence_incomplete",
             "缺少原操作或后续阶段的证据，请刷新清单并核对记录",
@@ -635,7 +973,7 @@ pub(crate) fn verify_recovery_preview(expected: Option<&str>, current: &Journal)
     Ok(())
 }
 
-fn validated_recovery_journal(ctx: &Context, id: &str) -> Result<Journal> {
+pub(crate) fn validated_recovery_journal(ctx: &Context, id: &str) -> Result<Journal> {
     if !store::valid_id(id) {
         return Err(Error::new("invalid_operation_id", id));
     }
@@ -654,6 +992,7 @@ fn recover_requested(
     expected: Option<&str>,
 ) -> Result<Value> {
     let mut journal = validated_recovery_journal(ctx, id)?;
+    require_recovery_roots(ctx, &journal)?;
     verify_recovery_preview(expected, &journal)?;
     if journal.plan.brew.is_some() {
         if journal.id != id {
@@ -679,14 +1018,26 @@ fn recover_requested(
     let store = Store::lock(ctx)?;
     store.check_migration_pending()?;
     journal = locked_journal(&store, id)?;
+    require_recovery_roots(ctx, &journal)?;
+    crate::identity::validate(&journal.scope)?;
     verify_recovery_preview(expected, &journal)?;
     if expected.is_some() {
         require_recoverable_from_history(ctx, &journal)?;
     }
+    recover_locked(ctx, &store, journal, resolve_failed, yes)
+}
+
+fn recover_locked(
+    ctx: &Context,
+    store: &Store,
+    mut journal: Journal,
+    resolve_failed: bool,
+    yes: bool,
+) -> Result<Value> {
     if journal.plan.npm_binding.is_some() {
-        return crate::npm_adoption::recover(ctx, &store, &mut journal);
+        return crate::npm_adoption::recover(ctx, store, &mut journal, resolve_failed);
     }
-    if let Some(value) = recover_owned(ctx, &store, &mut journal, resolve_failed, yes)? {
+    if let Some(value) = recover_owned(ctx, store, &mut journal, resolve_failed, yes)? {
         return Ok(value);
     }
     let adopt_committed = if !resolve_failed
@@ -718,7 +1069,7 @@ fn recover_requested(
                 yes,
             )?;
             journal.phase = Phase::Failed;
-            journal.message = "用户确认人工核对后记录失败；没有执行安装器、回滚或成功验收".into();
+            journal.message = "已记为失败。这条记录不再挡住新操作。安装和设置照旧。".into();
             store.save(&journal)?;
             return Ok(json!(journal));
         }
@@ -751,7 +1102,7 @@ fn recover_requested(
         }
         Recovery::Verify => (),
     }
-    finish(&store, &mut journal)?;
+    finish(store, &mut journal)?;
     Ok(json!(journal))
 }
 
@@ -761,6 +1112,11 @@ pub fn launch(store: &Store, journal: &mut Journal) -> Result<process::Output> {
     }
     let mut output_file = tempfile::tempfile()?;
     let mut error_file = tempfile::tempfile()?;
+    let mut progress = if journal.plan.package.kind == crate::domain::Kind::Config {
+        None
+    } else {
+        process::LiveProgress::open()
+    };
     let path = store
         .path
         .join("operations")
@@ -807,8 +1163,14 @@ pub fn launch(store: &Store, journal: &mut Journal) -> Result<process::Output> {
             process::kill_group(child.id());
             break child.wait()?;
         }
+        if let Some(progress) = &mut progress {
+            progress.relay([&output_file, &error_file], false);
+        }
         std::thread::sleep(Duration::from_millis(15));
     };
+    if let Some(progress) = &mut progress {
+        progress.relay([&output_file, &error_file], true);
+    }
     uncertain |= output_file.metadata()?.len() > 2 * 1024 * 1024
         || error_file.metadata()?.len() > 2 * 1024 * 1024;
     output_file.seek(SeekFrom::Start(0))?;

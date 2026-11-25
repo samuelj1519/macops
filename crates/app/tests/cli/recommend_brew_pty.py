@@ -20,6 +20,14 @@ def read_until(phrase):
    buf.extend(data)
  assert contains(),buf.decode(errors='replace')
 try:
+ if q.get('mode') == 'batch-discovery-cancel':
+  read_until('首次信任此具体Native程序及查询范围')
+  read_until('输入 yes')
+  os.write(master, b'n\n')
+  read_until('已取消')
+  assert p.wait(timeout=10) == 3
+  assert not pathlib.Path(q['events']).exists()
+  sys.exit(0)
  if 'inventory' in q:
   key, result = q['inventory']
   read_until('本机盘点')
@@ -39,6 +47,15 @@ try:
  read_until('选择安装候选')
  assert b'Homebrew' in buf
  assert not pathlib.Path(q['events']).exists()
+ if q['mode'] == 'pending-cancel':
+  os.write(master,b'1\n')
+  read_until('上一次操作')
+  read_until('再准备本次计划')
+  os.write(master,b'n\n')
+  read_until('已取消')
+  assert p.wait(timeout=10)==3
+  assert not pathlib.Path(q['events']).exists()
+  sys.exit(0)
  if q['mode'] in ('stale','trust-stale'):
   if q['mode']=='trust-stale':
    os.write(master,b'1\n')
@@ -58,7 +75,13 @@ try:
  events=pathlib.Path(q['events']).read_text().splitlines()
  assert len(events)==1 and json.loads(events[0])[0]=='ruby',events
  os.write(master,b'yes\n' if q['approved'] else b'n\n')
- if q['approved']: read_until('结果 succeeded')
+ if q['approved']:
+  read_until('fixture brew stdout progress')
+  read_until('fixture brew stderr progress')
+  mutated=pathlib.Path(q['mutated'])
+  assert not mutated.exists()
+  mutated.with_name('progress-release').touch()
+  read_until('结果 已完成')
  assert p.wait(timeout=10)==(0 if q['approved'] else 3)
  assert b'private-fixture-token' not in buf
 finally:

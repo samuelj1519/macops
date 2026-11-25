@@ -243,7 +243,7 @@ fn history_item(journal: crate::domain::Journal, recovery: RecoveryState) -> Ite
         Action::Upgrade => "升级",
         Action::Uninstall => "卸载",
         Action::Update => "刷新索引",
-        Action::Adopt => "纳管",
+        Action::Adopt => "纳入管理",
         Action::Cleanup => "清理",
         Action::Start => "启动",
         Action::Stop => "停止",
@@ -288,19 +288,7 @@ fn history_item(journal: crate::domain::Journal, recovery: RecoveryState) -> Ite
     }
 }
 
-pub(crate) fn sanitize(value: &str, multiline: bool) -> String {
-    let mut clean = String::with_capacity(value.len());
-    for ch in value.chars() {
-        if (ch != '\n' || !multiline)
-            && (ch.is_control() || matches!(ch, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'))
-        {
-            clean.extend(ch.escape_default());
-        } else {
-            clean.push(ch);
-        }
-    }
-    clean
-}
+pub(crate) use crate::output::sanitize;
 
 fn plain(view: &View, kind: Kind) -> String {
     use std::fmt::Write as _;
@@ -403,11 +391,11 @@ pub(crate) fn adoption_view(ctx: &Context, name: Option<&str>) -> Result<View> {
     });
     let mut view = view_from_snapshot(snapshot, true);
     view.note = match (name, view.items.is_empty(), view.incomplete) {
-        (Some(_), _, _) => "选择可纳管的同名安装项",
-        (None, true, true) => "暂无已核验的纳管候选，盘点覆盖不完整",
-        (None, true, false) => "暂无可纳管的软件",
-        (None, false, true) => "选择要纳管的软件，盘点覆盖不完整",
-        (None, false, false) => "选择要纳管的软件",
+        (Some(_), _, _) => "选择可纳入管理的同名安装项",
+        (None, true, true) => "暂无已核验的可管理对象，盘点覆盖不完整",
+        (None, true, false) => "暂无可纳入管理的软件",
+        (None, false, true) => "选择要纳入管理的软件，盘点覆盖不完整",
+        (None, false, false) => "选择要纳入管理的软件",
     }
     .into();
     Ok(view)
@@ -439,6 +427,7 @@ fn view_from_snapshot(snapshot: crate::resource::Snapshot, show_scope: bool) -> 
 
 fn resource_item(resource: crate::resource::Resource, show_scope: bool) -> Option<Item> {
     use crate::resource::{Data, Management};
+    let mut name = resource.name;
     let (summary, path, agents, details) = match resource.data {
         Data::Application {
             manager,
@@ -483,7 +472,13 @@ fn resource_item(resource: crate::resource::Resource, show_scope: bool) -> Optio
             model,
             runtime,
         } => {
-            let summary = format!("{client} · {profile}");
+            let label = crate::resource_agents::profile_label(&name, &config_dir);
+            let summary = if label == name {
+                format!("{client} · {profile}")
+            } else {
+                name = label;
+                format!("{client} · 单独配置")
+            };
             let details = vec![
                 format!("档案 {}", config_dir.display()),
                 format!("运行时 {}", runtime.selector),
@@ -496,7 +491,7 @@ fn resource_item(resource: crate::resource::Resource, show_scope: bool) -> Optio
     };
     Some(Item {
         id: resource.id,
-        name: resource.name,
+        name,
         summary,
         managed: resource.management != Management::Untracked,
         management: resource.management,

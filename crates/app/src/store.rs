@@ -513,10 +513,7 @@ fn require_settled(journal: &Journal) -> Result<()> {
     if crate::policy::state::pending(journal.phase) {
         return Err(Error::attention(
             "recovery_required",
-            format!(
-                "操作 {id} 尚待核对。运行 mo recover {id} 核对原操作。",
-                id = journal.id
-            ),
+            "上一次操作的结果还没确认。运行 mo recover 查看待检查的操作。",
         ));
     }
     Ok(())

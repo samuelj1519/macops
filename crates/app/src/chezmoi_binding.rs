@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     ffi::OsStr,
-    os::unix::{fs::PermissionsExt, process::CommandExt},
+    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -252,8 +252,7 @@ pub fn query(
         .envs(env)
         .current_dir(&scope.home)
         .stdin(std::process::Stdio::null());
-    command.process_group(0);
-    let captured = crate::process::capture_bytes_guarded_process_in(
+    let captured = crate::process::capture_owned_group_with_audit(
         &mut command,
         Duration::from_secs(timeout.min(60)),
         2 * 1024 * 1024,
@@ -262,23 +261,14 @@ pub fn query(
             directory.verify()?;
             crate::identity::validate(scope)
         },
+        |pid| {
+            audit.process_group = Some(pid);
+            audit.phase = "running";
+            Store::atomic(directory.file(), &name, &audit)
+        },
     );
-    let mut result = captured.result;
-    if let Some(group) = captured.pid {
-        audit.process_group = Some(group);
-        let peers = crate::process::group_alive(group);
-        if peers {
-            audit.phase = "awaiting-owned-group";
-            let pending_record = Store::atomic(directory.file(), &name, &audit);
-            while crate::process::group_alive(group) {
-                std::thread::sleep(Duration::from_millis(15));
-            }
-            if let Ok(output) = &mut result {
-                output.uncertain = true;
-            }
-            pending_record?;
-        }
-    }
+    let result = captured.result;
+    audit.process_group = captured.pid;
     if let Ok(output) = &result {
         audit.exit = output.code;
         audit.uncertain = output.uncertain;

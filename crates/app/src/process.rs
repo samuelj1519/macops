@@ -3,13 +3,114 @@ use crate::{
     error::{Error, Result},
     paths,
 };
-use std::io::{Read, Seek, SeekFrom};
-use std::os::unix::{fs::FileTypeExt, process::CommandExt};
+use std::io::{IsTerminal, Read, Seek, SeekFrom, Write};
+use std::os::unix::{
+    fs::{FileExt, FileTypeExt, MetadataExt, OpenOptionsExt},
+    process::CommandExt,
+};
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
 pub use crate::domain::ProcessOutput as Output;
+
+pub(crate) struct LiveProgress {
+    terminal: std::fs::File,
+    streams: [ProgressStream; 2],
+    queued: Vec<u8>,
+    visible: bool,
+}
+
+#[derive(Default)]
+struct ProgressStream {
+    offset: u64,
+    remainder: Vec<u8>,
+}
+
+impl LiveProgress {
+    pub(crate) fn open() -> Option<Self> {
+        let stderr = std::io::stderr();
+        if !stderr.is_terminal() || std::env::args_os().any(|arg| arg == "--json") {
+            return None;
+        }
+        let path = nix::unistd::ttyname(&stderr).ok()?;
+        let terminal = std::fs::OpenOptions::new()
+            .write(true)
+            .custom_flags(nix::libc::O_NONBLOCK | nix::libc::O_NOCTTY | nix::libc::O_NOFOLLOW)
+            .open(path)
+            .ok()?;
+        let inherited = std::fs::File::from(rustix::io::dup(stderr).ok()?);
+        if !terminal.is_terminal()
+            || terminal.metadata().ok()?.rdev() != inherited.metadata().ok()?.rdev()
+        {
+            return None;
+        }
+        Some(Self {
+            terminal,
+            streams: Default::default(),
+            queued: Vec::new(),
+            visible: false,
+        })
+    }
+
+    fn flush_pending(&mut self) {
+        while !self.queued.is_empty() {
+            match self.terminal.write(&self.queued) {
+                Ok(n) if n > 0 => {
+                    self.visible = true;
+                    self.queued.drain(..n);
+                }
+                _ => break,
+            }
+        }
+    }
+
+    pub(crate) fn relay(&mut self, files: [&std::fs::File; 2], draining: bool) {
+        const LIMIT: u64 = 2 * 1024 * 1024;
+        let mut buffer = [0; 8192];
+        for (stream, file) in self.streams.iter_mut().zip(files) {
+            while stream.offset < LIMIT {
+                let max = usize::try_from(LIMIT - stream.offset).unwrap_or(buffer.len());
+                let size = buffer.len().min(max);
+                let Ok(count) = file.read_at(&mut buffer[..size], stream.offset) else {
+                    break;
+                };
+                if count == 0 {
+                    break;
+                }
+                stream.offset += count as u64;
+                stream.remainder.extend_from_slice(&buffer[..count]);
+                let mut bytes = std::mem::take(&mut stream.remainder);
+                if let Err(error) = std::str::from_utf8(&bytes)
+                    && error.error_len().is_none()
+                {
+                    stream.remainder = bytes.split_off(error.valid_up_to());
+                }
+                let native = String::from_utf8_lossy(&bytes);
+                let visible = native
+                    .split('\r')
+                    .map(|line| crate::output::sanitize(line, true))
+                    .collect::<Vec<_>>()
+                    .join("\r");
+                if self.queued.len() + visible.len() <= 128 * 1024 {
+                    self.queued.extend_from_slice(visible.as_bytes());
+                }
+                if !draining {
+                    break;
+                }
+            }
+        }
+        self.flush_pending();
+    }
+}
+
+impl Drop for LiveProgress {
+    fn drop(&mut self) {
+        if self.visible {
+            let _ = self.terminal.write(b"\n");
+        }
+    }
+}
 
 pub fn executable(name: &str) -> Result<PathBuf> {
     use std::os::unix::fs::PermissionsExt;
@@ -123,17 +224,51 @@ pub fn capture_bytes_guarded_process(
     limit: u64,
     guard: impl FnMut() -> Result<()>,
 ) -> CapturedProcess {
-    capture_process(command, timeout, limit, None, guard)
+    capture_process(command, timeout, limit, None, false, guard, |_| Ok(()))
 }
 
-pub fn capture_bytes_guarded_process_in(
+pub fn capture_owned_group_in(
     command: &mut Command,
     timeout: Duration,
     limit: u64,
     directory: &std::path::Path,
     guard: impl FnMut() -> Result<()>,
 ) -> CapturedProcess {
-    capture_process(command, timeout, limit, Some(directory), guard)
+    capture_owned_group_with_audit(command, timeout, limit, directory, guard, |_| Ok(()))
+}
+
+pub(crate) fn capture_owned_group_with_audit(
+    command: &mut Command,
+    timeout: Duration,
+    limit: u64,
+    directory: &std::path::Path,
+    guard: impl FnMut() -> Result<()>,
+    started: impl FnOnce(u32) -> Result<()>,
+) -> CapturedProcess {
+    let startup = Instant::now();
+    if let Err(error) = verify_group_observer(timeout) {
+        return CapturedProcess {
+            pid: None,
+            result: Err(error),
+        };
+    }
+    let remaining = timeout.saturating_sub(startup.elapsed());
+    if remaining.is_zero() {
+        return CapturedProcess {
+            pid: None,
+            result: Err(group_unobserved()),
+        };
+    }
+    command.process_group(0);
+    capture_process(
+        command,
+        remaining,
+        limit,
+        Some(directory),
+        true,
+        guard,
+        started,
+    )
 }
 
 fn capture_process(
@@ -141,7 +276,9 @@ fn capture_process(
     timeout: Duration,
     limit: u64,
     directory: Option<&std::path::Path>,
+    owned_group: bool,
     mut guard: impl FnMut() -> Result<()>,
+    started: impl FnOnce(u32) -> Result<()>,
 ) -> CapturedProcess {
     let mut pid = None;
     let result = (|| {
@@ -160,29 +297,18 @@ fn capture_process(
             .stdout(stdout.try_clone()?)
             .stderr(stderr.try_clone()?);
         guard()?;
+        let start = Instant::now();
         let mut child = command.spawn()?;
         pid = Some(child.id());
-        let start = Instant::now();
-        let mut uncertain = false;
-        let status = loop {
-            if let Err(error) = guard() {
-                kill_group(child.id());
-                child.wait()?;
-                return Err(error);
-            }
-            if let Some(s) = child.try_wait()? {
-                break s;
-            }
-            if start.elapsed() >= timeout
-                || stdout.metadata()?.len() > limit
-                || stderr.metadata()?.len() > limit
-            {
-                uncertain = true;
-                kill_group(child.id());
-                break child.wait()?;
-            }
-            std::thread::sleep(Duration::from_millis(15));
-        };
+        if let Err(error) = started(child.id()) {
+            cancel_capture(&mut child, owned_group)?;
+            return Err(error);
+        }
+        let remaining = timeout.saturating_sub(start.elapsed());
+        let (status, mut uncertain) = wait_for_capture(&mut child, remaining, owned_group, || {
+            guard()?;
+            Ok(stdout.metadata()?.len() > limit || stderr.metadata()?.len() > limit)
+        })?;
         guard()?;
         stdout.seek(SeekFrom::Start(0))?;
         uncertain |= stdout.metadata()?.len() > limit || stderr.metadata()?.len() > limit;
@@ -199,6 +325,173 @@ fn capture_process(
         })
     })();
     CapturedProcess { pid, result }
+}
+
+fn wait_for_capture(
+    child: &mut Child,
+    timeout: Duration,
+    owned_group: bool,
+    mut limit_exceeded: impl FnMut() -> Result<bool>,
+) -> Result<(ExitStatus, bool)> {
+    let start = Instant::now();
+    let mut saw_peer = false;
+    loop {
+        let exited = if owned_group {
+            exited_without_reaping(child)?
+        } else {
+            false
+        };
+        let exceeded = match limit_exceeded() {
+            Ok(exceeded) => exceeded,
+            Err(error) => {
+                cancel_capture(child, owned_group)?;
+                return Err(error);
+            }
+        };
+        let remaining = timeout.saturating_sub(start.elapsed());
+        if exceeded || remaining.is_zero() {
+            return Ok((cancel_capture(child, owned_group)?, true));
+        }
+        if owned_group {
+            if exited {
+                match live_peers(child.id(), remaining) {
+                    Ok(true) => saw_peer = true,
+                    Ok(false) => {
+                        return Ok((child.wait()?, saw_peer || start.elapsed() >= timeout));
+                    }
+                    Err(error) => {
+                        let expired = start.elapsed() >= timeout;
+                        let status = cancel_capture(child, true)?;
+                        return if expired {
+                            Ok((status, true))
+                        } else {
+                            Err(error)
+                        };
+                    }
+                }
+            }
+        } else if let Some(status) = child.try_wait()? {
+            return Ok((status, false));
+        }
+        std::thread::sleep(
+            timeout
+                .saturating_sub(start.elapsed())
+                .min(Duration::from_millis(15)),
+        );
+    }
+}
+
+fn exited_without_reaping(child: &Child) -> Result<bool> {
+    use rustix::process::{Pid, WaitId, WaitIdOptions, waitid};
+    let pid = i32::try_from(child.id())
+        .ok()
+        .and_then(Pid::from_raw)
+        .ok_or_else(group_unobserved)?;
+    let flags = WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT;
+    loop {
+        match waitid(WaitId::Pid(pid), flags) {
+            Ok(status) => return Ok(status.is_some()),
+            Err(rustix::io::Errno::INTR) => {}
+            // ECHILD and other failures provide no authority to signal a numeric group.
+            Err(_) => return Err(group_unobserved()),
+        }
+    }
+}
+
+fn cancel_capture(child: &mut Child, owned_group: bool) -> Result<ExitStatus> {
+    if !owned_group {
+        kill_group(child.id());
+        return child.wait().map_err(Into::into);
+    }
+    loop {
+        let exited = exited_without_reaping(child)?;
+        if exited
+            && (!group_alive(child.id())
+                || matches!(
+                    live_group_members(child.id(), Duration::from_millis(300)),
+                    Ok(false)
+                ))
+        {
+            return child.wait().map_err(Into::into);
+        }
+        // Keep the leader and the caller's lease until the original group is observed quiescent.
+        kill_group(child.id());
+        if !exited {
+            let _ = child.kill();
+        }
+        std::thread::sleep(Duration::from_millis(15));
+    }
+}
+
+fn verify_group_observer(timeout: Duration) -> Result<()> {
+    static VERIFIED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    if VERIFIED.get().is_some() {
+        return Ok(());
+    }
+    let group = u32::try_from(nix::unistd::getpgrp().as_raw()).map_err(|_| group_unobserved())?;
+    if !group_members(group, timeout)?.contains(&std::process::id()) {
+        return Err(group_unobserved());
+    }
+    let _ = VERIFIED.set(());
+    Ok(())
+}
+
+fn live_peers(leader: u32, remaining: Duration) -> Result<bool> {
+    // waitid(WNOWAIT) still owns the child's PID. ESRCH here means the
+    // original group is gone. EPERM alone cannot distinguish an empty group.
+    if !group_alive(leader) {
+        return Err(group_unobserved());
+    }
+    live_group_members(leader, remaining)
+}
+
+fn live_group_members(leader: u32, remaining: Duration) -> Result<bool> {
+    let members = group_members(leader, remaining)?;
+    if members.contains(&leader) {
+        // On macOS pgrep omits zombies. Seeing the exited leader contradicts waitid.
+        return Err(group_unobserved());
+    }
+    Ok(!members.is_empty())
+}
+
+fn group_members(group: u32, remaining: Duration) -> Result<Vec<u32>> {
+    let mut inspect = Command::new("/usr/bin/pgrep");
+    inspect
+        .env_clear()
+        .env("LC_ALL", "C")
+        .args(["-a", "-g", &group.to_string(), ".*"])
+        .stdin(Stdio::null())
+        .process_group(0);
+    let output =
+        capture_bytes(&mut inspect, remaining, 1024 * 1024).map_err(|_| group_unobserved())?;
+    if output.uncertain || !output.stderr.is_empty() {
+        return Err(group_unobserved());
+    }
+    let text = std::str::from_utf8(&output.stdout).map_err(|_| group_unobserved())?;
+    parse_group_members(output.code, text)
+}
+
+fn parse_group_members(code: Option<i32>, text: &str) -> Result<Vec<u32>> {
+    match (code, text.is_empty()) {
+        (Some(1), true) => Ok(Vec::new()),
+        (Some(0), false) => text
+            .lines()
+            .map(|line| {
+                line.parse::<u32>()
+                    .ok()
+                    .filter(|id| *id > 0)
+                    .ok_or_else(group_unobserved)
+            })
+            .collect(),
+        _ => Err(group_unobserved()),
+    }
+}
+
+fn group_unobserved() -> Error {
+    Error::attention(
+        "native_query_group_unobserved",
+        "无法核对原生查询的辅助进程，查询结果未确认。",
+    )
 }
 
 fn capture_file(directory: Option<&std::path::Path>) -> std::io::Result<std::fs::File> {

@@ -216,3 +216,20 @@ fn owned_native_wait_retains_timeout_and_excess_output_as_uncertain() -> TestRes
     assert!(uncertain);
     Ok(())
 }
+
+#[test]
+fn delegated_install_diagnostics_are_opt_in_without_disabling_worker_capture()
+-> crate::test_support::TestResult {
+    let mut journal = crate::test_support::journal()?;
+    journal.plan.delegated = true;
+    for provider in ["codex", "claude"] {
+        journal.plan.warnings = vec![format!("{provider}-isolated-install-v1:fixture")];
+        assert!(!shows_progress(&journal, false));
+        assert!(shows_progress(&journal, true));
+        assert!(progress_capture_allowed(&journal));
+    }
+    journal.plan.package.kind = crate::domain::Kind::Config;
+    assert!(!shows_progress(&journal, true));
+    assert!(!progress_capture_allowed(&journal));
+    Ok(())
+}

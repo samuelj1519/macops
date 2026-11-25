@@ -86,7 +86,7 @@ pub(super) fn run(
     let plan = plan(ctx, &inputs.binding, &staged.source, &proof, mode)?;
     let effect = match mode {
         SourceMode::Adopt => format!(
-            "将 {} 纳管为明文源 {}。实际配置文件保持原样。",
+            "将 {} 纳入管理并写入明文源 {}。实际配置文件保持原样。",
             target.display(),
             staged.source.display()
         ),

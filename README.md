@@ -4,30 +4,23 @@ macops is a Rust CLI for managing software, agent profiles, skills, plugins, and
 
 ## Install
 
-Download the Apple Silicon archive and `SHA256SUMS` from the [GitHub releases](https://github.com/samuelj1519/macops/releases). In the download directory, verify the checksum and extract the archive.
+On an Apple Silicon Mac, run this from the source checkout to build and install the current code. This mode uses the Rust toolchain pinned by the project.
 
 ```sh
-shasum -a 256 -c SHA256SUMS
-tar -xzf macops-v0.3.0-darwin-arm64.tar.gz
+./install.sh
 ```
 
-For a new installation, place the binary in your user directory and create both command names.
+To install the latest [formal release](https://github.com/samuelj1519/macops/releases), run the installer in release mode. It downloads and verifies the archive using the release's SHA-256 checksum. You can use this mode with a standalone copy of `install.sh` and without Rust.
 
 ```sh
-mkdir -p "$HOME/.local/libexec" "$HOME/.local/bin"
-install -m 755 macops "$HOME/.local/libexec/macops"
-ln -s ../libexec/macops "$HOME/.local/bin/macops"
-ln -s ../libexec/macops "$HOME/.local/bin/mo"
-mo --version
+sh install.sh --release
 ```
 
-Add `$HOME/.local/bin` to `PATH` if needed.
-
-To upgrade an existing installation, replace `$HOME/.local/libexec/macops` with the verified binary and confirm the version with `mo --version`.
-
-To build from source, use the Rust version pinned in `rust-toolchain.toml` and run `cargo build --release --locked`. The build produces `target/release/macops`.
+The installer puts the program in `~/.local/libexec/macops` and verifies both `mo` and `macops` in `~/.local/bin`. Rerun the same command to update an existing installation. If installation stops while creating the command links, rerun it to finish. If the terminal cannot find `mo`, follow the PATH instruction printed by the installer.
 
 ## Browse resources
+
+See the [operation walkthroughs](docs/operation-flows.md) for software, configuration, skills, Agent profiles, and maintenance.
 
 Run `mo` or `mo app` in a terminal to browse applications, skills and plugins, agent profiles, configuration, and recent operations. Start directly in a category with `mo config`, `mo skill`, or `mo agent`.
 
@@ -81,14 +74,18 @@ mo dirs --roots
 - Run `mo app adopt` in a terminal to search installed software that can be adopted. Run `mo app adopt jq` to look up a name directly. When several software entries match, the terminal shows their sources and installation scopes so you can choose. Use `mo app adopt --id ID` for an exact match, including in scripts. The selected target goes through the provider's existing confirmation.
 - Write commands execute by default. Use `--dry-run` to preview without starting an installer or writing operation records. The preview reports an unresolved version when local evidence is insufficient.
 - `update` refreshes version indexes. `outdated` reads the existing index. Where the provider requires a specific version, use `--version`.
-- `--yes` skips the confirmation prompt and retains the same validation. For AI CLI upgrades, `--force-live` limits the change to the live installation.
+- `--yes` skips the confirmation prompt and retains the same validation. For AI CLI upgrades, `--local` updates the local installation and local mise settings while keeping the saved settings source.
 - JSON results use exit code 0 for success, 1 for errors, 2 for invalid usage, and 3 for results requiring attention. Native exit status is recorded separately.
 
-Use `mo recover` to list pending operations, or `mo history` to find a completed operation. `mo recover ID` checks the original operation and its evidence. Operations with unresolved outcomes can block later writes. After verifying the outcome outside macops, `mo recover ID --resolve-failed --yes` records a failure where the provider supports manual resolution.
+When an earlier operation blocks a change, macops checks its outcome first. If the same request already completed, macops shows that result. If it still needs attention, the message tells you what to check. Browse, search, and previews remain read-only.
+
+Native installers and maintenance commands show their output as it arrives in an interactive terminal. With `--json`, stdout contains the structured result only.
+
+Use `mo history ID` to inspect an operation, `mo recover` to list pending operations, or `mo recover ID` to check one directly. After verifying the outcome outside macops, `mo recover ID --mark-failed` asks for confirmation and records the operation as failed where the provider supports it.
 
 ## Software and installation sources
 
-Homebrew, mise, npm, Bun, Cargo, and explicit command recipes use their native maintenance interfaces within the supported scopes. [uv discovery and adoption](docs/uv-readonly.md) are read-only. Use `mo agent install codex VERSION` for the built-in Agent installer. Add `--force-live` for a supported tool to update the local version while retaining its source declaration. Use `mo app upgrade` to refresh the version index and upgrade eligible applications, or add `--dry-run` to preview using the existing index. Service operations such as `mo app start postgresql` require a declared service in a verified user scope.
+Homebrew, mise, npm, Bun, Cargo, and explicit command recipes use their native maintenance interfaces within the supported scopes. [uv discovery and adoption](docs/uv-readonly.md) are read-only. Use `mo agent install codex VERSION` for the built-in Agent installer. Add `--local` for a supported tool to update the local installation and its mise settings while keeping the saved settings source. Use `mo app upgrade` to refresh the version index and upgrade eligible applications, or add `--dry-run` to preview using the existing index. Service operations such as `mo app start postgresql` require a declared service in a verified user scope.
 
 A version 1 catalog can be selected with `--catalog /absolute/path/catalog.json`. The default is `~/.config/macops/catalog.json` unless a different configuration root is selected. Treat command recipes as executable configuration. Command providers pass program and argument vectors directly. Query commands return an object with `status: "present"` and `version`, `status: "missing"`, or `status: "unknown"` and `reason`.
 
@@ -97,6 +94,8 @@ Homebrew formulae bind to the executable, prefix, Cellar, and full formula name.
 mise binds the resolved installation and global configuration paths at adoption. If a tracked mise receipt needs a path review, open its software details and use `a` to confirm the current baseline before upgrading. Removal is available for a tracked tool with a single physical release that mise reports as inactive in the selected user's home. Review any projects that still refer to that version before confirming.
 
 ### Installation advice
+
+See the [recommendation and recovery walkthrough](docs/recommend-flow.md) for setup, candidate selection, confirmation, and the next step after each result.
 
 ```sh
 mo recommend jq
@@ -123,11 +122,13 @@ When an interactive short-name lookup has no registered install candidate, macop
 
 When a name matches an eligible npm, Homebrew, or mise recipe, the interactive recommendation can offer a versioned installation plan. Homebrew confirms the exact formula, scope, and target version. A registered mise recipe confirms the requested version and its user configuration effect before invoking native global activation. macops checks possible configuration targets against chezmoi ownership before the native command starts.
 
-Eligible Codex and Claude Code marketplace recommendations can install into a new independent profile after confirmation. The verified Apple Silicon versions are Codex 0.170.0 and Claude Code 2.1.328. The plan binds marketplace and plugin manifests to one public Git commit. At confirmation, enter `yes` to install and enable the plugin or `disabled` to install it and keep it disabled. The result gives the independent `CODEX_HOME` or `CLAUDE_CONFIG_DIR`. The profile appears in `mo agent` after receipt publication. Other proposals remain advisory.
+Eligible Codex and Claude Code marketplace recommendations can install into an existing or new profile after confirmation. The verified Apple Silicon versions are Codex 0.170.0 and Claude Code 2.1.328. The plan binds marketplace and plugin manifests to one public Git commit. At confirmation, enter `yes` to install and enable the plugin or `disabled` to install it and keep it disabled. The result shows the destination profile. Other proposals remain advisory.
 
 If a native stage needs attention, use `mo recover ID` to verify its original result or finish publishing its receipt. Recovery keeps the original operation identity and never starts an installer.
 
-If a Claude Code stage is verified and a following stage has yet to start, `mo recover ID` reports a continuation command. Use `mo agent resume ID --dry-run` to see the retained profile, source and initial plugin setting, then `mo agent resume ID` to confirm the next stage.
+If a Codex or Claude Code stage is verified and a following stage has yet to start, `mo recover ID` reports a continuation command. Use `mo agent resume ID --dry-run` to see the retained profile, source and initial plugin setting, then `mo agent resume ID` to confirm the next stage.
+
+After selecting a Codex or Claude Code plugin in `mo recommend`, choose a profile by name and configuration directory. If a selected on-disk profile needs registration, the installation confirmation includes both steps. Start an existing profile with its usual command. Choose a new independent profile if you want a separate configuration.
 
 In `mo agent`, open a managed independent Codex or Claude Code profile and press `e` to choose the plugin setting for future sessions launched by macops. Press `l` to launch in the current workspace. Each independent profile retains its own native settings, model, and authentication. Use the exact ID in the details view if two profiles share a name.
 

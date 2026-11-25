@@ -150,7 +150,9 @@ fn replay(ctx: &Context, manifest: &Manifest, id: &str, dry_run: bool, yes: bool
             "清单缺少作用域证据，或当前执行作用域与期望不同",
         ));
     }
-    check_pending_read_only(ctx)?;
+    if dry_run {
+        check_pending_read_only(ctx)?;
+    }
     let version = intent
         .version
         .as_deref()
@@ -160,6 +162,31 @@ fn replay(ctx: &Context, manifest: &Manifest, id: &str, dry_run: bool, yes: bool
             "manifest_version_required",
             "需要一个明确 npm SemVer 版本，例如 1.2.3 或 1.2.3-beta.1",
         ));
+    }
+    let recovered = if dry_run {
+        None
+    } else {
+        checked_package(ctx, intent)?;
+        operations::recover_before_new_plan(ctx, yes, |journal| {
+            Ok(journal.plan.recipe_sha256 == intent.recipe_sha256
+                && [Action::Install, Action::Upgrade].iter().any(|action| {
+                    operations::matches_intent(journal, *action, &intent.id, Some(version))
+                }))
+        })
+        .map_err(|mut error| {
+            if error.code == "recovery_required" {
+                error.code = "operation_recovery_required".into();
+            }
+            error
+        })?
+    };
+    if let Some(recovered) = &recovered
+        && recovered.original.plan.recipe_sha256 == intent.recipe_sha256
+        && [Action::Install, Action::Upgrade]
+            .iter()
+            .any(|action| recovered.matches(*action, &intent.id, Some(version)))
+    {
+        return Ok(recovered.result.clone());
     }
     let planned = replay_plan(ctx, intent, version)?;
     if let Some(plan) = planned {
@@ -184,7 +211,7 @@ fn replay(ctx: &Context, manifest: &Manifest, id: &str, dry_run: bool, yes: bool
         }
     }
     Ok(json!({
-        "id":intent.id,"status":"unchanged","version":version,"persistentWrites":false
+        "id":intent.id,"status":"unchanged","version":version,"persistentWrites":recovered.is_some()
     }))
 }
 
@@ -253,7 +280,7 @@ fn check_pending_read_only(ctx: &Context) -> Result<()> {
         if crate::policy::state::pending(journal.phase) {
             return Err(Error::attention(
                 "operation_recovery_required",
-                format!("操作 {} 尚待恢复", journal.id),
+                "上一次操作的结果还没确认。运行 mo recover 查看待检查的操作。",
             ));
         }
     }

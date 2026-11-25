@@ -51,8 +51,10 @@ mod operations;
 mod output;
 mod paths;
 mod plugin_marketplaces;
+mod plugin_target;
 mod policy;
 mod process;
+mod profile_install;
 mod profile_inventory;
 mod providers;
 mod recommend;
@@ -127,6 +129,21 @@ fn run(cli: &cli::Cli, warnings: &mut Vec<String>) -> error::Result<CommandOutpu
         return recommend_setup::run(&setup, cli.json, cli.dry_run).map(CommandOutput::Data);
     }
     let ctx = context::Context::from_cli(cli, warnings)?;
+    if cli.json
+        && !cli.dry_run
+        && matches!(
+            cli.command,
+            cli::Command::Agent {
+                command: Some(cli::AgentCmd::Launch { .. }),
+                ..
+            }
+        )
+    {
+        return Err(error::Error::new(
+            "launch_json_requires_preview",
+            "使用 --dry-run 查看启动计划",
+        ));
+    }
     if let cli::Command::Migrate { command } = &cli.command {
         return migration::run(&ctx, command, cli.dry_run, cli.yes).map(CommandOutput::Data);
     }
@@ -136,7 +153,383 @@ fn run(cli: &cli::Cli, warnings: &mut Vec<String>) -> error::Result<CommandOutpu
     if let Some(output) = browser::run(cli, &ctx)? {
         return Ok(CommandOutput::Browser(output));
     }
+    if !cli.dry_run
+        && writes_managed_state(&cli.command)
+        && let Some(recovered) = recover_for_command(cli, &ctx)?
+    {
+        if repeats_recovered(&ctx, &cli.command, &recovered)? {
+            return Ok(CommandOutput::Data(recovered.result));
+        }
+        if !cli.json {
+            eprintln!("已检查上一次操作。现在准备本次操作。");
+        }
+    }
     run_scoped(cli, &ctx, chezmoi_requested).map(CommandOutput::Data)
+}
+
+fn recover_for_command(
+    cli: &cli::Cli,
+    ctx: &context::Context,
+) -> error::Result<Option<operations::Recovered>> {
+    let command = &cli.command;
+    if let cli::Command::Agent {
+        command: Some(cli::AgentCmd::Resume { operation_id }),
+        ..
+    } = command
+    {
+        return operations::recover_before_write_checked(ctx, None, |journal| {
+            matches_resumed_stage(journal, operation_id)
+        });
+    }
+    if cli.yes || local_agent(command).is_some() {
+        return operations::recover_before_write(ctx, local_agent(command));
+    }
+    operations::recover_before_new_plan(ctx, false, |journal| {
+        Ok(!may_request_confirmation(ctx, command)
+            || repeats_resource(ctx, command, journal, None, false).unwrap_or(false))
+    })
+}
+
+fn may_request_confirmation(ctx: &context::Context, command: &cli::Command) -> bool {
+    use cli::{AppCmd, Command, Config, NativePlugins, Policy, SkillCmd};
+    match command {
+        Command::App {
+            command:
+                Some(
+                    AppCmd::Install { id, .. }
+                    | AppCmd::Upgrade { id: Some(id), .. }
+                    | AppCmd::Refresh { id: Some(id) },
+                ),
+            ..
+        } => brew_candidate(ctx, id).map_or(true, |package| package.is_some()),
+        Command::App {
+            command: Some(AppCmd::Upgrade { id: None, .. }),
+            ..
+        } => inventory::load(ctx).is_ok_and(|catalog| {
+            catalog
+                .packages
+                .iter()
+                .any(|package| matches!(package.provider, domain::Provider::BrewFormula { .. }))
+        }),
+        _ => matches!(
+            command,
+            Command::App {
+                command: Some(
+                    AppCmd::Uninstall { .. }
+                        | AppCmd::Adopt { .. }
+                        | AppCmd::Start { .. }
+                        | AppCmd::Stop { .. }
+                ),
+                ..
+            } | Command::Config {
+                command: Some(
+                    Config::Adopt { .. }
+                        | Config::Forget { .. }
+                        | Config::Apply { .. }
+                        | Config::Reconcile { id: Some(_) }
+                ),
+                ..
+            } | Command::Skill {
+                command: Some(
+                    SkillCmd::Adopt { .. }
+                        | SkillCmd::Remove { .. }
+                        | SkillCmd::Sync(_)
+                        | SkillCmd::Policy {
+                            command: Policy::Sync { .. }
+                        }
+                        | SkillCmd::Plugins {
+                            command: NativePlugins::Upgrade { .. }
+                        }
+                ),
+                ..
+            } | Command::Cleanup { .. }
+        ),
+    }
+}
+
+fn writes_managed_state(command: &cli::Command) -> bool {
+    use cli::{AgentCmd, AppCmd, Command, Config, NativePlugins, Policy, SkillCmd};
+    matches!(
+        command,
+        Command::App {
+            command: Some(
+                AppCmd::Install { .. }
+                    | AppCmd::Upgrade { .. }
+                    | AppCmd::Uninstall { .. }
+                    | AppCmd::Adopt {
+                        target: Some(_),
+                        ..
+                    }
+                    | AppCmd::Adopt { id: Some(_), .. }
+                    | AppCmd::Start { .. }
+                    | AppCmd::Stop { .. }
+                    | AppCmd::Refresh { .. }
+            ),
+            ..
+        } | Command::Config {
+            command: Some(
+                Config::Adopt { .. }
+                    | Config::Forget { .. }
+                    | Config::Enroll
+                    | Config::Apply { .. }
+                    | Config::Reconcile { id: Some(_) }
+                    | Config::List { refresh: true }
+            ),
+            ..
+        } | Command::Skill {
+            command: Some(
+                SkillCmd::Install { .. }
+                    | SkillCmd::Upgrade(_)
+                    | SkillCmd::Remove { .. }
+                    | SkillCmd::Adopt { .. }
+                    | SkillCmd::Refresh(_)
+                    | SkillCmd::Sync(_)
+                    | SkillCmd::Policy {
+                        command: Policy::Sync { .. }
+                    }
+                    | SkillCmd::Plugins {
+                        command: NativePlugins::Upgrade { .. }
+                    }
+            ),
+            ..
+        } | Command::Agent {
+            command: Some(
+                AgentCmd::Install { .. }
+                    | AgentCmd::Upgrade { tool: Some(_), .. }
+                    | AgentCmd::Resume { .. }
+            ),
+            ..
+        } | Command::Cleanup { .. }
+    )
+}
+
+fn local_agent(command: &cli::Command) -> Option<&str> {
+    match command {
+        cli::Command::Agent {
+            command:
+                Some(
+                    cli::AgentCmd::Install {
+                        tool,
+                        force_live: true,
+                        ..
+                    }
+                    | cli::AgentCmd::Upgrade {
+                        tool: Some(tool),
+                        force_live: true,
+                    },
+                ),
+            ..
+        } => Some(tool),
+        _ => None,
+    }
+}
+
+fn repeats_recovered(
+    ctx: &context::Context,
+    command: &cli::Command,
+    recovered: &operations::Recovered,
+) -> error::Result<bool> {
+    use cli::{AgentCmd, Command};
+    use domain::Action;
+    if !recovered.succeeded {
+        return Ok(false);
+    }
+    let (tool, version, local) = match command {
+        Command::Agent {
+            command:
+                Some(AgentCmd::Install {
+                    tool,
+                    version,
+                    force_live,
+                }),
+            ..
+        } => (tool, version.as_deref(), *force_live),
+        Command::Agent {
+            command:
+                Some(AgentCmd::Upgrade {
+                    tool: Some(tool),
+                    force_live,
+                }),
+            ..
+        } => (tool, None, *force_live),
+        _ => return repeats_resource(ctx, command, &recovered.original, recovered.local_ai, true),
+    };
+    Ok(recovered.local_ai == Some(local)
+        && recovered.matches(Action::Upgrade, &format!("ai-native:{tool}"), version))
+}
+
+fn repeats_resource(
+    ctx: &context::Context,
+    command: &cli::Command,
+    original: &domain::Journal,
+    local_ai: Option<bool>,
+    allow_removed_brew: bool,
+) -> error::Result<bool> {
+    use cli::{AppCmd, Command, Config, SkillCmd};
+    use domain::Action;
+    let (action, target, version, application) = match command {
+        Command::Agent {
+            command: Some(cli::AgentCmd::Resume { operation_id }),
+            ..
+        } => {
+            return matches_resumed_stage(original, operation_id);
+        }
+        Command::Skill {
+            command: Some(SkillCmd::Install { recipe }),
+            ..
+        } if original.plan.action == Action::Install => {
+            return native_skills::matches_recipe_file(original, recipe);
+        }
+        Command::Skill {
+            command: Some(SkillCmd::Upgrade(selection)),
+            ..
+        } if original.plan.action == Action::Upgrade => {
+            return native_skills::matches_upgrade(ctx, original, selection);
+        }
+        Command::App {
+            command: Some(AppCmd::Install { id, version }),
+            ..
+        } => (Action::Install, id.as_str(), version.as_deref(), true),
+        Command::App {
+            command:
+                Some(AppCmd::Upgrade {
+                    id: Some(id),
+                    version,
+                }),
+            ..
+        } => (Action::Upgrade, id.as_str(), version.as_deref(), true),
+        Command::App {
+            command: Some(AppCmd::Uninstall { id }),
+            ..
+        } => (Action::Uninstall, id.as_str(), None, true),
+        Command::App {
+            command:
+                Some(AppCmd::Adopt {
+                    target,
+                    id,
+                    bind_recipe,
+                }),
+            ..
+        } if *bind_recipe == original.plan.npm_binding.is_some() => (
+            Action::Adopt,
+            id.as_deref().or(target.as_deref()).unwrap_or_default(),
+            None,
+            true,
+        ),
+        Command::App {
+            command: Some(AppCmd::Start { id }),
+            ..
+        } => (Action::Start, service_selector(id), None, false),
+        Command::App {
+            command: Some(AppCmd::Stop { id }),
+            ..
+        } => (Action::Stop, service_selector(id), None, false),
+        Command::Config {
+            command: Some(Config::Apply { target }),
+            ..
+        } => (Action::Apply, target.as_str(), None, false),
+        Command::Skill {
+            command: Some(SkillCmd::Remove { id }),
+            ..
+        } => (Action::Uninstall, id.as_str(), None, false),
+        Command::Cleanup { id } => (Action::Cleanup, id.as_str(), None, false),
+        _ => return Ok(false),
+    };
+    let plan = &original.plan;
+    if application && plan.brew.is_some() {
+        if version.is_some() {
+            return Ok(false);
+        }
+        return match brew_candidate(ctx, target)? {
+            Some(package) => brew::matches_selected_recovery(original, &package, action),
+            None => Ok(allow_removed_brew
+                && action == Action::Uninstall
+                && plan.action == action
+                && (target == plan.package.id || target == plan.package.name)),
+        };
+    }
+    if operations::matches_intent(original, action, target, version) {
+        return Ok(true);
+    }
+    let key = scoped_retry("app", target).unwrap_or(target);
+    if application {
+        return repeats_application(ctx, original, local_ai, action, target, key, version);
+    }
+    Ok(match &plan.package.provider {
+        domain::Provider::ConfigObserved { target: path, .. } => {
+            action == Action::Apply && plan.action == action && path == std::path::Path::new(target)
+        }
+        domain::Provider::Service { .. } => plan.action == action && plan.package.name == target,
+        _ => false,
+    })
+}
+
+fn brew_candidate(ctx: &context::Context, key: &str) -> error::Result<Option<domain::Package>> {
+    let is_formula = |package: &domain::Package| {
+        matches!(package.provider, domain::Provider::BrewFormula { .. })
+    };
+    if let Some(package) = brew::candidate(ctx, key)?.filter(is_formula) {
+        return Ok(Some(package));
+    }
+    scoped_retry("app", key).map_or(Ok(None), |key| {
+        brew::candidate(ctx, key).map(|package| package.filter(is_formula))
+    })
+}
+
+fn matches_resumed_stage(journal: &domain::Journal, operation_id: &str) -> error::Result<bool> {
+    Ok(claude_install::matches_prior(journal, operation_id)?
+        || codex_install::matches_prior(journal, operation_id)?)
+}
+
+fn repeats_application(
+    ctx: &context::Context,
+    original: &domain::Journal,
+    local_ai: Option<bool>,
+    action: domain::Action,
+    target: &str,
+    key: &str,
+    version: Option<&str>,
+) -> error::Result<bool> {
+    let plan = &original.plan;
+    if key.is_empty()
+        || plan.action != action
+        || version.is_some_and(|version| plan.target.as_deref() != Some(version))
+    {
+        return Ok(false);
+    }
+    match resolve_scoped(ctx, "app", target) {
+        Ok(package) => {
+            if action == domain::Action::Upgrade
+                && let Some(tool) = ai::app_upgrade_tool(target, &package)
+            {
+                return Ok(local_ai == Some(false)
+                    && operations::matches_intent(
+                        original,
+                        action,
+                        &format!("ai-native:{tool}"),
+                        version,
+                    ));
+            }
+            Ok(operations::matches_intent(
+                original,
+                action,
+                &package.id,
+                version,
+            ))
+        }
+        Err(error)
+            if error.code == "not_found"
+                && action == domain::Action::Uninstall
+                && key == plan.package.name =>
+        {
+            Ok(true)
+        }
+        Err(_) if key == plan.package.name => Err(error::Error::attention(
+            "operation_checked",
+            "已检查上一次操作。请先在清单里确认这次要用的对象编号。",
+        )),
+        Err(_) => Ok(false),
+    }
 }
 
 fn run_scoped(
@@ -156,12 +549,14 @@ fn run_scoped(
         return Ok(value);
     }
     if let cli::Command::History { query } = &cli.command {
-        return Ok(json!(
-            store::history(ctx)?
-                .into_iter()
-                .filter(|j| query.as_ref().is_none_or(|id| j.plan.package.id == *id))
-                .collect::<Vec<_>>()
-        ));
+        let mut history = store::history(ctx)?;
+        if let Some(query) = query {
+            if let Some(operation) = history.iter().position(|journal| journal.id == *query) {
+                return Ok(json!([history.swap_remove(operation)]));
+            }
+            history.retain(|journal| journal.plan.package.id == *query);
+        }
+        return Ok(json!(history));
     }
     if let cli::Command::Search { query } = &cli.command {
         return run_search(ctx, query);
@@ -390,26 +785,39 @@ fn run_agent_entry(
 ) -> error::Result<Option<Value>> {
     match command {
         cli::AgentCmd::Resume { operation_id } => {
-            claude_install::resume(ctx, operation_id, cli.dry_run, cli.yes).map(Some)
+            let journal = operations::validated_recovery_journal(ctx, operation_id)?;
+            if codex_install::is_install(&journal) {
+                return codex_install::resume(
+                    ctx,
+                    &journal,
+                    cli.dry_run,
+                    cli.yes,
+                    terminal::report_install_stage,
+                )
+                .map(Some);
+            }
+            claude_install::resume(
+                ctx,
+                operation_id,
+                cli.dry_run,
+                cli.yes,
+                terminal::report_install_stage,
+            )
+            .map(Some)
         }
         cli::AgentCmd::Launch {
             profile,
             native_profile,
-        } => {
-            if cli.json && !cli.dry_run {
-                return Err(error::Error::new(
-                    "launch_json_requires_preview",
-                    "使用 --dry-run 查看启动计划",
-                ));
-            }
-            codex_install::session::launch(
-                ctx,
-                profile,
-                native_profile.as_deref(),
-                cli.dry_run,
-                cli.yes,
-            )
-            .map(Some)
+        } => codex_install::session::launch(
+            ctx,
+            profile,
+            native_profile.as_deref(),
+            cli.dry_run,
+            cli.yes,
+        )
+        .map(Some),
+        cli::AgentCmd::Uninstall { profile } => {
+            resource_agents::uninstall(ctx, profile, cli.dry_run, cli.yes).map(Some)
         }
         cli::AgentCmd::Credential { command } => Ok(Some(metadata::credentials(ctx, command))),
         _ => Ok(None),
@@ -488,7 +896,7 @@ fn run_recovery(cli: &cli::Cli, ctx: &context::Context) -> error::Result<Option<
         return Ok(Some(json!({
             "pending":pending,
             "incomplete":incomplete,
-            "hint":"执行 mo recover <operationId> 收口；--resolve-failed 人工确认失败",
+            "hint":"运行 mo recover <操作号> 检查那次操作的结果。确认要只记录失败时使用 --mark-failed。",
             "persistentWrites":false,
         })));
     }
@@ -547,8 +955,12 @@ fn run_search(ctx: &context::Context, query: &str) -> error::Result<Value> {
 fn run_worker(command: &cli::Command) -> error::Result<Option<Value>> {
     match command {
         cli::Command::Worker { journal } => operations::worker(journal)?,
-        cli::Command::NativeWorker { journal } => native_runner::worker(
+        cli::Command::NativeWorker {
             journal,
+            capture_progress,
+        } => native_runner::worker(
+            journal,
+            *capture_progress,
             |journal, invocation| {
                 let (guard, _) = native_callbacks(journal)?;
                 guard(journal, invocation)
@@ -784,6 +1196,8 @@ fn upgrade_all(
         );
     }
     let mut results = refresh_upgrade_sources(cli, ctx, &indexed, &native)?;
+    let mut stopped = false;
+    let mut unattempted = Vec::new();
     for row in &mut results {
         if row["status"] != "different" || row["installed"]["version"].is_null() {
             continue;
@@ -791,6 +1205,10 @@ fn upgrade_all(
         let (Some(id), Some(version)) = (row["id"].as_str(), row["available"].as_str()) else {
             continue;
         };
+        if stopped {
+            unattempted.push(id.to_owned());
+            continue;
+        }
         let outcome = if let Some(package) = indexed.iter().find(|package| package.id == id) {
             upgrade_indexed(cli, ctx, package, version)
         } else {
@@ -800,15 +1218,20 @@ fn upgrade_all(
             Ok(value) => {
                 let incomplete = attention(&cli.command, &value);
                 *row = json!({"id":id,"status":if incomplete {"unknown"} else {"upgraded"},"operation":value});
-                if incomplete {
-                    break;
-                }
+                stopped = incomplete;
             }
-            Err(error) => *row = json!({"id":id,"status":"unknown","error":error}),
+            Err(error) => {
+                stopped = true;
+                *row = json!({"id":id,"status":"unknown","error":error});
+            }
         }
     }
     results.extend(explicit);
-    Ok(json!({"results":results}))
+    if unattempted.is_empty() {
+        Ok(json!({"results":results}))
+    } else {
+        Ok(json!({"results":results,"unattempted":unattempted}))
+    }
 }
 
 fn upgrade_indexed(
@@ -886,6 +1309,7 @@ fn refresh_upgrade_sources(
                 json!({"id":package.id,"status":status,"available":available,"installed":installed})
             }
             Ok(None) => json!({"id":package.id,"status":"unknown"}),
+            Err(error) if error.code == "cancelled" => return Err(error),
             Err(error) => json!({"id":package.id,"status":"unknown","error":error}),
         };
         rows.push(row);
@@ -1052,16 +1476,22 @@ fn root_help() -> String {
         "本机软件、技能与配置\n\n",
         "用法  mo [全局参数] <类型> [对象] [动作]\n\n",
         "四类入口\n",
-        "  mo app [应用]         应用：安装、升级、卸载、纳管\n",
+        "  mo app [应用]         应用：安装、升级、卸载、纳入管理\n",
         "  mo config [子命令]    配置：chezmoi 归属与治理\n",
         "  mo skill [技能]       技能与插件：安装、升级、检查\n",
         "  mo agent [子命令]     Agent CLI、档案、凭据与启动\n\n",
         "常用动作\n",
         "  mo <名称>             跨类型查询对象\n",
-        "  mo recommend <目标>   查找官方渠道\n",
-        "  mo app adopt [名称]   纳管现有软件\n",
+        "  mo recommend <目标>   查看来源和安装建议\n",
+        "  mo recommend --setup  设置推荐模型\n",
+        "  mo app adopt [名称]   将现有软件纳入管理\n",
         "  mo skill market       浏览插件市场\n",
-        "  mo recover [操作号]   收口未完结操作\n\n",
+        "  mo recover [操作号]   查看待核对操作或核对原结果\n\n",
+        "其他入口\n",
+        "  mo dirs --roots       查看当前目录与状态范围\n",
+        "  mo manifest --help   导出清单、比较差异和预演重放\n",
+        "  mo cleanup macops:cache --dry-run  查看可清理的缓存\n",
+        "  mo migrate --help    预检或核对旧数据转换\n\n",
         "可用命令\n",
     ));
     let command = cli::Cli::command();
@@ -1083,6 +1513,7 @@ fn root_help() -> String {
         "\n常用全局参数\n",
         "  --json                  输出结构化 JSON\n",
         "  --dry-run               预演操作\n",
+        "  --timeout SECONDS       每次运行外部程序最多等多少秒\n",
         "  --yes                   跳过交互确认\n",
         "  -V, --version           查看版本\n",
         "  -h, --help              查看帮助\n\n",
@@ -1210,6 +1641,19 @@ pub fn main_entry() -> ExitCode {
                     &json!({"schemaVersion":1,"status":"failed","error":{"code":"usage","message":e.to_string()}}),
                 );
             } else {
+                if code != 0 {
+                    use clap::error::ErrorKind;
+                    let problem = match e.kind() {
+                        ErrorKind::UnknownArgument => "有个选项不能在这里用。",
+                        ErrorKind::MissingRequiredArgument => "这条命令还少了一项。",
+                        ErrorKind::InvalidValue | ErrorKind::ValueValidation => {
+                            "有一项的值不合要求。"
+                        }
+                        ErrorKind::ArgumentConflict => "有两个选项不能一起用。",
+                        _ => "这条命令有个地方需要改。",
+                    };
+                    eprintln!("{problem}运行 mo --help 看命令怎么写。");
+                }
                 let _ = e.print();
             }
             return ExitCode::from(code);
@@ -1219,6 +1663,19 @@ pub fn main_entry() -> ExitCode {
 }
 
 fn dispatch(cli: &cli::Cli) -> ExitCode {
+    if matches!(
+        cli.command,
+        cli::Command::Worker { .. }
+            | cli::Command::NativeWorker {
+                capture_progress: true,
+                ..
+            }
+    ) {
+        return match run_worker(&cli.command) {
+            Ok(_) => ExitCode::SUCCESS,
+            Err(error) => ExitCode::from(error.exit),
+        };
+    }
     if let cli::Command::NpmObserve { npm, prefix, name } = &cli.command {
         let observed = target::probe(npm, prefix, name)
             .unwrap_or_else(|error| domain::Observation::Unknown { reason: error.code });
@@ -1247,6 +1704,9 @@ fn dispatch(cli: &cli::Cli) -> ExitCode {
         Ok(CommandOutput::Data(data)) => {
             let code = if attention(&cli.command, &data) { 3 } else { 0 };
             if recommend::interactive(cli) || browser::interactive_marketplaces(cli) {
+                if data["mode"] == "cancelled" {
+                    eprintln!("已取消。");
+                }
                 return ExitCode::from(code);
             }
             let data = policy::brew::public_value(&data);
@@ -1261,7 +1721,11 @@ fn dispatch(cli: &cli::Cli) -> ExitCode {
                         only: _,
                         command: Some(cli::SkillCmd::Market { .. }),
                     } => plugin_marketplaces::human(&data),
-                    _ => output::human(&data),
+                    cli::Command::Recover { .. } => operations::recovery_text(&data, cli.dry_run),
+                    _ if policy::cli::continuation(&data).is_some() => {
+                        operations::recovery_text(&data, false)
+                    }
+                    _ => output::command_human(&cli.command, &data),
                 };
                 std::io::stdout().lock().write_all(text.as_bytes())
             };
@@ -1276,7 +1740,7 @@ fn dispatch(cli: &cli::Cli) -> ExitCode {
                     &json!({"schemaVersion":1,"status":"failed","data":null,"error":e,"warnings":warnings}),
                 );
             } else {
-                eprintln!("macops: {e}");
+                eprintln!("{}", output::error_text(&e));
             }
             ExitCode::from(e.exit)
         }

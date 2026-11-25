@@ -10,12 +10,13 @@ use crate::{
     native_plugins_files::Passive,
     native_runner::{self, FrozenInvocation, NativeOutcome},
     paths::Directory,
+    profile_install::{InitialActivation, Stage},
     store::Store,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     ffi::OsStr,
     fs,
     os::unix::fs::{MetadataExt, PermissionsExt},
@@ -28,17 +29,12 @@ const BINARY_SHA: &str = "9248cfeebec9b4cc3034d5114caab10fbf426cbfa79dba410c5fa1
 const PREFIX: &str = "codex-profile.";
 const CONFIG: &str = "config.toml";
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum InitialActivation {
-    Enabled,
-    Disabled,
-}
-
 struct NativeIo {
     verify_binary: fn(&mut Passive, &Path) -> Result<()>,
     acquire: fn(&Offer, &Path) -> Result<(PathBuf, Files)>,
     launch: fn(&Store, &mut Journal, &FrozenInvocation) -> Result<NativeOutcome>,
     outcome: fn(&Journal) -> Result<NativeOutcome>,
+    progress: fn(Stage),
 }
 
 const NATIVE: NativeIo = NativeIo {
@@ -54,11 +50,14 @@ const NATIVE: NativeIo = NativeIo {
         native_runner::launch(store, journal, &binding)
     },
     outcome: native_runner::original_outcome,
+    progress: |_| {},
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Prepared {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    target: Option<crate::resource_agents::InstallTarget>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     initially_disabled: bool,
     root: PathBuf,
@@ -89,7 +88,7 @@ struct After {
 }
 
 fn failed(code: &str) -> Error {
-    Error::attention(code, "独立 Codex 档案需核对原始操作证据")
+    Error::attention(code, "Codex 单独配置需核对原始操作证据")
 }
 
 fn stale() -> Error {
@@ -403,18 +402,60 @@ fn read_operation(state: &Directory, id: &str) -> Result<Option<Journal>> {
     Ok(record)
 }
 
-pub(crate) fn awaiting_publication(ctx: &Context, journal: &Journal) -> Result<bool> {
-    if journal.phase != Phase::Succeeded
-        || !is_install(journal)
-        || journal.state != ctx.state
-        || journal.home != ctx.home
-    {
-        return Ok(false);
+pub(crate) fn awaiting_followup(
+    ctx: &Context,
+    records: &[Journal],
+) -> Result<(BTreeSet<String>, bool)> {
+    let mut stages = records
+        .iter()
+        .filter(|journal| {
+            is_install(journal) && journal.home == ctx.home && journal.state == ctx.state
+        })
+        .peekable();
+    if stages.peek().is_none() {
+        return Ok((BTreeSet::new(), false));
     }
     let state = same_directory(&ctx.state)?;
-    let input = frozen(journal, &state)?;
-    Ok(input.market_operation.is_some()
-        && read_operation(&state, &format!("{}-receipt", journal.id))?.is_none())
+    let recorded: BTreeSet<_> = records.iter().map(|journal| journal.id.as_str()).collect();
+    let mut candidates = BTreeSet::new();
+    let mut superseded = BTreeSet::new();
+    let mut incomplete = false;
+    for journal in stages {
+        let Ok(input) = frozen(journal, &state) else {
+            incomplete = true;
+            continue;
+        };
+        if let Some(prior) = input.market_operation {
+            superseded.insert(prior);
+        }
+        if journal.phase == Phase::Succeeded
+            && !recorded.contains(format!("{}-receipt", journal.id).as_str())
+        {
+            candidates.insert(journal.id.clone());
+        }
+    }
+    candidates.retain(|id| !superseded.contains(id));
+    Ok((candidates, incomplete))
+}
+
+fn has_market_successor(
+    ctx: &Context,
+    state: &Directory,
+    marketplace: &str,
+    offer: &Offer,
+) -> Result<bool> {
+    let plugin_id = format!("codex-first-install:{}", offer.native_id());
+    for journal in crate::store::history(ctx)? {
+        if journal.plan.package.id == plugin_id
+            && is_install(&journal)
+            && journal.scope == ctx.scope
+            && crate::operations::require_recovery_roots(ctx, &journal).is_ok()
+            && frozen(&journal, state)?.market_operation.as_deref() == Some(marketplace)
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn observed(
@@ -676,6 +717,7 @@ fn prepare_source(
     let (mirror, files) = (native.acquire)(&offer, &root.join("git"))?;
     let mut reader = Passive::new()?;
     let prepared = Prepared {
+        target: None,
         initially_disabled: activation == InitialActivation::Disabled,
         root: root.to_path_buf(),
         home: Directory::open(&ctx.home)?.path.clone(),
@@ -735,6 +777,11 @@ fn stage(ctx: &Context, store: &Store, input: &Frozen, native: &NativeIo) -> Res
     stage_before(input, &same_directory(&store.path)?, &journal, native)?;
     Store::atomic_new(&store.root, &name(&journal, "plan"), input)?;
     store.save(&journal)?;
+    (native.progress)(if input.market_operation.is_some() {
+        Stage::InstallPlugin
+    } else {
+        Stage::RegisterMarketplace
+    });
     let result = (native.launch)(store, &mut journal, &argv)?;
     settle(store, &mut journal, input, &result, native)?;
     Ok(journal)
@@ -753,7 +800,7 @@ fn settle(
         && observed(journal, input, &state, native).is_ok()
     {
         journal.phase = Phase::Succeeded;
-        journal.message = "独立档案中的原生安装阶段已核验".into();
+        journal.message = "单独配置中的原生安装阶段已核验".into();
     } else {
         journal.phase = Phase::Unknown;
         journal.message = "Codex 原生阶段缺少完整证据，需核对原操作".into();
@@ -833,8 +880,45 @@ fn publish(
     if journal.phase != Phase::Succeeded || input.market_operation.is_none() {
         return Err(stale());
     }
+    if let Some(target) = &input.prepared.target
+        && let Some(result) = crate::plugin_target::resume_publication(ctx, store, journal, target)?
+    {
+        return Ok(result);
+    }
     input.prepared.guard(&store.path, native)?;
+    (native.progress)(Stage::CheckActivation);
     prepare_activation(store, &state, journal, input, native)?;
+    if let Some(target) = &input.prepared.target {
+        let p = &input.prepared;
+        (native.progress)(Stage::Publish);
+        return crate::plugin_target::publish(
+            ctx,
+            store,
+            journal,
+            target,
+            &crate::plugin_target::InstalledPlugin {
+                native_id: p.offer.native_id(),
+                marketplace: &p.offer.marketplace,
+                offer: fingerprint(&p.offer)?,
+                config: p.profile().join(CONFIG),
+                payload: p.payload(),
+                market: Some(p.market()),
+                checkout: None,
+            },
+        );
+    }
+    publish_isolated(ctx, store, journal, input, native)
+}
+
+fn publish_isolated(
+    ctx: &Context,
+    store: &Store,
+    journal: &Journal,
+    input: &Frozen,
+    native: &NativeIo,
+) -> Result<Value> {
+    let state = same_directory(&store.path)?;
+    let id = format!("{}-receipt", journal.id);
     let mut plan = adoption(ctx, &input.prepared)?;
     plan.timeout_secs = journal.plan.timeout_secs;
     plan.warnings.push(format!("{PUBLICATION}{}", journal.id));
@@ -913,7 +997,7 @@ fn publish(
                 | crate::store::CommitFailure::Outcome(error) => error,
             })?;
         record.phase = Phase::Succeeded;
-        record.message = "独立 Codex 档案已纳管".into();
+        record.message = "Codex 单独配置已纳入管理".into();
         store.save(&record)?;
     }
     Ok(json!({"journal":record, "codexHome":input.prepared.profile(), "loaded":"unknown"}))
@@ -958,8 +1042,15 @@ pub(crate) fn install(
     offer: Offer,
     binary: PathBuf,
     activation: InitialActivation,
+    progress: fn(Stage),
 ) -> Result<Value> {
-    install_using(ctx, offer, binary, &NATIVE, activation)
+    install_using(
+        ctx,
+        offer,
+        binary,
+        &NativeIo { progress, ..NATIVE },
+        activation,
+    )
 }
 
 fn install_using(
@@ -969,9 +1060,81 @@ fn install_using(
     native: &NativeIo,
     activation: InitialActivation,
 ) -> Result<Value> {
+    install_with_target(ctx, offer, binary, native, activation, None)
+}
+
+pub(crate) fn install_at(
+    ctx: &Context,
+    offer: Offer,
+    binary: PathBuf,
+    activation: InitialActivation,
+    target: crate::resource_agents::InstallTarget,
+    progress: fn(Stage),
+) -> Result<Value> {
+    install_with_target(
+        ctx,
+        offer,
+        binary,
+        &NativeIo { progress, ..NATIVE },
+        activation,
+        Some(target),
+    )
+}
+
+fn install_with_target(
+    ctx: &Context,
+    offer: Offer,
+    binary: PathBuf,
+    native: &NativeIo,
+    activation: InitialActivation,
+    target: Option<crate::resource_agents::InstallTarget>,
+) -> Result<Value> {
     let store = Store::lock(ctx)?;
     store.check_pending()?;
-    let prepared = prepare_source(ctx, &store, offer, binary, native, activation)?;
+    if let Some(target) = &target {
+        target.open()?;
+        if let Some(done) =
+            crate::plugin_target::previous(ctx, &store, target, &fingerprint(&offer)?)?
+        {
+            return Ok(done);
+        }
+    }
+    if let Some(previous) = crate::plugin_target::previous_stage(ctx, |journal| {
+        if target.is_none()
+            && (journal.scope != ctx.scope
+                || crate::operations::require_recovery_roots(ctx, journal).is_err())
+        {
+            return Ok(false);
+        }
+        matching_activation(journal, &offer, target.as_ref()).map(|mode| mode.is_some())
+    })? {
+        let state = same_directory(&store.path)?;
+        let input = frozen(&previous, &state)?;
+        let unpublished = input.market_operation.is_none()
+            || read_operation(&state, &format!("{}-receipt", previous.id))?
+                .is_none_or(|receipt| receipt.phase != Phase::Succeeded);
+        if target.is_some() || unpublished {
+            if input.prepared.initially_disabled != (activation == InitialActivation::Disabled) {
+                let option = if input.prepared.initially_disabled {
+                    "disabled"
+                } else {
+                    "yes"
+                };
+                return Err(Error::attention(
+                    "plugin_install_activation_changed",
+                    format!("上次安装使用了不同的启停设置。请重新运行安装并输入 {option}。"),
+                ));
+            }
+            return if input.market_operation.is_some() {
+                publish(ctx, &store, &previous, &input, native)
+            } else {
+                install_after_market(ctx, &store, input.prepared, previous.id, native)
+            };
+        }
+    }
+    (native.progress)(Stage::VerifySource);
+    let mut prepared = prepare_source(ctx, &store, offer, binary, native, activation)?;
+    prepared.target = target;
     let input = Frozen {
         prepared: prepared.clone(),
         market_operation: None,
@@ -980,15 +1143,117 @@ fn install_using(
     if market.phase != Phase::Succeeded {
         return Ok(json!({"journal":market, "stage":"marketplace"}));
     }
+    install_after_market(ctx, &store, prepared, market.id, native)
+}
+
+pub(crate) fn resume(
+    ctx: &Context,
+    original: &Journal,
+    dry: bool,
+    yes: bool,
+    progress: fn(Stage),
+) -> Result<Value> {
+    resume_using(
+        ctx,
+        original,
+        dry,
+        yes,
+        &NativeIo { progress, ..NATIVE },
+        crate::operations::confirm,
+    )
+}
+
+fn resume_using(
+    ctx: &Context,
+    original: &Journal,
+    dry: bool,
+    yes: bool,
+    native: &NativeIo,
+    confirm: impl FnOnce(&str, bool) -> Result<()>,
+) -> Result<Value> {
+    let state = same_directory(&ctx.state)?;
+    let saved = frozen(original, &state)?;
+    crate::operations::require_recovery_roots(ctx, original)?;
+    if original.scope != ctx.scope
+        || original.phase != Phase::Succeeded
+        || saved.market_operation.is_some()
+        || has_market_successor(ctx, &state, &original.id, &saved.prepared.offer)?
+    {
+        return Err(stale());
+    }
+    let prepared = &saved.prepared;
+    prepared.guard(&ctx.state, native)?;
+    observed(original, &saved, &state, native)?;
+    let destination = if let Some(target) = &prepared.target {
+        target.open()?.path
+    } else {
+        prepared.profile()
+    };
+    if dry {
+        return Ok(json!({"mode":"dry-run","plugin":prepared.offer.native_id(),
+            "commit":prepared.offer.payload_commit,"profile":destination,
+            "enabled":!prepared.initially_disabled,"persistentWrites":false}));
+    }
+    confirm(
+        &format!(
+            "继续安装 {} · {} · {}\n目标 {}",
+            prepared.offer.native_id(),
+            prepared.offer.payload_commit,
+            if prepared.initially_disabled {
+                "保持停用"
+            } else {
+                "启用"
+            },
+            crate::output::sanitize(&destination.display().to_string(), false),
+        ),
+        yes,
+    )?;
+    let store = Store::lock(ctx)?;
+    store.check_pending()?;
+    let current = crate::operations::locked_journal(&store, &original.id)?;
+    if fingerprint(&current)? != fingerprint(original)?
+        || has_market_successor(ctx, &state, &original.id, &saved.prepared.offer)?
+    {
+        return Err(stale());
+    }
+    if let Some(target) = &saved.prepared.target {
+        target.open()?;
+    }
+    install_after_market(ctx, &store, saved.prepared, current.id, native)
+}
+
+pub(crate) fn matches_prior(journal: &Journal, id: &str) -> Result<bool> {
+    if !is_install(journal) {
+        return Ok(false);
+    }
+    Ok(frozen(journal, &same_directory(&journal.state)?)?
+        .market_operation
+        .as_deref()
+        == Some(id))
+}
+
+fn install_after_market(
+    ctx: &Context,
+    store: &Store,
+    prepared: Prepared,
+    market: String,
+    native: &NativeIo,
+) -> Result<Value> {
+    if has_market_successor(ctx, &same_directory(&store.path)?, &market, &prepared.offer)? {
+        return Err(Error::attention(
+            "codex_install_next_stage_exists",
+            "后续安装步骤已有记录。请运行 mo recover 查看当前状态。",
+        ));
+    }
     let input = Frozen {
         prepared,
-        market_operation: Some(market.id),
+        market_operation: Some(market),
     };
-    let plugin = stage(ctx, &store, &input, native)?;
+    let plugin = stage(ctx, store, &input, native)?;
     if plugin.phase != Phase::Succeeded {
         return Ok(json!({"journal":plugin, "stage":"plugin"}));
     }
-    publish(ctx, &store, &plugin, &input, native)
+    publish(ctx, store, &plugin, &input, native)
 }
 
 pub(crate) fn recover(
@@ -1050,11 +1315,54 @@ fn recover_using(
         }
         settle(store, journal, &input, &outcome, native)?;
     }
-    if journal.phase == Phase::Succeeded && input.market_operation.is_some() {
-        publish(ctx, store, journal, &input, native)
-    } else {
-        Ok(json!(journal))
+    if journal.phase != Phase::Succeeded {
+        return Ok(json!(journal));
     }
+    if input.market_operation.is_some() {
+        return publish(ctx, store, journal, &input, native);
+    }
+    let can_continue = !has_market_successor(ctx, &state, &journal.id, &input.prepared.offer)?
+        && observed(journal, &input, &state, native).is_ok();
+    let mut result = json!(journal);
+    result["continuationRequired"] = json!(can_continue);
+    result["continuationCommand"] =
+        json!(can_continue.then(|| format!("mo agent resume {}", journal.id)));
+    Ok(result)
+}
+
+pub(crate) fn matching_activation(
+    journal: &Journal,
+    offer: &Offer,
+    target: Option<&crate::resource_agents::InstallTarget>,
+) -> Result<Option<InitialActivation>> {
+    if !is_install(journal)
+        || (journal.plan.package.id != format!("codex-first-install:{}", offer.marketplace)
+            && journal.plan.package.id != format!("codex-first-install:{}", offer.native_id()))
+    {
+        return Ok(None);
+    }
+    let saved = frozen(journal, &same_directory(&journal.state)?)?;
+    if saved.prepared.target.as_ref() != target
+        || fingerprint(&saved.prepared.offer)? != fingerprint(offer)?
+    {
+        return Ok(None);
+    }
+    Ok(Some(if saved.prepared.initially_disabled {
+        InitialActivation::Disabled
+    } else {
+        InitialActivation::Enabled
+    }))
+}
+
+pub(crate) fn existing_target(
+    journal: &Journal,
+) -> Result<Option<crate::resource_agents::InstallTarget>> {
+    if !is_install(journal) {
+        return Ok(None);
+    }
+    Ok(frozen(journal, &same_directory(&journal.state)?)?
+        .prepared
+        .target)
 }
 
 pub(crate) fn reserved(profile: &Path) -> bool {
@@ -1147,6 +1455,14 @@ pub(crate) fn managed_profiles(ctx: &Context) -> Result<Vec<(String, PathBuf)>> 
         .into_iter()
         .map(|profile| (profile.name, profile.prepared.profile()))
         .collect())
+}
+
+pub(crate) fn allocation_identity(ctx: &Context, profile: &Path) -> Result<FileId> {
+    published_profiles(ctx)?
+        .into_iter()
+        .find(|entry| entry.prepared.profile() == profile)
+        .map(|entry| entry.prepared.identity)
+        .ok_or_else(stale)
 }
 
 #[path = "codex_session.rs"]

@@ -52,7 +52,12 @@ case "$operation" in
    for target in $selected;do
     case "$target" in "$dst/.demo") input="$src/home/dot_demo.tmpl";; "$dst/.other")input="$src/home/dot_other";; *)exit 13;;esac
     case "$operation" in
-     status) if [ ! -f "$target" ];then printf ' A %s\n' "$target";elif ! /usr/bin/cmp -s "$input" "$target";then printf ' M %s\n' "$target";fi;;
+     status) if [ -f "$HOME/query-helper" ]; then
+      (/bin/sleep 4; printf unexpected > "$HOME/query-helper-done") >/dev/null 2>&1 &
+      printf launched > "$HOME/query-helper-launched"
+      exit 0
+     fi
+     if [ ! -f "$target" ];then printf ' A %s\n' "$target";elif ! /usr/bin/cmp -s "$input" "$target";then printf ' M %s\n' "$target";fi;;
      verify) /usr/bin/cmp -s "$input" "$target"||exit 1;;
      apply) if [ -f "$HOME/conflict" ];then exit 1;fi
       /bin/cp "$input" "$target"
@@ -958,12 +963,49 @@ fn native_configured_entry_filters_remain_partial_even_after_exit_zero() -> Test
     fs::write(f.fixture.home.join("filter-files"), "")?;
     f.enroll()?;
     let target = f.destination.join(".demo");
+    let (refresh, report) = f.run(&["config", "list", "--refresh"])?;
+    assert_code(&refresh, 3);
+    assert_eq!(report["data"]["coverage"], "partial-native-entry-selection");
+    assert_eq!(report["data"]["incomplete"], true);
+    assert_eq!(report["data"]["candidates"]["count"], 2);
+    let plain = super::plain(&f.fixture, &["config", "list", "--refresh"])?;
+    assert_code(&plain, 3);
+    let text = String::from_utf8(plain.stdout)?;
+    assert!(text.contains("有些内容没查到") && text.contains(path_text(&target)?));
+    assert!(!target.exists());
     let (out, value) = f.run(&["config", "apply", path_text(&target)?, "--yes"])?;
     assert_code(&out, 3);
     assert_eq!(value["data"]["nativeResult"], "succeeded");
     assert_eq!(value["data"]["phase"], "unknown");
     assert_eq!(value["data"]["verification"], "partial-filtered");
     assert_eq!(value["data"]["filesMatch"], Value::Null);
+    Ok(())
+}
+
+#[test]
+fn plain_config_apply_shows_partial_verification_and_keeps_the_id_in_history() -> TestResult {
+    let f = Native::new()?;
+    fs::write(f.fixture.home.join("filter-files"), "")?;
+    f.enroll()?;
+    let target = f.destination.join(".demo");
+    let output = super::plain(
+        &f.fixture,
+        &["config", "apply", path_text(&target)?, "--yes"],
+    )?;
+    assert_code(&output, 3);
+    let active = f.fixture.read_json("state/active.json")?;
+    let id = active["id"].as_str().ok_or("original operation ID")?;
+    let text = String::from_utf8(output.stdout)?;
+    assert!(!text.contains(id));
+    assert!(text.contains("原生结果 已完成") && text.contains("文件核验 有些文件没检查"));
+    assert!(text.contains("运行 mo recover 可查看记录"));
+    let (out, history) = f.run(&["history", id])?;
+    assert_code(&out, 0);
+    assert_eq!(history["data"][0]["id"], id);
+    assert_eq!(
+        f.calls()?.lines().filter(|name| *name == "apply").count(),
+        1
+    );
     Ok(())
 }
 
@@ -1043,5 +1085,105 @@ esac"#,
         }
         assert_eq!(native.calls()?, calls);
     }
+    Ok(())
+}
+
+#[test]
+fn diagnostic_queries_can_run_with_an_unresolved_application_operation() -> TestResult {
+    let f = Native::new()?;
+    f.enroll()?;
+    let (out, started) = f.run(&["app", "install", "demo", "--version", "1.0.0"])?;
+    assert_code(&out, 0);
+    let mut journal = started["data"].clone();
+    journal["phase"] = json!("unknown");
+    let active = f.fixture.file("state/active.json");
+    let before = serde_json::to_vec(&journal)?;
+    fs::write(&active, &before)?;
+    let target = f.destination.join(".demo");
+    let target_text = target.to_str().ok_or("target path")?;
+    let (out, mapping) = f.run(&["config", "source-path", target_text])?;
+    assert_code(&out, 0);
+    assert_eq!(
+        mapping["data"]["path"],
+        json!(f.source.join("home/dot_demo.tmpl"))
+    );
+    let (out, status) = f.run(&["config", "status", target_text])?;
+    assert_code(&out, 3);
+    assert_eq!(status["data"]["results"][0]["status"], "drift");
+    assert_eq!(fs::read(active)?, before);
+    assert!(!target.exists());
+    Ok(())
+}
+
+#[test]
+fn config_query_applies_its_timeout_to_owned_background_helpers_and_keeps_the_audit() -> TestResult
+{
+    let f = Native::new()?;
+    f.enroll()?;
+    fs::write(f.fixture.home.join("query-helper"), "")?;
+    let start = std::time::Instant::now();
+    let (out, result) = f.run(&["config", "status", "--timeout", "1"])?;
+    let elapsed = start.elapsed();
+    assert_code(&out, 3);
+    assert_eq!(
+        result["error"]["code"], "chezmoi_native_query_failed",
+        "{result}"
+    );
+    assert!(f.fixture.home.join("query-helper-launched").exists());
+    assert!(elapsed < std::time::Duration::from_secs(3), "{elapsed:?}");
+    let records = fs::read_dir(f.fixture.file("state"))?.collect::<Result<Vec<_>, _>>()?;
+    let audits = records
+        .iter()
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("chezmoi-query-")
+        })
+        .map(|entry| Ok(serde_json::from_slice::<Value>(&fs::read(entry.path())?)?))
+        .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?;
+    assert!(
+        audits
+            .iter()
+            .any(|audit| audit["phase"] == "unknown" && audit["uncertain"] == true)
+    );
+    let target = f.destination.join(".demo");
+    let (out, path) = f.run(&["config", "source-path", target.to_str().ok_or("target")?])?;
+    assert_code(&out, 0);
+    assert_eq!(
+        path["data"]["path"],
+        json!(f.source.join("home/dot_demo.tmpl"))
+    );
+    std::thread::sleep(
+        std::time::Duration::from_secs(4).saturating_sub(elapsed)
+            + std::time::Duration::from_millis(250),
+    );
+    assert!(!f.fixture.home.join("query-helper-done").exists());
+    Ok(())
+}
+
+#[test]
+fn config_query_refuses_to_start_when_the_group_observer_is_unavailable() -> TestResult {
+    let f = Native::new()?;
+    f.enroll()?;
+    let before = f.calls()?;
+    let cli = f.fixture.command();
+    let out = std::process::Command::new("/usr/bin/sandbox-exec")
+        .args([
+            "-p",
+            r#"(version 1)(allow default)(deny process-exec (literal "/usr/bin/pgrep"))"#,
+        ])
+        .arg(cli.get_program())
+        .args(cli.get_args())
+        .envs(
+            cli.get_envs()
+                .filter_map(|(name, value)| value.map(|value| (name, value))),
+        )
+        .args(["config", "status", "--timeout", "1"])
+        .output()?;
+    assert_code(&out, 3);
+    let result: Value = serde_json::from_slice(&out.stdout)?;
+    assert_eq!(result["error"]["code"], "native_query_group_unobserved");
+    assert_eq!(f.calls()?, before, "no underlying query may start");
     Ok(())
 }

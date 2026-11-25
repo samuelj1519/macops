@@ -106,7 +106,7 @@ fn frozen_environment_query_executes_one_scoped_native_process_and_returns_typed
         env.values().get("https_proxy").map(String::as_str),
         Some("synthetic-private-proxy")
     );
-    let observed = observe(&store, &q, &env, 2)?;
+    let observed = observe(&store, &q, &env, 5)?;
     assert!(matches!(observed, Observation::BrewMissing { .. }));
     super::record_observation(&ctx, &store, &q, &observed)?;
     assert!(super::read_registry(&store)?.contexts[&q.binding.context_id].observation_valid);

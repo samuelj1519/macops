@@ -441,7 +441,7 @@ fn current_context(
     }
     Ok((registry, first_use))
 }
-fn candidate(ctx: &Context, id: &str) -> Result<Option<crate::domain::Package>> {
+pub(crate) fn candidate(ctx: &Context, id: &str) -> Result<Option<crate::domain::Package>> {
     if [
         "config:",
         "capability:",
@@ -553,7 +553,42 @@ pub(crate) fn execute_selected(
         version: None,
         doctor: false,
     };
+    selected_recipe(ctx, &request, Some(selected))?;
+    if !dry_run
+        && let Some(previous) = crate::operations::recover_before_new_plan(ctx, yes, |journal| {
+            matches_selected_recovery(journal, selected, action)
+        })?
+        && previous.succeeded
+        && matches_selected_recovery(&previous.original, selected, action)?
+    {
+        return Ok(previous.result);
+    }
     route_object(ctx, &request, dry_run, yes, Some(selected))?.ok_or_else(native_invalid)
+}
+
+pub(crate) fn matches_selected_recovery(
+    journal: &crate::domain::Journal,
+    selected: &crate::domain::Package,
+    action: crate::domain::Action,
+) -> Result<bool> {
+    use crate::domain::{Provider, QuerySpec, fingerprint};
+    let plan = &journal.plan;
+    let Provider::BrewFormula {
+        query: requested, ..
+    } = &selected.provider
+    else {
+        return Ok(false);
+    };
+    let Some(QuerySpec::BrewFormula(frozen)) = &plan.query else {
+        return Ok(false);
+    };
+    Ok(plan.brew.is_some()
+        && crate::operations::matches_intent(journal, action, &selected.id, None)
+        && requested.key == frozen.key
+        && requested.selection == frozen.selection
+        && requested.binding == frozen.binding
+        && requested.context_epoch == frozen.context_epoch
+        && fingerprint(&policy::resolved_package(selected, frozen)?)? == plan.recipe_sha256)
 }
 
 fn selected_recipe(
@@ -756,14 +791,14 @@ pub(super) fn discovery_books(
             .current_dir(&ctx.home)
             .stdin(std::process::Stdio::null())
             .process_group(0);
-        let captured = crate::process::capture_bytes_guarded_process_in(
+        let captured = crate::process::capture_owned_group_in(
             &mut command,
             std::time::Duration::from_secs(ctx.timeout_secs.min(60)),
             4 * 1024 * 1024,
             &directory.path,
             guard,
         );
-        let output = query::owned_output(captured)?;
+        let output = captured.result?;
         if output.uncertain || output.code != Some(0) {
             return Err(Error::attention(
                 "brew_query_failed",
@@ -1148,7 +1183,21 @@ pub fn recover(
         Err(error) => return Err(error),
     };
     store.check_migration_pending()?;
-    let mut journal = crate::operations::locked_journal(&store, &original.id)?;
+    recover_locked(ctx, &store, original, resolve_failed, yes, expected)
+}
+
+pub(crate) fn recover_locked(
+    ctx: &Context,
+    store: &Store,
+    original: &crate::domain::Journal,
+    resolve_failed: bool,
+    yes: bool,
+    expected: Option<&str>,
+) -> Result<serde_json::Value> {
+    if original.home != ctx.home || original.state != ctx.state || original.scope != ctx.scope {
+        return Err(native_invalid());
+    }
+    let mut journal = crate::operations::locked_journal(store, &original.id)?;
     crate::operations::verify_recovery_preview(expected, &journal)?;
     if journal.id != original.id
         || journal.plan_sha256 != original.plan_sha256
@@ -1176,7 +1225,7 @@ pub fn recover(
         store.save(&journal)?;
         return Ok(serde_json::json!({"journal":journal,"persistentWrites":true}));
     }
-    let binding = match crate::native_runner::binding(&store, &journal) {
+    let binding = match crate::native_runner::binding(store, &journal) {
         Ok(binding) => binding,
         Err(error) => {
             journal.phase = crate::domain::Phase::Unknown;
@@ -1185,7 +1234,7 @@ pub fn recover(
             return Ok(serde_json::json!(journal));
         }
     };
-    finish_native(ctx, &store, &mut journal, &binding)
+    finish_native(ctx, store, &mut journal, &binding)
 }
 
 #[cfg(test)]
@@ -1461,24 +1510,6 @@ mod query {
         }
         Ok(())
     }
-    pub(super) fn owned_output(
-        captured: process::CapturedProcess,
-    ) -> Result<process::BinaryOutput> {
-        if let Some(pid) = captured.pid
-            && process::group_alive(pid)
-        {
-            while process::group_alive(pid) {
-                std::thread::sleep(Duration::from_millis(15));
-            }
-            if captured.result.is_ok() {
-                return Err(Error::attention(
-                    "brew_query_group_not_quiescent",
-                    "原查询组仍有子进程，未接受查询结果",
-                ));
-            }
-        }
-        captured.result
-    }
     pub fn observe(
         store: &Store,
         query: &BrewQuerySpec,
@@ -1530,14 +1561,14 @@ mod query {
             .stdin(Stdio::null())
             .process_group(0);
         let directory = super::original_state(state)?;
-        let captured = process::capture_bytes_guarded_process_in(
+        let captured = process::capture_owned_group_in(
             &mut command,
             Duration::from_secs(timeout_secs.min(60)),
             4 * 1024 * 1024,
             &directory.path,
             guard,
         );
-        let output = match owned_output(captured) {
+        let output = match captured.result {
             Ok(output) => output,
             Err(error) => return Ok(Observation::Unknown { reason: error.code }),
         };

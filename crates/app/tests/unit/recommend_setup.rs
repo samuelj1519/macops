@@ -1433,7 +1433,10 @@ fn access_to_an_explicit_synthetic_keychain_file_cannot_change_profile_state() -
         .ok_or("invalid fixture was accepted")?;
     assert!(matches!(
         error.code.as_str(),
-        "model_keychain_unavailable" | "model_keychain_timeout"
+        "model_keychain_unavailable"
+            | "model_keychain_timeout"
+            | "model_keychain_item_missing"
+            | "model_keychain_authorization_required"
     ));
     assert!(!ctx.config.exists());
     assert!(!ctx.home.join(".local/state/macops").exists());

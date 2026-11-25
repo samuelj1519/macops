@@ -111,6 +111,41 @@ fn exit_status_preserves_unknown_and_display_only_contracts() -> TestResult {
 }
 
 #[test]
+fn continuation_and_brew_evidence_preserve_attention_status() {
+    let doctor = Command::App {
+        project: None,
+        command: Some(AppCmd::Doctor { id: None }),
+    };
+    for flag in [false, true] {
+        assert!(attention(
+            &doctor,
+            &json!({"journal":{"phase":"succeeded"},"continuationRequired":flag})
+        ));
+    }
+    assert!(
+        continuation(&json!({"journal":{"phase":"failed"},"continuationRequired":false})).is_none()
+    );
+    assert!(attention(
+        &doctor,
+        &json!({"phase":"succeeded","continuationRequired":true})
+    ));
+    assert!(attention(
+        &doctor,
+        &json!([{"observation":{"status":"brew-missing"}}])
+    ));
+    let detail = Command::App {
+        project: None,
+        command: Some(AppCmd::Detail(crate::cli::Detail {
+            target: "demo".into(),
+        })),
+    };
+    assert!(!attention(
+        &detail,
+        &json!({"observation":{"status":"brew-installed"}})
+    ));
+}
+
+#[test]
 fn credential_inventory_and_manual_routes_are_display_only_but_checks_need_attention() {
     use crate::policy::metadata::Profile;
     for command in [

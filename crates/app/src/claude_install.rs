@@ -11,6 +11,7 @@ use crate::{
     native_runner::{self, FrozenInvocation, NativeOutcome},
     paths::Directory,
     policy::source_tree::{Slot, Tree},
+    profile_install::{InitialActivation, Stage},
     store::{self, Store},
 };
 use serde::{Deserialize, Serialize};
@@ -34,7 +35,7 @@ const DIRECTORIES: [&str; 4] = ["home", "home/.claude", "cwd", "tmp"];
 fn invalid() -> Error {
     Error::attention(
         "claude_install_evidence_changed",
-        "独立 Claude Code 档案的范围或原操作证据不匹配",
+        "Claude Code 单独配置的范围或原操作证据不匹配",
     )
 }
 
@@ -155,6 +156,7 @@ struct NativeIo {
     checkout: fn(&Offer, &Directory) -> Result<Checkout>,
     launch: fn(&Store, &mut Journal, &FrozenInvocation) -> Result<NativeOutcome>,
     outcome: fn(&Journal) -> Result<NativeOutcome>,
+    progress: fn(Stage),
 }
 
 const NATIVE: NativeIo = NativeIo {
@@ -165,11 +167,14 @@ const NATIVE: NativeIo = NativeIo {
         native_runner::launch(store, journal, &binding)
     },
     outcome: native_runner::original_outcome,
+    progress: |_| {},
 };
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Prepared {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    target: Option<crate::resource_agents::InstallTarget>,
     root: PathBuf,
     identity: FileId,
     directories: Vec<FileId>,
@@ -588,6 +593,7 @@ fn prepare(
     Store::atomic_bytes(config.file(), "settings.json", b"{}\n", true)?;
     let (checkout_slot, checkout_tree, files) = (native.checkout)(&offer, &root)?;
     let prepared = Prepared {
+        target: None,
         root: root.path.clone(),
         identity: root.identity().clone(),
         directories: capture_directories(&root.path)?,
@@ -638,6 +644,11 @@ fn stage(ctx: &Context, store: &Store, input: &Frozen, native: &NativeIo) -> Res
     before(input, &journal, &physical(&store.path)?, native)?;
     Store::atomic_new(&store.root, &sidecar(&journal, "plan"), input)?;
     store.save(&journal)?;
+    (native.progress)(match input.step {
+        Step::Market => Stage::RegisterMarketplace,
+        Step::Plugin { .. } => Stage::InstallPlugin,
+        Step::Activation { .. } => Stage::CheckActivation,
+    });
     if let Ok(outcome) = (native.launch)(store, &mut journal, &argv) {
         settle(store, &mut journal, input, &outcome, native)?;
     } else {
@@ -789,6 +800,30 @@ fn publish(
     input: &Frozen,
     native: &NativeIo,
 ) -> Result<Value> {
+    if let Some(target) = &input.prepared.target {
+        if let Some(result) = crate::plugin_target::resume_publication(ctx, store, journal, target)?
+        {
+            return Ok(result);
+        }
+        verify_installation(input, journal, &physical(&store.path)?, native)?;
+        let p = &input.prepared;
+        (native.progress)(Stage::Publish);
+        return crate::plugin_target::publish(
+            ctx,
+            store,
+            journal,
+            target,
+            &crate::plugin_target::InstalledPlugin {
+                native_id: p.offer.native_id(),
+                marketplace: &p.offer.marketplace,
+                offer: fingerprint(&p.offer)?,
+                config: p.profile().join("settings.json"),
+                payload: p.payload(),
+                market: None,
+                checkout: Some(&(p.checkout_slot.clone(), p.checkout_tree.clone())),
+            },
+        );
+    }
     let directory = physical(&store.path)?;
     let id = format!("{}-receipt", journal.id);
     scope(ctx, journal)?;
@@ -884,7 +919,7 @@ fn finish_publication(
             crate::store::CommitFailure::Check(e) | crate::store::CommitFailure::Outcome(e) => e,
         })?;
     record.phase = Phase::Succeeded;
-    record.message = "独立 Claude Code 档案已纳管".into();
+    record.message = "Claude Code 单独配置已纳入管理".into();
     store.save(record)
 }
 
@@ -893,8 +928,15 @@ pub(crate) fn install(
     offer: Offer,
     binary: PathBuf,
     enabled: bool,
+    progress: fn(Stage),
 ) -> Result<Value> {
-    install_using(ctx, offer, binary, enabled, &NATIVE)
+    install_using(
+        ctx,
+        offer,
+        binary,
+        enabled,
+        &NativeIo { progress, ..NATIVE },
+    )
 }
 
 fn install_using(
@@ -904,9 +946,63 @@ fn install_using(
     enabled: bool,
     native: &NativeIo,
 ) -> Result<Value> {
+    install_with_target(ctx, offer, binary, enabled, native, None)
+}
+
+pub(crate) fn install_at(
+    ctx: &Context,
+    offer: Offer,
+    binary: PathBuf,
+    enabled: bool,
+    target: crate::resource_agents::InstallTarget,
+    progress: fn(Stage),
+) -> Result<Value> {
+    install_with_target(
+        ctx,
+        offer,
+        binary,
+        enabled,
+        &NativeIo { progress, ..NATIVE },
+        Some(target),
+    )
+}
+
+fn install_with_target(
+    ctx: &Context,
+    offer: Offer,
+    binary: PathBuf,
+    enabled: bool,
+    native: &NativeIo,
+    target: Option<crate::resource_agents::InstallTarget>,
+) -> Result<Value> {
     let store = Store::lock(ctx)?;
     store.check_pending()?;
-    let prepared = prepare(ctx, &store, offer, binary, enabled, native)?;
+    if let Some(target) = &target {
+        target.open()?;
+        if let Some(done) =
+            crate::plugin_target::previous(ctx, &store, target, &fingerprint(&offer)?)?
+        {
+            return Ok(done);
+        }
+        if let Some(previous) = crate::plugin_target::previous_stage(ctx, |journal| {
+            matching_activation(journal, &offer, Some(target)).map(|mode| mode.is_some())
+        })? {
+            let input = frozen(&previous, &physical(&store.path)?)?;
+            if input.prepared.enabled != enabled {
+                return Err(invalid());
+            }
+            return match input.step {
+                Step::Market => {
+                    install_after_market(ctx, &store, input.prepared, previous.id, native)
+                }
+                Step::Plugin { .. } => install_after_plugin(ctx, &store, previous, input, native),
+                Step::Activation { .. } => publish(ctx, &store, &previous, &input, native),
+            };
+        }
+    }
+    (native.progress)(Stage::VerifySource);
+    let mut prepared = prepare(ctx, &store, offer, binary, enabled, native)?;
+    prepared.target = target;
     let market = stage(
         ctx,
         &store,
@@ -999,8 +1095,21 @@ fn continuation(ctx: &Context, id: &str, native: &NativeIo) -> Result<Continuati
     Ok(Continuation { journal, input })
 }
 
-pub(crate) fn resume(ctx: &Context, id: &str, dry: bool, yes: bool) -> Result<Value> {
-    resume_using(ctx, id, dry, yes, &NATIVE, crate::operations::confirm)
+pub(crate) fn resume(
+    ctx: &Context,
+    id: &str,
+    dry: bool,
+    yes: bool,
+    progress: fn(Stage),
+) -> Result<Value> {
+    resume_using(
+        ctx,
+        id,
+        dry,
+        yes,
+        &NativeIo { progress, ..NATIVE },
+        crate::operations::confirm,
+    )
 }
 
 fn resume_using(
@@ -1066,6 +1175,45 @@ pub(crate) fn recover(
     yes: bool,
 ) -> Result<Value> {
     recover_using(ctx, store, journal, resolve_failed, yes, &NATIVE)
+}
+
+pub(crate) fn matching_activation(
+    journal: &Journal,
+    offer: &Offer,
+    target: Option<&crate::resource_agents::InstallTarget>,
+) -> Result<Option<InitialActivation>> {
+    if !is_install(journal)
+        || journal.plan.package.id != format!("claude-first-install:{}", offer.native_id())
+    {
+        return Ok(None);
+    }
+    let saved = frozen(journal, &physical(&journal.state)?)?;
+    if saved.prepared.target.as_ref() != target
+        || fingerprint(&saved.prepared.offer)? != fingerprint(offer)?
+    {
+        return Ok(None);
+    }
+    Ok(Some(if saved.prepared.enabled {
+        InitialActivation::Enabled
+    } else {
+        InitialActivation::Disabled
+    }))
+}
+
+pub(crate) fn matches_prior(journal: &Journal, id: &str) -> Result<bool> {
+    if !is_install(journal) {
+        return Ok(false);
+    }
+    Ok(frozen(journal, &physical(&journal.state)?)?.step.prior() == Some(id))
+}
+
+pub(crate) fn existing_target(
+    journal: &Journal,
+) -> Result<Option<crate::resource_agents::InstallTarget>> {
+    if !is_install(journal) {
+        return Ok(None);
+    }
+    Ok(frozen(journal, &physical(&journal.state)?)?.prepared.target)
 }
 
 fn recover_using(
@@ -1255,6 +1403,14 @@ pub(crate) fn managed_profiles(ctx: &Context) -> Result<Vec<(String, PathBuf)>> 
         .into_iter()
         .map(|entry| (entry.name, entry.prepared.profile()))
         .collect())
+}
+
+pub(crate) fn allocation_identity(ctx: &Context, profile: &Path) -> Result<FileId> {
+    published_profiles(ctx, Some(profile))?
+        .into_iter()
+        .find(|entry| entry.prepared.profile() == profile)
+        .map(|entry| entry.prepared.identity)
+        .ok_or_else(invalid)
 }
 
 pub(crate) struct SessionTarget {

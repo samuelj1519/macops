@@ -250,6 +250,19 @@ fn ai_native_claude_recovery_leaves_user_model_edits_intact_when_resolving_failu
     assert_eq!(pin(&f, false)?, config("claude", "2.0.0"));
     assert_eq!(pin(&f, true)?, config("claude", "1.0.0"));
 
+    let (out, blocked) = f.run(&["agent", "install", "claude", "2.0.0"])?;
+    assert_code(&out, 3);
+    assert_eq!(blocked["error"]["code"], "recovery_required");
+    let message = blocked["error"]["message"]
+        .as_str()
+        .ok_or("blocked message")?;
+    assert!(message.contains("Claude 设置后来有改动"));
+    assert!(message.contains("运行 mo recover 查看待检查的操作"));
+    assert!(!message.contains(id));
+    assert_eq!(f.read_json("state/active.json")?["id"], id);
+    assert_eq!(claude_profile_bytes(&f)?, expected_profiles);
+    assert_eq!(calls(&f)?, initial_calls);
+
     let (out, recovered) = f.run(&["recover", id])?;
     assert_code(&out, 3);
     assert_eq!(recovered["data"]["journal"]["phase"], "unknown");
@@ -260,8 +273,22 @@ fn ai_native_claude_recovery_leaves_user_model_edits_intact_when_resolving_failu
             .is_some_and(|message| message.starts_with("claude_profile_changed"))
     );
     assert_eq!(claude_profile_bytes(&f)?, expected_profiles);
+    assert_eq!(
+        recovered["data"]["recoveryBlocker"],
+        "claude_profile_changed"
+    );
+    let rendered = super::plain(&f, &["recover", id])?;
+    assert_code(&rendered, 3);
+    let text = String::from_utf8(rendered.stdout)?;
+    assert!(text.contains(".claude-zen/models.json"), "{text}");
+    assert!(
+        text.contains(&format!("mo recover {id} --mark-failed")),
+        "{text}"
+    );
+    assert!(!text.contains("--yes"));
+    assert!(!text.contains("SYNTHETIC_CLAUDE_SECRET"));
 
-    let (out, failed) = f.run(&["recover", id, "--resolve-failed", "--yes"])?;
+    let (out, failed) = f.run(&["recover", id, "--mark-failed", "--yes"])?;
     assert_code(&out, 3);
     assert_eq!(failed["data"]["journal"]["phase"], "failed");
     assert_eq!(failed["data"]["journal"]["id"], id);
@@ -468,13 +495,85 @@ fn ai_native_all_config_drift_blocks_before_mise_and_force_live_keeps_source() -
         let (out, v) = f.run(&["agent", "install", "codex", "2.0.0"])?;
         assert_code(&out, 3);
         assert_eq!(v["error"]["code"], "mise_config_drift");
+        let message = v["error"]["message"].as_str().ok_or("drift message")?;
+        assert!(message.contains("这次升级还没开始"));
+        assert!(message.contains("mo config reconcile"));
+        assert!(message.contains("mo agent install codex 2.0.0 --local --dry-run"));
+        assert!(message.contains("private_config.toml"));
         assert!(!f.home.join("mise-calls").exists());
         assert!(!f.file("state").exists());
-        let (out, v) = f.run(&["agent", "install", "codex", "2.0.0", "--force-live"])?;
+        let (out, v) = f.run(&["agent", "install", "codex", "2.0.0", "--local"])?;
         assert_code(&out, 0);
         assert_eq!(v["data"]["journal"]["phase"], "succeeded");
         assert_eq!(pin(&f, true)?, config("codex", "1.0.0"));
     }
+    Ok(())
+}
+
+#[test]
+fn codex_retry_prioritizes_pending_and_recovery_publishes_only_the_original_result() -> TestResult {
+    let f = setup("codex", "1.0.0")?;
+    fs::write(f.home.join("installer-fail"), b"unverified native exit")?;
+    let (output, initial) = f.run(&["agent", "upgrade", "codex"])?;
+    assert_code(&output, 3);
+    let journal = &initial["data"]["journal"];
+    let id = journal["id"].as_str().ok_or("operation ID")?;
+    assert_eq!(journal["phase"], "unknown");
+    assert_eq!(pin(&f, false)?, config("codex", "2.0.0"));
+    assert_eq!(pin(&f, true)?, config("codex", "1.0.0"));
+    let before_calls = calls(&f)?;
+    let profile = f.home.join(".claude-mi/settings.json");
+    let edited = b"{\"model\":\"unrelated edit\"}\n";
+    fs::write(&profile, edited)?;
+
+    for extra in ["--local", "--force-live", "--dry-run"] {
+        let args = ["agent", "upgrade", "codex", extra];
+        let (out, blocked) = f.run(&args)?;
+        assert_code(&out, 3);
+        assert_eq!(blocked["error"]["code"], "recovery_required", "{blocked}");
+        let message = blocked["error"]["message"]
+            .as_str()
+            .ok_or("pending message")?;
+        assert!(!message.contains(id));
+        assert_eq!(f.read_json("state/active.json")?["id"], id);
+    }
+    assert_eq!(calls(&f)?, before_calls);
+    assert_eq!(
+        f.read_json(&format!("state/ai-{id}.json"))?["profiles"],
+        json!([])
+    );
+
+    let (out, recovered) = f.run(&["agent", "upgrade", "codex"])?;
+    assert_code(&out, 0);
+    assert_eq!(recovered["data"]["journal"]["id"], id);
+    assert_eq!(recovered["data"]["journal"]["phase"], "succeeded");
+    assert_eq!(pin(&f, true)?, config("codex", "2.0.0"));
+    assert_eq!(fs::read(profile)?, edited);
+    assert_eq!(
+        calls(&f)?.iter().filter(|row| row[0][0] == "use").count(),
+        1
+    );
+    assert_eq!(f.run(&["recover"])?.1["data"]["pending"], json!([]));
+    Ok(())
+}
+
+#[test]
+fn codex_retry_through_app_upgrade_reuses_the_original_operation() -> TestResult {
+    let f = setup("codex", "1.0.0")?;
+    fs::write(f.home.join("installer-fail"), b"unverified native exit")?;
+    let request = ["app", "upgrade", "ai:codex", "--version", "2.0.0"];
+    let (out, original) = f.run(&request)?;
+    assert_code(&out, 3);
+    let journal = &original["data"]["journal"];
+    assert_eq!(journal["phase"], "unknown");
+    let (out, checked) = f.run(&request)?;
+    assert_code(&out, 0);
+    assert_eq!(checked["data"]["journal"]["id"], journal["id"]);
+    assert_eq!(checked["data"]["journal"]["phase"], "succeeded");
+    assert_eq!(
+        calls(&f)?.iter().filter(|row| row[0][0] == "use").count(),
+        1
+    );
     Ok(())
 }
 
@@ -695,7 +794,7 @@ fn ai_native_vendor_unknown_result_queries_before_recovery_without_reinstalling(
 -v) if [ -f "$HOME/mimo-version" ]; then /bin/cat "$HOME/mimo-version"; else printf '1.0.0\n'; fi ;;
 upgrade) printf 'upgrade\n' >> "$HOME/mimo-calls";printf '2.0.0\n' > "$HOME/mimo-version";/bin/sleep 30 ;;
 esac"#)?;
-    let (out, v) = f.run(&["--timeout-secs", "1", "agent", "install", "mimo", "2.0.0"])?;
+    let (out, v) = f.run(&["--timeout-secs", "5", "agent", "install", "mimo", "2.0.0"])?;
     assert_code(&out, 3);
     assert_eq!(v["data"]["journal"]["phase"], "unknown");
     let id = v["data"]["journal"]["id"].as_str().ok_or("id")?;
@@ -895,8 +994,8 @@ fn positional(value: &Value, fields: &[&str]) -> Value {
 
 #[test]
 fn ai_native_private_record_objects_cannot_be_reinterpreted_as_positional_arrays() -> TestResult {
-    let f = setup("codex", "1.0.0")?;
-    let (out, v) = f.run(&["agent", "install", "codex", "2.0.0"])?;
+    let f = setup("claude", "1.0.0")?;
+    let (out, v) = f.run(&["agent", "install", "claude", "2.0.0"])?;
     assert_code(&out, 0);
     let id = v["data"]["journal"]["id"].as_str().ok_or("id")?;
     let record_path = f.file(&format!("state/ai-{id}.json"));
@@ -956,8 +1055,8 @@ fn ai_native_private_record_objects_cannot_be_reinterpreted_as_positional_arrays
         assert_code(&out, 1);
         assert_eq!(rejected["error"]["code"], "invalid_json");
         assert_eq!(fs::read(f.file("state/active.json"))?, before_active);
-        assert_eq!(pin(&f, false)?, config("codex", "2.0.0"));
-        assert_eq!(pin(&f, true)?, config("codex", "2.0.0"));
+        assert_eq!(pin(&f, false)?, config("claude", "2.0.0"));
+        assert_eq!(pin(&f, true)?, config("claude", "2.0.0"));
         assert_eq!(calls(&f)?, before_calls);
     }
     write_json(&record_path, &original)?;

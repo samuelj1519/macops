@@ -43,7 +43,7 @@ fn session_preference_is_separate_and_preserves_named_models_and_native_files() 
     )?;
     let receipts = fs::read(ctx.state.join("receipts.json"))?;
     assert!(original.preference.is_none());
-    let inherited = admit(&ctx, &original, &workspace, None, None, &FIXTURE)?;
+    let (inherited, _lease) = admit(&ctx, &original, &workspace, None, None, &FIXTURE)?;
     assert_eq!(inherited.get_args().count(), 0);
     set_mode(&ctx, &original, Mode::Enabled, &FIXTURE)?;
     assert!(set_mode(&ctx, &original, Mode::Disabled, &FIXTURE).is_err());
@@ -51,7 +51,7 @@ fn session_preference_is_separate_and_preserves_named_models_and_native_files() 
     assert_eq!(enabled.revision(), 1);
     assert_eq!(enabled.mode().label(), "启用");
     let layer = named_layer(&enabled.profile, Some("test-model"))?;
-    let command = admit(
+    let (command, _lease) = admit(
         &ctx,
         &enabled,
         &workspace,
@@ -98,6 +98,7 @@ fn session_preference_is_separate_and_preserves_named_models_and_native_files() 
     assert_eq!(disabled.mode().label(), "停用");
     assert_eq!(
         admit(&ctx, &disabled, &workspace, None, None, &FIXTURE)?
+            .0
             .get_args()
             .collect::<Vec<_>>(),
         ["-c", concat!("plugins.item@market", ".enabled=false")],
@@ -442,5 +443,26 @@ fn session_admission_keeps_pending_transactions_and_rebound_workspaces_intact() 
     assert_eq!(error.code, "recovery_required");
     assert_eq!(fs::read(&path)?, bytes);
     assert!(!selected.root.path.join(PREFERENCE).exists());
+    Ok(())
+}
+
+#[test]
+fn admitted_session_lease_blocks_uninstall_until_the_inherited_descriptor_closes() -> TestResult {
+    let (_temp, ctx, label) = installed()?;
+    let workspace = Directory::open(&ctx.home)?;
+    let selected = select(&ctx, &label, &FIXTURE)?;
+    let (_command, lease) = admit(&ctx, &selected, &workspace, None, None, &FIXTURE)?;
+    let flags = rustix::io::fcntl_getfd(&lease).map_err(std::io::Error::from)?;
+    assert!(!flags.contains(rustix::io::FdFlags::CLOEXEC));
+    let blocked = crate::resource_agents::uninstall(&ctx, &label, false, true)
+        .err()
+        .ok_or("a session with a lease must block uninstall")?;
+    assert_eq!(blocked.code, "agent_profile_in_use");
+    assert!(selected.root.path.exists());
+    drop(lease);
+    let archived = crate::resource_agents::uninstall(&ctx, "Codex · item", false, true)?;
+    assert_eq!(archived["phase"], "succeeded");
+    assert!(!selected.root.path.exists());
+    assert_eq!(managed_profiles(&ctx)?, []);
     Ok(())
 }

@@ -47,6 +47,77 @@ fn native_skill_fixture(f: &Fixture, names: &[&str]) -> TestResult {
     Ok(())
 }
 
+fn plain(f: &Fixture, args: &[&str]) -> std::io::Result<std::process::Output> {
+    let fixture = f.command();
+    std::process::Command::new(fixture.get_program())
+        .args(fixture.get_args().filter(|arg| *arg != "--json"))
+        .envs(
+            fixture
+                .get_envs()
+                .filter_map(|(name, value)| value.map(|value| (name, value))),
+        )
+        .args(args)
+        .output()
+}
+
+#[test]
+fn main_journeys_show_the_selected_scope_without_executing_previews() -> TestResult {
+    let f = Fixture::new()?;
+    native_skill_fixture(&f, &["fixture-skill"])?;
+    let preview_args = ["app", "install", "demo", "--version", "1.0.0", "--dry-run"];
+    let preview = plain(&f, &preview_args)?;
+    assert_code(&preview, 0);
+    let text = String::from_utf8(preview.stdout)?;
+    assert!(text.contains("操作预演（未执行写入）") && text.contains("计划版本 1.0.0"));
+    assert!(text.contains("fixture:demo") && !text.contains("\"command\""));
+    let (out, raw) = f.run(&preview_args)?;
+    assert_code(&out, 0);
+    assert_eq!(raw["data"]["plan"]["target"], "1.0.0");
+    assert!(raw["data"]["plan"]["command"].is_object());
+
+    for (args, code, expected) in [
+        (&["config", "list"][..], 3, "mo config enroll"),
+        (&["config", "list", "--dry-run"][..], 0, "仅使用缓存"),
+        (&["agent", "credential", "list"][..], 0, "档案凭据状态"),
+        (&["dirs", "--roots"][..], 0, "状态"),
+        (&["skill", "resources"][..], 0, "fixture-skill"),
+    ] {
+        let result = plain(&f, args)?;
+        assert_code(&result, code);
+        let stdout = String::from_utf8(result.stdout)?;
+        assert!(
+            stdout.contains(expected) && stdout.contains("--json"),
+            "{args:?}: {stdout}"
+        );
+    }
+    let (out, manifest) = f.run(&["manifest", "export"])?;
+    assert_code(&out, 0);
+    let file = f.file("manifest.json");
+    write_json(&file, &manifest["data"]["manifest"])?;
+    let result = plain(
+        &f,
+        &["manifest", "plan", file.to_str().ok_or("manifest path")?],
+    )?;
+    assert_code(&result, 0);
+    assert!(String::from_utf8(result.stdout)?.contains("清单差异与重放条件"));
+    assert!(!f.file("state").exists());
+    assert!(!f.file("calls").exists());
+
+    let (_, installed) = f.run(&["app", "install", "demo", "--version", "1.0.0"])?;
+    let id = installed["data"]["id"].as_str().ok_or("operation ID")?;
+    for key in [id, "fixture:demo"] {
+        let (out, response) = f.run(&["history", key])?;
+        assert_code(&out, 0);
+        assert_eq!(response["data"][0]["id"], id);
+        let result = plain(&f, &["history", key])?;
+        assert_code(&result, 0);
+        let text = String::from_utf8(result.stdout)?;
+        assert!(text.contains("操作历史") && text.contains(id));
+    }
+    assert_eq!(fs::read_to_string(f.file("calls"))?, "install\n");
+    Ok(())
+}
+
 #[test]
 fn skill_inventory_and_browser_identify_agent_deployments() -> TestResult {
     let f = Fixture::new()?;
@@ -566,6 +637,70 @@ fn root_help_prioritizes_daily_tasks_and_advanced_help_keeps_recovery() -> TestR
             "{help}"
         );
     }
+    for (category, example) in [
+        ("app", "mo app adopt [名称]"),
+        ("config", "mo config list --refresh"),
+        ("agent", "mo agent launch"),
+        ("skill", "mo skill plugins --help"),
+    ] {
+        let output = std::process::Command::new(command)
+            .args(["help", category])
+            .output()?;
+        assert_code(&output, 0);
+        let help = String::from_utf8(output.stdout)?;
+        assert!(help.contains(example), "{help}");
+        assert!(!help.contains("纳管"), "{help}");
+    }
+    Ok(())
+}
+
+#[test]
+fn short_option_names_are_shown_and_the_old_spellings_still_work() -> TestResult {
+    let f = Fixture::new()?;
+    for (args, name, legacy) in [
+        (&["--help"][..], "--timeout <SECONDS>", "--timeout-secs"),
+        (
+            &["agent", "upgrade", "--help"][..],
+            "--local",
+            "--force-live",
+        ),
+        (
+            &["agent", "install", "--help"][..],
+            "--local",
+            "--force-live",
+        ),
+        (
+            &["recover", "--help"][..],
+            "--mark-failed",
+            "--resolve-failed",
+        ),
+    ] {
+        let out = plain(&f, args)?;
+        assert_code(&out, 0);
+        let help = String::from_utf8(out.stdout)?;
+        assert!(help.contains(name) && !help.contains(legacy), "{help}");
+    }
+    for option in ["--timeout", "--timeout-secs"] {
+        let (out, preview) = f.run(&[
+            "app",
+            "install",
+            "demo",
+            "--version",
+            "1.0.0",
+            "--dry-run",
+            option,
+            "30",
+        ])?;
+        assert_code(&out, 0);
+        assert_eq!(preview["data"]["plan"]["timeout_secs"], 30);
+    }
+    let wrong = plain(&f, &["app", "install", "demo", "--timeout", "0"])?;
+    assert_code(&wrong, 2);
+    let text = String::from_utf8(wrong.stderr)?;
+    assert!(text.contains("运行 mo --help"));
+    assert!(text.contains("--timeout"));
+    assert!(!f.file("state").exists());
+    assert!(!f.file("calls").exists());
     Ok(())
 }
 
@@ -761,12 +896,27 @@ fn batch_upgrade_stops_after_an_unknown_original_operation() -> TestResult {
         );
     }
 
+    let mut unsupported = catalog.clone();
+    unsupported["packages"][0]["provider"]["upgrade"] = serde_json::Value::Null;
+    write_json(&f.catalog, &unsupported)?;
+    let (out, result) = f.run(&["app", "upgrade", "--yes"])?;
+    assert_code(&out, 3);
+    assert!(
+        result["data"]["results"][0]["error"]["code"].is_string(),
+        "{result}"
+    );
+    assert_eq!(result["data"]["unattempted"], json!(["fixture:other"]));
+    assert!(!f.home.join("upgrade-attempt").exists());
+    assert_eq!(fs::read_to_string(f.file("other-calls"))?, "install\n");
+    write_json(&f.catalog, &catalog)?;
+
     let (out, result) = f.run(&["app", "upgrade", "--yes"])?;
     assert_code(&out, 3);
     let rows = result["data"]["results"].as_array().ok_or("results")?;
     assert_eq!(rows[0]["status"], "unknown");
     assert_eq!(rows[0]["operation"]["phase"], "unknown");
     assert_eq!(rows[1]["id"], "fixture:other");
+    assert_eq!(result["data"]["unattempted"], json!(["fixture:other"]));
     assert!(f.home.join("upgrade-attempt").exists());
     assert_eq!(fs::read_to_string(f.file("other-version"))?, "1.0.0");
     assert_eq!(fs::read_to_string(f.file("other-calls"))?, "install\n");
@@ -875,13 +1025,14 @@ fn github_skill_selectors_work_without_adding_public_aliases() -> TestResult {
 }
 
 #[test]
-fn recommend_reports_pending_operation_before_any_install_confirmation() -> TestResult {
+fn recommend_separates_pending_recovery_consent_from_install_confirmation() -> TestResult {
     for scenario in ["recommend-already-blocked", "recommend-blocked-after-menu"] {
         let f = Fixture::new()?;
         let (out, installed) = f.run(&["app", "install", "demo", "--version", "1.0.0"])?;
         assert_code(&out, 0);
         let mut pending = installed["data"].clone();
         pending["phase"] = json!("unknown");
+        fs::remove_file(f.file("version"))?;
         let active = f.file("state/active.json");
         let seed = f.file("pending-fixture.json");
         write_json(&seed, &pending)?;
@@ -902,7 +1053,11 @@ fn recommend_reports_pending_operation_before_any_install_confirmation() -> Test
         let receipts = fs::read(f.file("state/receipts.json"))?;
 
         chezmoi_native::run_browser_pty(&f, &["recommend", "demo"], scenario, &seed, "110", "3")?;
-        assert_eq!(fs::read(active)?, original);
+        let still_pending: serde_json::Value = serde_json::from_slice(&fs::read(&active)?)?;
+        assert_eq!(still_pending["id"], pending["id"]);
+        assert_eq!(still_pending["phase"], "unknown");
+        assert_eq!(still_pending["plan_sha256"], pending["plan_sha256"]);
+        let blocked_record = fs::read(&active)?;
         assert_eq!(fs::read(f.file("state/receipts.json"))?, receipts);
         assert_eq!(fs::read_to_string(f.file("calls"))?, "install\n");
         assert!(!f.home.join("mise-called").exists());
@@ -910,6 +1065,41 @@ fn recommend_reports_pending_operation_before_any_install_confirmation() -> Test
         let (out, recommendation) = f.run(&["recommend", "demo"])?;
         assert_code(&out, 0);
         assert_eq!(recommendation["data"]["known"][0]["id"], "fixture:demo");
+
+        let plain_recover = |args: &[&str]| {
+            let command = f.command();
+            std::process::Command::new(command.get_program())
+                .args(command.get_args().filter(|arg| *arg != "--json"))
+                .envs(
+                    command
+                        .get_envs()
+                        .filter_map(|(name, value)| value.map(|value| (name, value))),
+                )
+                .arg("recover")
+                .args(args)
+                .output()
+        };
+        let plain = plain_recover(&[])?;
+        assert_code(&plain, 0);
+        let text = String::from_utf8(plain.stdout)?;
+        assert!(text.contains("还有这些操作要检查"));
+        assert!(text.contains(pending["id"].as_str().ok_or("operation ID")?));
+        assert!(text.contains("demo · 结果还没确认"));
+        let id = pending["id"].as_str().ok_or("operation ID")?;
+        assert!(text.contains(&format!("mo recover {id} --dry-run")));
+        let (out, recovery) = f.run(&["recover"])?;
+        assert_code(&out, 0);
+        assert_eq!(recovery["data"]["pending"][0]["id"], pending["id"]);
+        let preview = plain_recover(&[pending["id"].as_str().ok_or("operation ID")?, "--dry-run"])?;
+        assert_code(&preview, 0);
+        let preview = String::from_utf8(preview.stdout)?;
+        assert!(preview.contains("核对预演（只读）"));
+        assert!(preview.contains("原目标 demo · fixture:demo"));
+        assert!(preview.contains("计划版本 1.0.0"));
+        assert!(preview.contains(f.file("state").to_str().ok_or("state directory")?));
+        assert_eq!(fs::read(f.file("state/active.json"))?, blocked_record);
+        assert_eq!(fs::read(f.file("state/receipts.json"))?, receipts);
+        assert_eq!(fs::read_to_string(f.file("calls"))?, "install\n");
     }
     Ok(())
 }
@@ -1182,13 +1372,17 @@ fn setup_reports_a_pending_fixed_slot_from_the_real_preferences_entry_point() ->
         "0",
     )?;
     assert_eq!(fs::read(&state)?, active_before);
-    let saved = serde_json::from_slice::<serde_json::Value>(&fs::read(&profile_file)?)?;
+    let setup_bytes = fs::read(&profile_file)?;
+    let saved = serde_json::from_slice::<serde_json::Value>(&setup_bytes)?;
     assert_eq!(saved["enabled"], false);
     assert_eq!(saved["account"], first["account"]);
-    let (out, blocked) = f.run(&["app", "refresh", "demo"])?;
-    assert_code(&out, 3);
-    assert_eq!(blocked["error"]["code"], "recovery_required");
-    assert_eq!(fs::read(&state)?, active_before);
+    let (out, refreshed) = f.run(&["app", "refresh", "demo"])?;
+    assert_code(&out, 0);
+    assert_eq!(refreshed["data"]["results"][0]["status"], "updated");
+    let settled = f.read_json("state/active.json")?;
+    assert_eq!(settled["id"], active["id"]);
+    assert_eq!(settled["phase"], "succeeded");
+    assert_eq!(fs::read(&profile_file)?, setup_bytes);
     assert!(!pending_file.exists());
     Ok(())
 }
@@ -1563,9 +1757,11 @@ fn timeout_stays_unknown_then_recovers_using_frozen_recipe() -> TestResult {
     assert_code(&out, 3);
     assert_eq!(v["data"]["phase"], "unknown");
     assert_eq!(fs::read_to_string(f.file("calls"))?, "install\n");
-    let (out, v) = f.run(&["app", "refresh", "demo"])?;
-    assert_code(&out, 3);
-    assert_eq!(v["error"]["code"], "recovery_required");
+    let active_before = fs::read(f.file("state/active.json"))?;
+    let (out, v) = f.run(&["app", "refresh", "demo", "--dry-run"])?;
+    assert_code(&out, 0);
+    assert_eq!(v["data"]["mode"], "dry-run");
+    assert_eq!(fs::read(f.file("state/active.json"))?, active_before);
     let journal = f.read_json("state/active.json")?;
     let id = journal["id"].as_str().ok_or("id")?;
     fs::remove_file(&f.catalog)?;
@@ -1573,6 +1769,173 @@ fn timeout_stays_unknown_then_recovers_using_frozen_recipe() -> TestResult {
     assert_code(&out, 0);
     assert_eq!(v["data"]["phase"], "succeeded");
     assert_eq!(fs::read_to_string(f.file("calls"))?, "install\n");
+    Ok(())
+}
+
+#[test]
+fn auto_recovery_settles_only_before_writes_and_never_repeats_the_same_install() -> TestResult {
+    let f = Fixture::new()?;
+    let install = ["app", "install", "demo", "--version", "1.0.0"];
+    let (out, data) = f.run(&install)?;
+    assert_code(&out, 0);
+    let mut original = data["data"].clone();
+    original["phase"] = json!("unknown");
+    let active = f.file("state/active.json");
+    write_json(&active, &original)?;
+    let before = fs::read(&active)?;
+    assert_code(&f.run(&["history"])?.0, 0);
+    assert_code(&f.run(&["app", "refresh", "demo", "--dry-run"])?.0, 0);
+    assert_eq!(fs::read(&active)?, before);
+
+    let settings = f.file("settings");
+    let other_settings = f.file("other-settings");
+    fs::create_dir_all(other_settings.join("manifests"))?;
+    let command = f.command();
+    let other_scope = || {
+        let mut other = std::process::Command::new(command.get_program());
+        other.args(command.get_args().map(|arg| {
+            if arg == settings.as_os_str() {
+                other_settings.as_os_str()
+            } else {
+                arg
+            }
+        }));
+        other.envs(
+            command
+                .get_envs()
+                .filter_map(|(name, value)| value.map(|value| (name, value))),
+        );
+        other
+    };
+    let output = other_scope().args(install).output()?;
+    assert_code(&output, 3);
+    let blocked: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(blocked["error"]["code"], "recovery_required");
+    let message = blocked["error"]["message"]
+        .as_str()
+        .ok_or("error message")?;
+    assert!(message.contains("上一次的目录选项"));
+    assert!(!message.contains(original["id"].as_str().ok_or("operation ID")?));
+    assert_eq!(fs::read(&active)?, before);
+
+    let id = original["id"].as_str().ok_or("operation ID")?;
+    let history = f.file(&format!("state/operations/{id}.json"));
+    let history_before = fs::read(&history)?;
+    for extra in [&[][..], &["--mark-failed", "--yes"][..]] {
+        let output = other_scope().args(["recover", id]).args(extra).output()?;
+        assert_code(&output, 3);
+        let blocked: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+        assert_eq!(blocked["error"]["code"], "recovery_scope_changed");
+        assert_eq!(fs::read(&active)?, before);
+        assert_eq!(fs::read(&history)?, history_before);
+    }
+
+    let (out, blocked) = f.run(&["agent", "resume", "OP-unrelated", "--yes"])?;
+    assert_code(&out, 3);
+    assert_eq!(blocked["error"]["code"], "recovery_required");
+    assert_eq!(fs::read(&active)?, before);
+
+    let (out, deferred) = f.run(&["app", "uninstall", "unselected"])?;
+    assert_code(&out, 3);
+    assert_eq!(deferred["error"]["code"], "confirmation_required");
+    assert_eq!(fs::read(&active)?, before);
+    assert_eq!(fs::read(&history)?, history_before);
+
+    let (out, picker) = f.run(&["app", "adopt"])?;
+    assert_code(&out, 3);
+    assert_eq!(picker["error"]["code"], "adopt_target_required");
+    assert_eq!(fs::read(&active)?, before);
+
+    let (out, checked) = f.run(&install)?;
+    assert_code(&out, 0);
+    assert_eq!(checked["data"]["id"], original["id"]);
+    assert_eq!(checked["data"]["phase"], "succeeded");
+    assert_eq!(fs::read_to_string(f.file("calls"))?, "install\n");
+
+    write_json(&active, &original)?;
+    let (out, changed_version) = f.run(&["app", "install", "demo", "--version", "2.0.0"])?;
+    assert_code(&out, 3);
+    assert_eq!(changed_version["error"]["code"], "already_installed");
+    assert_eq!(f.read_json("state/active.json")?["phase"], "succeeded");
+    assert_eq!(fs::read_to_string(f.file("calls"))?, "install\n");
+
+    write_json(&active, &original)?;
+    let (out, refreshed) = f.run(&["app", "refresh", "demo"])?;
+    assert_code(&out, 0);
+    assert_eq!(refreshed["data"]["results"][0]["version"], "2.0.0");
+    let settled = f.read_json("state/active.json")?;
+    assert_eq!(settled["id"], original["id"]);
+    assert_eq!(settled["phase"], "succeeded");
+    assert_eq!(fs::read_to_string(f.file("calls"))?, "install\n");
+
+    write_json(&active, &original)?;
+    let mut catalog = f.read_json("catalog.json")?;
+    let mut duplicate = catalog["packages"][0].clone();
+    duplicate["id"] = json!("fixture:another-demo");
+    catalog["packages"]
+        .as_array_mut()
+        .ok_or("packages")?
+        .push(duplicate);
+    write_json(&f.catalog, &catalog)?;
+    let (out, ambiguous) = f.run(&install)?;
+    assert_code(&out, 3);
+    assert_eq!(ambiguous["error"]["code"], "operation_checked");
+    assert_eq!(f.read_json("state/active.json")?["phase"], "succeeded");
+    assert_eq!(fs::read_to_string(f.file("calls"))?, "install\n");
+    Ok(())
+}
+
+#[test]
+fn uninstall_retry_uses_the_verified_original_even_when_the_recipe_was_removed() -> TestResult {
+    let f = Fixture::new()?;
+    assert_code(
+        &f.run(&["app", "install", "demo", "--version", "1.0.0"])?.0,
+        0,
+    );
+    let uninstall = ["app", "uninstall", "demo", "--yes"];
+    let (out, first) = f.run(&uninstall)?;
+    assert_code(&out, 0);
+    let mut pending = first["data"].clone();
+    pending["phase"] = json!("unknown");
+    write_json(&f.file("state/active.json"), &pending)?;
+    write_json(&f.catalog, &json!({"schema_version":1,"packages":[]}))?;
+
+    let (out, checked) = f.run(&uninstall)?;
+    assert_code(&out, 0);
+    assert_eq!(checked["data"]["id"], pending["id"]);
+    assert_eq!(checked["data"]["phase"], "succeeded");
+    assert!(!f.file("version").exists());
+    assert_eq!(fs::read_to_string(f.file("calls"))?, "install\nuninstall\n");
+    Ok(())
+}
+
+#[test]
+fn native_installer_progress_precedes_completion_and_json_is_clean() -> TestResult {
+    for scenario in ["native-progress", "native-progress-json"] {
+        let f = Fixture::new()?;
+        let release = f.home.join("release-progress");
+        f.script("demo", r#"
+case "$1" in
+query)
+  if [ -f "$2" ]; then printf '{"status":"present","version":"%s"}\n' "$(/bin/cat "$2")"; else printf '{"status":"missing"}\n'; fi ;;
+install)
+  printf 'fixture stdout progress\n\344'
+  printf 'fixture stderr progress\n' >&2
+  /usr/bin/touch "$MACOPS_TEST_HOME/ready-progress"
+  while [ ! -f "$MACOPS_TEST_HOME/continue-progress" ]; do /bin/sleep 0.05; done
+  printf '\270\255\033\007 split text\n'
+  while [ ! -f "$MACOPS_TEST_HOME/release-progress" ]; do /bin/sleep 0.05; done
+  printf '%s' "$4" > "$2"
+  printf 'install\n' >> "$3" ;;
+*) exit 9 ;;
+esac"#)?;
+        let mut args = vec!["app", "install", "demo", "--version", "1.0.0"];
+        if scenario == "native-progress-json" {
+            args.insert(0, "--json");
+        }
+        chezmoi_native::run_browser_pty(&f, &args, scenario, &release, "100", "0")?;
+        assert_eq!(fs::read_to_string(f.file("calls"))?, "install\n");
+    }
     Ok(())
 }
 
@@ -4916,7 +5279,15 @@ fn npm_binding_recovers_only_exact_old_or_new_receipts() -> TestResult {
         assert_code(&f.run(&["--dry-run", "recover", &id])?.0, 0);
         assert_eq!(fs::read(&active)?, active_before);
         assert_eq!(fs::read(&history)?, history_before);
-        let (out, recovered) = f.run(&["recover", &id, "--resolve-failed", "--yes"])?;
+        for flag in ["--mark-failed", "--resolve-failed"] {
+            let (out, rejected) = f.run(&["recover", &id, flag, "--yes"])?;
+            assert_code(&out, 3);
+            assert_eq!(rejected["error"]["code"], "mark_failed_unsupported");
+            assert_eq!(fs::read(&active)?, active_before);
+            assert_eq!(fs::read(&history)?, history_before);
+            assert_eq!(fs::read(&receipt).ok(), before);
+        }
+        let (out, recovered) = f.run(&["recover", &id])?;
         if let Some(phase) = phase {
             assert_code(&out, if phase == "failed" { 3 } else { 0 });
             assert_eq!(recovered["data"]["phase"], phase, "{case}");
@@ -6064,6 +6435,16 @@ printf '%s %s\n' "$native_prefix" "$version" >> "$MACOPS_TEST_HOME/replay-calls"
     let (out, unchanged) = f.run(&["manifest", "replay", path, id, "--yes"])?;
     assert_code(&out, 0);
     assert_eq!(unchanged["data"]["status"], "unchanged");
+    assert_eq!(unchanged["data"]["persistentWrites"], false);
+    assert_eq!(fs::read(&calls)?, initial);
+
+    let mut pending = installed["data"].clone();
+    pending["phase"] = json!("unknown");
+    write_json(&f.file("state/active.json"), &pending)?;
+    let (out, retried) = f.run(&["manifest", "replay", path, id, "--yes"])?;
+    assert_code(&out, 0);
+    assert_eq!(retried["data"]["phase"], "succeeded");
+    assert_eq!(retried["data"]["id"], installed["data"]["id"]);
     assert_eq!(fs::read(&calls)?, initial);
 
     let (out, export) = f.run(&["manifest", "export"])?;
@@ -6124,6 +6505,12 @@ fn manifest_replay_refuses_pending_scope_and_withdrawn_recipe_even_for_a_known_v
     let (out, data) = f.run(&args)?;
     assert_code(&out, 3);
     assert_eq!(data["error"]["code"], "operation_recovery_required");
+    pending["phase"] = json!("prepared");
+    write_json(&active, &pending)?;
+    let (out, data) = f.run(&args)?;
+    assert_code(&out, 0);
+    assert_eq!(data["data"]["status"], "unchanged");
+    assert_eq!(data["data"]["persistentWrites"], true);
     fs::write(&active, &exact)?;
 
     intent["entries"][0]["version"] = json!("2.0.0");
@@ -6368,8 +6755,7 @@ fn recommendation_matches_a_public_install_channel_to_a_registered_native_recipe
     Ok(())
 }
 
-#[test]
-fn recommend_confirms_one_frozen_npm_install_and_registers_it() -> TestResult {
+fn recommended_npm_fixture() -> Result<Fixture, Box<dyn std::error::Error>> {
     let f = Fixture::new()?;
     let prefix = f.home.join("npm-prefix");
     write_authorized_npm_catalog(&f, &prefix, true, true)?;
@@ -6384,12 +6770,29 @@ install)
  spec=
  for arg; do spec=$arg; done
  [ "$4" = "$MACOPS_TEST_HOME/npm-prefix" ] && [ "$spec" = '@scope/demo@1.2.3' ]
+ printf '%s\n' "$spec" >> "$MACOPS_TEST_HOME/installed"
+ [ ! -e "$MACOPS_TEST_HOME/unverified-install" ] || exit 0
  /bin/mkdir -p "$4/lib/node_modules/@scope/demo"
- printf '{"name":"@scope/demo","version":"1.2.3"}' > "$4/lib/node_modules/@scope/demo/package.json"
- printf '%s\n' "$spec" >> "$MACOPS_TEST_HOME/installed" ;;
+ printf '{"name":"@scope/demo","version":"1.2.3"}' > "$4/lib/node_modules/@scope/demo/package.json" ;;
 *) exit 8 ;;
 esac"#,
     )?;
+    Ok(f)
+}
+
+#[test]
+fn recommend_confirms_one_frozen_npm_install_and_registers_it() -> TestResult {
+    let f = recommended_npm_fixture()?;
+    chezmoi_native::run_browser_pty(
+        &f,
+        &["recommend", "scoped-demo"],
+        "recommend-picker-cancel",
+        &f.home,
+        "100",
+        "0",
+    )?;
+    assert!(!f.file("state").exists());
+    assert!(!f.home.join("installed").exists());
     chezmoi_native::run_browser_pty(
         &f,
         &["recommend", "scoped-demo"],
@@ -6413,6 +6816,31 @@ esac"#,
         "@scope/demo@1.2.3\n"
     );
     assert!(f.read_json("state/receipts.json")?["installations"]["npm:scoped-demo"].is_object());
+    Ok(())
+}
+
+#[test]
+fn recommendation_reports_how_to_recover_an_unverified_original_install() -> TestResult {
+    let f = recommended_npm_fixture()?;
+    fs::write(
+        f.home.join("unverified-install"),
+        b"verify result instead of retrying",
+    )?;
+    chezmoi_native::run_browser_pty(
+        &f,
+        &["recommend", "scoped-demo"],
+        "recommend-install-unknown",
+        &f.home,
+        "100",
+        "3",
+    )?;
+    let active = f.read_json("state/active.json")?;
+    assert_eq!(active["phase"], "unknown");
+    assert_eq!(
+        fs::read_to_string(f.home.join("installed"))?,
+        "@scope/demo@1.2.3\n"
+    );
+    assert!(!f.file("state/receipts.json").exists());
     Ok(())
 }
 
@@ -6865,6 +7293,7 @@ ls) if [ -f "$HOME/selected-version" ]; then
     printf '[{"version":"%s","active":true}]' "$(/bin/cat "$HOME/selected-version")";
     else printf '[]'; fi;;
 use) [ "$2 $3 $4" = '--global --pin demo@1.2.3' ]
+     printf 'use\n' >> "$HOME/uses"
      /bin/mkdir -p "$MISE_DATA_DIR" "$MISE_CONFIG_DIR"
      printf 1.2.3 > "$HOME/selected-version";;
 *) exit 79;;
@@ -6887,6 +7316,33 @@ esac"#,
     let namespace = &receipt["installations"]["fixture:demo"]["query"]["namespace"];
     assert!(namespace["data_identity"].is_object(), "{namespace}");
     assert!(namespace["config_identity"].is_object(), "{namespace}");
+    let active = f.file("state/active.json");
+    let mut pending = f.read_json("state/active.json")?;
+    pending["phase"] = json!("unknown");
+    for (scenario, code) in [
+        ("recommend-cancel-version", "0"),
+        ("recommend-retry-version", "0"),
+        ("recommend-other-version", "3"),
+    ] {
+        write_json(&active, &pending)?;
+        let before = fs::read(&active)?;
+        chezmoi_native::run_browser_pty(
+            &f,
+            &["recommend", "demo"],
+            scenario,
+            &active,
+            "104",
+            code,
+        )?;
+        if scenario == "recommend-cancel-version" {
+            assert_eq!(fs::read(&active)?, before);
+        } else {
+            let settled = f.read_json("state/active.json")?;
+            assert_eq!(settled["phase"], "succeeded");
+            assert_eq!(settled["id"], pending["id"]);
+        }
+        assert_eq!(fs::read_to_string(f.home.join("uses"))?, "use\n");
+    }
     Ok(())
 }
 

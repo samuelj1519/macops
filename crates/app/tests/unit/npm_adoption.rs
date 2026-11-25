@@ -85,7 +85,7 @@ fn last_commit_check_fences_recipe_namespace_and_receipt_changes() -> TestResult
 
         let mut elsewhere = ctx.clone();
         elsewhere.state = home.join("invalid-state");
-        let unknown = recover(&elsewhere, &store, &mut journal)
+        let unknown = recover(&elsewhere, &store, &mut journal, false)
             .err()
             .ok_or("wrong state recovered")?;
         assert_eq!(unknown.code, "npm_binding_outcome_unknown");

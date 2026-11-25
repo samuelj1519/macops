@@ -1,14 +1,14 @@
 # 原生插件安装与维护
 
-## 独立档案安装
+## 单独配置安装
 
-使用 `mo skill market` 查看 Codex、Claude Code 和 Cursor 的市场。对支持的公开仓库，`mo recommend OWNER/REPO` 会展示绑定到固定提交的安装候选。Apple Silicon 上可通过已验证的 Codex 0.170.0 或 Claude Code 2.1.328 安装到独立档案。
+使用 `mo skill market` 查看 Codex、Claude Code 和 Cursor 的市场。对支持的公开仓库，`mo recommend OWNER/REPO` 会展示绑定到固定提交的安装候选。Apple Silicon 上可通过已验证的 Codex 0.170.0 或 Claude Code 2.1.328 安装到单独配置。
 
 1. 在终端选择安装候选，核对仓库、提交、插件和目标档案。
 2. 输入 `yes` 安装并启用插件，或输入 `disabled` 安装并停用插件。核验并登记成功后，档案会出现在 `mo agent`。
 3. 在档案详情按 `e` 设置 macops 下次启动时的启停偏好，按 `l` 在当前工作目录启动。直接启动原生程序时使用档案自身的设置。
 
-如果结果等待核对，运行 `mo recover OP-ID` 查看原操作。Claude Code 原操作已核验，且下一阶段尚未启动时，可以按提示使用 `mo agent resume OP-ID` 确认续装。
+如果结果等待核对，运行 `mo recover OP-ID` 查看原操作。Codex 或 Claude Code 的原阶段已核验且下一阶段尚未启动时，可以按提示使用 `mo agent resume OP-ID` 确认续装。
 
 Cursor 的账户市场交给原生 `/plugin` 界面安装。使用 `mo skill --project /absolute/path` 查看指定项目中的 Cursor 插件声明。
 

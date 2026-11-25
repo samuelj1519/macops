@@ -279,8 +279,11 @@ pub fn receipts(ctx: &Context) -> Result<Receipts> {
             installations: BTreeMap::new(),
         });
     }
-    let receipts: Receipts = paths::regular_json(&path)?;
+    let mut receipts: Receipts = paths::regular_json(&path)?;
     crate::policy::state::receipt_schema(&receipts)?;
+    receipts
+        .installations
+        .retain(|_, receipt| !crate::resource_agents::receipt_is_archived(ctx, receipt));
     Ok(receipts)
 }
 

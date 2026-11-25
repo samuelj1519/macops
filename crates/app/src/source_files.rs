@@ -95,6 +95,15 @@ pub fn position(pair: &Pair) -> Result<Position> {
     ))
 }
 pub fn stage(witness: &Witness, raw: &[u8], mode: u32) -> Result<Pair> {
+    stage_registered(witness, raw, mode, |_| Ok(()))
+}
+
+pub(crate) fn stage_registered(
+    witness: &Witness,
+    raw: &[u8],
+    mode: u32,
+    register: impl FnOnce(&Slot) -> Result<()>,
+) -> Result<Pair> {
     if raw.len() > 16 * 1024 * 1024 || mode > 0o777 || witness.namespace.remaining.len() != 1 {
         return Err(invalid());
     }
@@ -113,13 +122,14 @@ pub fn stage(witness: &Witness, raw: &[u8], mode: u32) -> Result<Pair> {
         .prefix(".macops-source-ledger-")
         .permissions(std::os::unix::fs::PermissionsExt::from_mode(0o700))
         .tempdir_in(&parent.path)?;
-    let private = Directory::open(&temporary.keep())?;
+    let private = Directory::open(temporary.path())?;
     parent.file().sync_all()?;
     parent.verify()?;
     let retained = Slot {
         parent: files::binding(&private, &private.path)?,
         name: "ledger".into(),
     };
+    register(&retained)?;
     let after = write(&private, &retained.name, raw, mode)?;
     let pair = Pair {
         live,
@@ -131,6 +141,7 @@ pub fn stage(witness: &Witness, raw: &[u8], mode: u32) -> Result<Pair> {
     if position(&pair)? != Position::Before {
         return Err(invalid());
     }
+    let _ = temporary.keep();
     Ok(pair)
 }
 fn write(parent: &Directory, name: &str, raw: &[u8], mode: u32) -> Result<Object> {

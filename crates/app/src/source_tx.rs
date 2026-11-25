@@ -630,7 +630,7 @@ fn execute(store: &Store, batch: &mut Batch, journal: &mut Journal) -> Result<Va
         store.save(journal)?;
         return Err(Error::attention(
             "source_recovery_required",
-            format!("来源批次 {} 未收口；先 recover", journal.id),
+            "来源更新的结果还没确认。运行 mo recover 查看记录。",
         ));
     }
     Ok(result(journal, &batch.manifest))

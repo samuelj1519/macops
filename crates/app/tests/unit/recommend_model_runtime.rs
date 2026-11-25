@@ -718,3 +718,35 @@ fn configured_annotation_stops_if_silent_credentials_are_denied_or_corrupt() -> 
     assert!(!marker.exists());
     Ok(())
 }
+
+#[test]
+fn credential_read_failures_reach_the_recommendation_result() {
+    for (error, status) in [
+        (ReadFailure::Missing, "keychain-missing"),
+        (
+            ReadFailure::Authorization,
+            "keychain-authorization-required",
+        ),
+        (ReadFailure::Keychain, "keychain-unavailable"),
+        (ReadFailure::Deadline, "deadline"),
+    ] {
+        let output = suggestion(Err(keychain_failure(error)));
+        assert_eq!(output["status"], status);
+        assert_eq!(output["candidates"], json!([]));
+    }
+}
+
+#[test]
+fn github_rate_limit_reports_the_public_source_failure_without_exposing_the_body() {
+    let url = "https://api.github.com/repos/fixture/public";
+    let limited = public_source_error(
+        url,
+        b"{\"message\":\"API rate limit exceeded for fixture\"}\n403",
+    );
+    assert_eq!(limited.code, "recommend_github_rate_limited");
+    assert!(!limited.message.contains("fixture"));
+    let missing = public_source_error(url, b"{}\n404");
+    assert_eq!(missing.code, "recommend_github_not_found");
+    let denied = public_source_error(url, b"{\"message\":\"Forbidden\"}\n403");
+    assert_eq!(denied.code, "recommend_source_unavailable");
+}

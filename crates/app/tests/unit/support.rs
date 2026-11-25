@@ -3,6 +3,7 @@ use crate::domain::*;
 use std::{collections::BTreeMap, path::PathBuf};
 
 pub type TestResult = Result<(), Box<dyn std::error::Error>>;
+pub(crate) struct PluginTargetFixture;
 pub fn package() -> Package {
     Package {
         id: "fixture:demo".into(),

@@ -61,14 +61,37 @@ def type_key(key):
 
 
 try:
-    if scenario == "migration-blocked":
+    if scenario == "native-progress":
+        expect("fixture stdout progress")
+        expect("fixture stderr progress")
+        assert process.poll() is None
+        Path(target).with_name("continue-progress").touch()
+        expect("中\\u{1b}\\u{7} split text")
+        Path(target).touch()
+        expect("已完成")
+    elif scenario == "native-progress-json":
+        ready = Path(target).with_name("ready-progress")
+        deadline = time.monotonic() + 8
+        while not ready.exists() and time.monotonic() < deadline:
+            if select.select([reader], [], [], 0.1)[0]:
+                receive()
+        assert ready.exists()
+        Path(target).with_name("continue-progress").touch()
+        Path(target).touch()
+        expect('"phase": "succeeded"')
+        assert b"fixture stdout progress" not in capture
+        assert b"fixture stderr progress" not in capture
+    elif scenario == "migration-blocked":
         expect("migration_recovery_required")
         assert b"\x1b[?1049h" not in capture
     elif scenario == "setup-cancel":
         expect("推荐模型")
         expect("自定义 OpenAI 兼容服务")
+        expect("当前模式 本地分析（尚未配置远端）")
+        expect("选择")
+        assert "测试已保存密钥".encode() not in capture
         offset = type_key(b"\r")
-        expect("cancelled", offset)
+        expect("已取消", offset)
     elif scenario == "setup-hide-key":
         expect("推荐模型")
         type_key(b"2\r")
@@ -81,7 +104,7 @@ try:
         expect("发送最小测试请求", offset)
         assert b"fixture-model-key" not in capture[offset:]
         offset = type_key(b"n\r")
-        expect("cancelled", offset)
+        expect("已取消", offset)
     elif scenario in ("setup-key-escape", "setup-key-interrupt", "setup-new-isolated"):
         expect("推荐模型")
         type_key(b"1\r")
@@ -95,7 +118,7 @@ try:
         else:
             end = b"\x1b" if scenario == "setup-key-escape" else b"\x03"
             offset = type_key(b"fixture-model-key" + end)
-            expect("cancelled", offset)
+            expect("已取消", offset)
             assert b"fixture-model-key" not in capture[offset:]
     elif scenario == "setup-pause-saved":
         expect("当前模式")
@@ -116,6 +139,7 @@ try:
         expect("local", offset)
     elif scenario == "setup-saved-isolated":
         expect("测试已保存密钥")
+        expect("更改模型")
         type_key(b"t\r")
         expect("发送最小测试请求")
         offset = type_key(b"y\r")
@@ -154,15 +178,34 @@ try:
         assert b"API key" not in capture[offset:]
     elif scenario == "recommend-advice-only":
         expect("当前没有可执行的已核验安装计划")
-    elif scenario in ("recommend-install", "recommend-cancel", "recommend-mise"):
+    elif scenario == "recommend-picker-cancel":
         expect("选择安装候选")
+        offset = type_key(b"99\r")
+        expect("请输入列表中的编号", offset)
+        type_key(b"\r")
+    elif scenario in ("recommend-install", "recommend-cancel", "recommend-mise", "recommend-install-unknown"):
+        expect("选择安装候选")
+        if scenario == "recommend-install":
+            for invalid in (b"0\r", b"99\r", b"typo\r"):
+                offset = type_key(invalid)
+                expect("请输入列表中的编号", offset)
+            assert "输入精确版本".encode() not in capture
         type_key(b"1\r")
         expect("输入精确版本")
         type_key(b"1.2.3\r")
-        expect("安装并纳管")
+        expect("安装并纳入管理")
         expect("用户级配置" if scenario == "recommend-mise" else "安装范围")
         offset = type_key(b"no\r" if scenario == "recommend-cancel" else b"yes\r")
-        expect("cancelled" if scenario == "recommend-cancel" else "succeeded", offset)
+        outcome = {
+            "recommend-cancel": "已取消",
+            "recommend-install-unknown": "结果 还没确认",
+        }.get(scenario, "已完成")
+        expect(outcome, offset)
+        if scenario == "recommend-install-unknown":
+            state = Path(command[command.index("--state-dir") + 1])
+            operation = json.loads((state / "active.json").read_bytes())["id"]
+            expect("运行 mo recover 可查看记录", offset)
+            assert operation.encode() not in capture
     elif scenario == "adopt-picker-confirmation-cancel":
         expect("Enter 选择")
         expect("picker-left")
@@ -171,7 +214,7 @@ try:
         expect("输入 yes", offset)
         expect(str(target), offset)
         offset = type_key(b"no\r")
-        expect("cancelled", offset)
+        expect("已取消", offset)
     elif scenario in ("adopt-picker-cancel", "adopt-picker-select"):
         expect("Enter 选择")
         expect("npm ·")
@@ -183,13 +226,13 @@ try:
         type_key(Path(target).name.encode() + b"\r")
         if scenario == "adopt-picker-cancel":
             offset = type_key(b"\x1b")
-            expect("cancelled", offset)
+            expect("已取消", offset)
         else:
             offset = type_key(b"\r")
             expect("输入 yes", offset)
             expect(str(target), offset)
             offset = type_key(b"yes\r")
-            expect("succeeded", offset)
+            expect("已完成", offset)
     elif scenario == "market-json":
         expect('"kind": "plugin-marketplaces"')
         limit = time.monotonic() + 8
@@ -233,7 +276,7 @@ try:
         expect("Tab 切换")
         type_key(b"/" + target.encode() + b"\r")
         offset = type_key(b"\r")
-        expect("a 检查纳管", offset)
+        expect("a 检查管理资格", offset)
         offset = type_key(b"a")
         expect("config_scope_unsupported", offset)
         type_key(b"q")
@@ -242,18 +285,18 @@ try:
         offset = type_key(b"/" + target.encode() + b"\r")
         expect(target, offset)
         offset = type_key(b"\r")
-        expect("a 检查纳管", offset)
+        expect("a 检查管理资格", offset)
         trigger, action = {
             "inventory-remove": (b"x", "卸载"),
             "inventory-upgrade-cancel": (b"u", "升级"),
             "inventory-upgrade-migration": (b"u", "升级"),
-        }.get(scenario, (b"a", "纳管"))
+        }.get(scenario, (b"a", "纳入管理"))
         offset = type_key(trigger)
         expect("Enter 确认" + action, offset)
         expect("当前版本 1.2.3", offset)
         if scenario in ("inventory-adopt", "inventory-remove"):
             offset = type_key(b"\r")
-            expect(action + "结果 succeeded", offset)
+            expect(action + "结果 已完成", offset)
         elif scenario == "inventory-upgrade-migration":
             state = Path(command[command.index("--state-dir") + 1])
             (state / "migration-active.json").write_text("interrupted migration")
@@ -261,20 +304,20 @@ try:
             expect("migration_recovery_required", offset)
         else:
             offset = type_key(b"\x1b")
-            expect("a 检查纳管", offset)
+            expect("a 检查管理资格", offset)
         type_key(b"q")
     elif scenario in ("mise-adopt", "mise-upgrade-cancel", "mise-upgrade-conflict", "mise-upgrade", "mise-retire"):
         expect("软件")
         offset = type_key(b"/" + target.encode() + b"\r")
         expect(target, offset)
         offset = type_key(b"\r")
-        expect("a 检查纳管", offset)
+        expect("a 检查管理资格", offset)
         if scenario == "mise-retire":
             offset = type_key(b"x")
             expect("consumer_review_required", offset)
         else:
             adopt = scenario == "mise-adopt"
-            action = "纳管" if adopt else "升级"
+            action = "纳入管理" if adopt else "升级"
             offset = type_key(b"a" if adopt else b"u")
             expect("Enter 确认" + action, offset)
             expect("当前版本 1.2.3", offset)
@@ -284,7 +327,7 @@ try:
                 expect("安装并更新用户级配置中的版本", offset)
             if scenario == "mise-upgrade-cancel":
                 offset = type_key(b"\x1b")
-                expect("a 检查纳管", offset)
+                expect("a 检查管理资格", offset)
             elif scenario == "mise-upgrade-conflict":
                 catalog = Path(command[command.index("--catalog") + 1])
                 data = json.loads(catalog.read_text())
@@ -295,7 +338,7 @@ try:
                 expect("plan_stale", offset)
             else:
                 offset = type_key(b"\r")
-                expect(action + "结果 succeeded", offset)
+                expect(action + "结果 已完成", offset)
         type_key(b"q")
     elif scenario in ("mise-retirement-cancel", "mise-retirement-stale", "mise-retirement-confirm"):
         expect("软件")
@@ -320,7 +363,7 @@ try:
             expect("载荷或原生程序已改变", offset)
         else:
             offset = type_key(b"\r")
-            expect("卸载结果 succeeded", offset)
+            expect("卸载结果 已完成", offset)
         type_key(b"q")
     elif scenario == "unified-list":
         expect("Tab 切换")
@@ -352,18 +395,40 @@ try:
     elif scenario in ("recommend-already-blocked", "recommend-blocked-after-menu"):
         expect("安装建议 · demo")
         record = Path(target)
+        expect("选择安装候选")
         if scenario == "recommend-blocked-after-menu":
-            expect("选择安装候选")
             state = Path(command[command.index("--state-dir") + 1])
             (state / "active.json").write_bytes(record.read_bytes())
-            type_key(b"1\r")
+        type_key(b"1\r")
         operation = json.loads(record.read_bytes())["id"]
-        expect("暂不能安装")
-        expect("mo recover " + operation)
+        expect("1 demo")
+        expect("输入精确版本")
+        type_key(b"1.0.0\r")
+        expect("确认后只核对那次操作")
+        assert "执行此安装计划".encode() not in capture
+        type_key(b"yes\r")
+        expect("还没开始新操作")
+        expect("运行 mo recover 查看待检查的操作")
         text = capture.decode(errors="replace")
-        if scenario == "recommend-already-blocked":
-            assert "选择安装候选" not in text
-        assert "输入精确版本" not in text and "输入 yes" not in text
+        assert "执行此安装计划" not in text and operation not in text
+    elif scenario in ("recommend-cancel-version", "recommend-retry-version", "recommend-other-version"):
+        expect("选择安装候选")
+        type_key(b"1\r")
+        expect("输入精确版本")
+        if scenario == "recommend-cancel-version":
+            type_key(b"\r")
+        elif scenario == "recommend-retry-version":
+            operation = json.loads(Path(target).read_bytes())["id"]
+            type_key(b"1.2.3\r")
+            expect("结果 已完成")
+            assert operation.encode() not in capture
+        else:
+            type_key(b"2.0.0\r")
+            expect("确认后只核对那次操作")
+            assert "执行此安装计划".encode() not in capture
+            type_key(b"yes\r")
+            expect("already_installed")
+            assert "结果 已完成".encode() not in capture
     elif scenario in ("recommend-skill-cancel", "recommend-skill-stale"):
         expect("Skills CLI · Codex 用户级 · 共享技能目录")
         type_key(b"1\r")
@@ -486,9 +551,9 @@ try:
             book.write_text(json.dumps(changed))
         offset = type_key(b"n\r" if scenario == "skill-maintenance-cancel" else b"yes\r")
         result = {
-            "skill-maintenance-cancel": "cancelled",
+            "skill-maintenance-cancel": "已取消",
             "skill-maintenance-stale": "plan_stale",
-            "skill-maintenance-removed": "卸载结果 succeeded",
+            "skill-maintenance-removed": "卸载结果 已完成",
         }[scenario]
         expect(result, offset)
         type_key(b"q")
@@ -585,9 +650,13 @@ try:
             offset = type_key(b"s")
             expect("synthetic-source-content", offset)
         type_key(b"q")
-    if scenario not in ("market-json", "migration-blocked") and not scenario.startswith(("setup-", "recommend-")):
+    if scenario not in ("market-json", "migration-blocked") and not scenario.startswith(("setup-", "recommend-", "native-progress")):
         expect("\x1b[?1049l")
-    actual_exit = process.wait(timeout=8)
+    deadline = time.monotonic() + 8
+    while process.poll() is None and time.monotonic() < deadline:
+        if select.select([reader], [], [], 0.1)[0]:
+            receive()
+    actual_exit = process.wait(timeout=max(deadline - time.monotonic(), 0.1))
     assert actual_exit == int(exit_code), (scenario, actual_exit, exit_code)
     assert termios.tcgetattr(writer) == original, "terminal settings were not restored"
 finally:

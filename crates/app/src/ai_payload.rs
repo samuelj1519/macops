@@ -362,6 +362,37 @@ pub fn native_plugin_tree_digest(root: &Directory, skip: Option<&Path>) -> Resul
     Ok(format!("{:x}", hasher.finalize()))
 }
 
+pub(crate) fn native_plugin_publication_digest(root: &Directory) -> Result<String> {
+    let mut entries = BTreeMap::new();
+    walk(
+        root,
+        Path::new(""),
+        0,
+        &mut Budget::new(),
+        &mut entries,
+        None,
+    )?;
+    let owner = nix::unistd::geteuid().as_raw();
+    let mut verified = Vec::with_capacity(entries.len());
+    for (path, entry) in &entries {
+        let (facts, content) = match entry {
+            Entry::Directory(facts) => (facts, None),
+            Entry::File(facts, content) => (facts, Some(content)),
+            Entry::Link(..) => return Err(changed()),
+        };
+        if facts.uid != owner
+            || facts.identity.device != root.identity().device
+            || facts.mode > 0o777
+            || facts.mode & 0o022 != 0
+        {
+            return Err(changed());
+        }
+        verified.push((path, &facts.identity, facts.uid, facts.mode, content));
+    }
+    root.verify()?;
+    crate::domain::fingerprint(&verified)
+}
+
 #[cfg(test)]
 #[path = "../tests/unit/ai_payload.rs"]
 mod tests;

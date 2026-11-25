@@ -54,7 +54,7 @@ pub(super) fn check_scope(ctx: &Context) -> Result<bool> {
     let unsupported = || {
         Error::attention(
             "chezmoi_source_state_unsupported",
-            "配置纳管需要系统账户 HOME 和固定 .local/state/macops",
+            "将配置纳入管理需要系统账户 HOME 和固定 .local/state/macops",
         )
     };
     let uid = nix::unistd::geteuid();
@@ -739,19 +739,13 @@ fn invoke(
         .current_dir(stage)
         .stdin(Stdio::null())
         .process_group(0);
-    let captured = crate::process::capture_bytes_guarded_process_in(
+    let captured = crate::process::capture_owned_group_in(
         &mut command,
         Duration::from_secs(timeout),
         LIMIT,
         stage,
         || Ok(()),
     );
-    if captured.pid.is_some_and(crate::process::group_alive) {
-        return Err(Error::attention(
-            "chezmoi_source_native_unknown",
-            "隔离原生进程尚未收口",
-        ));
-    }
     let output = captured.result?;
     if output.uncertain || output.code != Some(0) {
         return Err(Error::attention(

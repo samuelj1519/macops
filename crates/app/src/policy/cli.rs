@@ -32,6 +32,24 @@ pub fn selected<'a>(
     )
 }
 
+pub(crate) enum Continuation {
+    Ready,
+    Unverified,
+}
+
+pub(crate) fn continuation(value: &Value) -> Option<Continuation> {
+    if value.get("journal").unwrap_or(value)["phase"] != "succeeded" {
+        return None;
+    }
+    value["continuationRequired"].as_bool().map(|ready| {
+        if ready {
+            Continuation::Ready
+        } else {
+            Continuation::Unverified
+        }
+    })
+}
+
 pub fn attention(command: &cli::Command, value: &Value) -> bool {
     if value.get("incomplete") == Some(&Value::Bool(true)) {
         return true;
@@ -50,7 +68,7 @@ pub fn attention(command: &cli::Command, value: &Value) -> bool {
             .get("observation")
             .and_then(|v| v.get("status"))
             .and_then(Value::as_str)
-            .is_some_and(|s| s != "present");
+            .is_some_and(|s| !matches!(s, "present" | "brew-installed"));
     }
     if matches!(
         command,
@@ -97,6 +115,9 @@ pub fn attention(command: &cli::Command, value: &Value) -> bool {
     if value.get("mode").and_then(Value::as_str) == Some("dry-run") {
         return false;
     }
+    if continuation(value).is_some() {
+        return true;
+    }
     if let Some(journal) = value.get("journal") {
         return attention(command, journal);
     }
@@ -126,15 +147,17 @@ fn rows_need_attention(rows: &Value) -> bool {
                     .and_then(|v| v.get("comparison"))
                     .and_then(Value::as_str)
                     .is_some_and(|s| s != "same")
-                || row
-                    .get("status")
-                    .and_then(Value::as_str)
-                    .is_some_and(|s| matches!(s, "unknown" | "missing" | "different" | "drift"))
+                || row.get("status").and_then(Value::as_str).is_some_and(|s| {
+                    matches!(
+                        s,
+                        "unknown" | "missing" | "brew-missing" | "different" | "drift"
+                    )
+                })
                 || row
                     .get("observation")
                     .and_then(|o| o.get("status"))
                     .and_then(Value::as_str)
-                    .is_some_and(|s| matches!(s, "unknown" | "missing"))
+                    .is_some_and(|s| matches!(s, "unknown" | "missing" | "brew-missing"))
         })
     })
 }

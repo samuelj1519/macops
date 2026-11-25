@@ -11,8 +11,8 @@ macops 是面向 macOS 的 Rust CLI。它统一对象、命令、目录查询和
 | 产品与策略 | `domain`、`resource`、`policy/*` | 定义安装实例、配方、观察、目录归属、投影和交易状态，核验外部数据形状 |
 | 发现和适配 | `inventory`、`resource_*`、`providers`、`brew`、`npm_local`、`uv_local`、`chezmoi_native` | 将原生信息映射为软件、Agent 档案、能力、配置对象，依据各来源的契约调用工具 |
 | 来源建议 | `recommend`、`recommend_upstream`、`recommend_model`、`recommend_setup` | 核对公开来源，展示安装候选，配置模型和钥匙串引用 |
-| 清单与纳管 | `manifest`、`npm_adoption`、`chezmoi_source` | 对照原始归属、作用域和摘要，导出或预演管理意图，并由既有适配器执行获准动作 |
-| 能力维护 | `native_skills`、`native_plugins`、`codex_install`、`claude_install`、`capability_tx` | 固定 Skills 安装配方，核对插件来源，管理独立档案、配置字段和触发策略 |
+| 清单与登记 | `manifest`、`npm_adoption`、`chezmoi_source` | 对照原始归属、作用域和摘要，导出或预演管理意图，并由既有适配器执行获准动作 |
+| 能力维护 | `native_skills`、`native_plugins`、`codex_install`、`claude_install`、`capability_tx` | 固定 Skills 安装配方，核对插件来源，管理单独配置、配置字段和触发策略 |
 | 执行和持久化 | `operations`、`native_runner`、`process`、`store`、`paths` | 冻结计划和运行证据，执行子进程，汇总核对状态，持锁更新操作记录与收据 |
 | 迁移 | `migration`、`migration_tx`、`migration_writers`、`governance` | 核对旧写入方和目标目录，发布迁移账本，按原证据恢复中断的迁移 |
 
@@ -44,6 +44,8 @@ macops 是面向 macOS 的 Rust CLI。它统一对象、命令、目录查询和
 
 管理清单导出正式声明、原生能力登记、可验证的配置缓存和安装收据。输入通过型别、大小、摘要和作用域核验。预演分别显示本地证据差异和原生重放资格。重放的已验范围为已登记的同作用域单个 npm 项，要求正式配方与明确版本。已满足的项在锁内以真实观察核验；其他项委托原生安装或升级流程。
 
+给 Codex 或 Claude Code 的已有配置安装插件时，推荐界面负责显示位置和收集确认，`profile_install` 负责核对原操作、登记和逐个安装。客户端适配器检查原生结果，`plugin_target` 核验写入内容并提交到选定配置。适配器通过安装阶段通知报告进度，终端统一显示。
+
 ## 操作与恢复
 
 1. 解析唯一目标、权限和作用域，构建可读的计划。预演使用已有证据，遇到未解析目标则明确报告。
@@ -52,9 +54,9 @@ macops 是面向 macOS 的 Rust CLI。它统一对象、命令、目录查询和
 4. 等待原进程及要求的作用域结束，检查结果及后置状态。只有成功证据齐备才提交收据与终态。原生操作可能部分完成，超时、错误或缺少原证据会保留阻断。
 5. 恢复使用原操作 ID 与冻结的事实，先核对原 writer、原退出和后置证据。恢复沿用原范围与调用。外部状态不能证明时保留 `Unknown`，由对应渠道完成前向修复。
 
-无参数的 `mo recover` 和终端历史从 `operations` 取得核对状态。可读取的活动记录覆盖历史中的同 ID 副本。活动记录损坏时，保留只读历史供诊断，暂停核对。已成功的原生阶段仍可能待登记，或需要确认是否继续下一个阶段。Claude 后续证据不完整时，列表仍可带 `incomplete` 返回候选，终端历史显示待查并暂停交互确认。确认时重查原记录及后续证据。需要继续安装时，终端显示单独的 `mo agent resume ID` 命令。
+无参数的 `mo recover` 和终端历史从 `operations` 取得核对状态。可读取的活动记录覆盖历史中的同 ID 副本。活动记录损坏时，保留只读历史供诊断，暂停核对。已成功的原生阶段仍可能待登记，或需要确认是否继续下一个阶段。Claude 后续证据不完整时，列表仍可带 `incomplete` 返回候选，终端历史显示待查并暂停交互确认。确认时重查原记录及后续证据。Codex 或 Claude Code 仍需继续安装时，终端显示 `mo agent resume ID`。阶段收口使用退出码 3 表示整个安装仍需处理。
 
-配置源纳管和停止管理先在私有目录验证原生单文件操作，再用已核对的目录身份发布源槽位。实际配置文件保持原样。缓存、阶段文件与状态日志分别提供中断核验依据。
+将配置文件纳入管理或停止管理时，先在私有目录验证原生单文件操作，再用已核对的目录身份发布管理源文件。实际配置文件保持原样。缓存、阶段文件与状态日志分别提供中断核验依据。
 
 ## 目录与可回收数据
 
@@ -64,6 +66,7 @@ macops 的配置、数据、状态和缓存分别解析 XDG 设置与显式目�
 
 ## 参考
 
+- [命令执行边界与复查记录](architecture-review.md)
 - [使用入口](../README.md)
 - [验证与门禁](verification.md)
 - [状态模型](models/README.md)

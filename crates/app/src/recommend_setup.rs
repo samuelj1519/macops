@@ -41,13 +41,24 @@ fn invalid() -> Error {
 }
 
 fn keychain_error() -> Error {
-    Error::attention("model_keychain_unavailable", "未能完成钥匙串操作")
+    Error::attention(
+        "model_keychain_unavailable",
+        "电脑上的钥匙串没能完成这一步。",
+    )
 }
 
 fn read_error(error: ReadFailure) -> Error {
     match error {
-        ReadFailure::Deadline => Error::attention("model_keychain_timeout", "钥匙串读取超时"),
+        ReadFailure::Deadline => Error::attention("model_keychain_timeout", "等钥匙串回应太久了。"),
         ReadFailure::Keychain => keychain_error(),
+        ReadFailure::Missing => Error::attention(
+            "model_keychain_item_missing",
+            "钥匙串找不到已保存的密钥。请重新设置或绑定密钥。",
+        ),
+        ReadFailure::Authorization => Error::attention(
+            "model_keychain_authorization_required",
+            "请解锁钥匙串，并在 macOS 提示中允许访问此密钥。",
+        ),
     }
 }
 
@@ -435,7 +446,7 @@ fn recover_pending(
 fn single_pending() -> Error {
     Error::attention(
         "model_keychain_update_pending",
-        "钥匙串更新尚待核对。在 mo recommend --setup 中选择 c 继续。",
+        "上一次保存密钥的结果还没确认。运行 mo recommend --setup，选择 c 检查那次的结果。",
     )
 }
 
@@ -790,6 +801,7 @@ fn wizard(
     read_key: impl FnOnce() -> Result<String>,
     test_connection: impl FnOnce(&Profile, &str, Instant) -> Result<()>,
 ) -> Result<Value> {
+    eprintln!("推荐模型");
     if let Some(profile) = &current {
         eprintln!(
             "当前模式 {} · {} · {}",
@@ -797,9 +809,20 @@ fn wizard(
             profile.endpoint,
             profile.model,
         );
+    } else {
+        eprintln!("当前模式 本地分析（尚未配置远端）");
     }
     eprintln!(
-        "推荐模型\n  1 DeepSeek（新建或换钥）\n  2 自定义 OpenAI 兼容服务（新建或换钥）\n  3 本地分析\n  t 测试已保存密钥  r 重新启用  m 更改模型\n  b 绑定已有钥匙串条目  c 核对待完成的钥匙串操作\n  k 保留旧条目并结束待处理清理\n  Enter 取消"
+        "  1 DeepSeek（设置或换钥）\n  2 自定义 OpenAI 兼容服务（设置或换钥）\n  3 使用本地分析"
+    );
+    if let Some(profile) = &current {
+        eprintln!("  t 测试已保存密钥  m 更改模型");
+        if !profile.enabled {
+            eprintln!("  r 重新启用已保存的模型");
+        }
+    }
+    eprintln!(
+        "钥匙串维护\n  b 绑定已有钥匙串条目  c 核对待完成的钥匙串操作\n  k 保留旧条目并结束待处理清理\n  Enter 取消"
     );
     let action = ask("选择")?;
     if matches!(action.as_str(), "1" | "2" | "3" | "b" | "r" | "m") {

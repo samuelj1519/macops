@@ -73,11 +73,9 @@ pub fn unified_upgrade(
     else {
         return Ok(None);
     };
-    if let Some(tool) = policy::upgrade_target(id) {
+    if policy::upgrade_target(id).is_some() {
         let package = crate::target::resolve(ctx, id)?;
-        if matches!(&package.provider, Provider::Legacy { category, selector }
-            if category == "ai" && selector == tool)
-        {
+        if let Some(tool) = app_upgrade_tool(id, &package) {
             let selected = fingerprint(&package)?;
             return execute(ctx, tool, version.as_deref(), false, dry_run, || {
                 let current = crate::target::refresh(ctx, &package)?;
@@ -101,6 +99,13 @@ pub fn unified_upgrade(
     Ok(None)
 }
 
+pub(crate) fn app_upgrade_tool<'a>(id: &'a str, package: &Package) -> Option<&'a str> {
+    policy::upgrade_target(id).filter(|tool| {
+        matches!(&package.provider, Provider::Legacy { category, selector }
+            if category == "ai" && selector == tool)
+    })
+}
+
 fn execute(
     ctx: &Context,
     tool: &str,
@@ -109,6 +114,12 @@ fn execute(
     dry_run: bool,
     check: impl FnOnce() -> Result<()>,
 ) -> Result<Value> {
+    crate::store::check_active_pending(ctx).map_err(|mut error| {
+        if error.code == "recovery_required" {
+            error.message.insert_str(0, "这次升级还没开始。\n");
+        }
+        error
+    })?;
     let upgrade = prepare(ctx, tool, version, force_live)?;
     let plan = plan(ctx, &upgrade)?;
     if dry_run {
@@ -164,6 +175,34 @@ fn tool_inventory(ctx: &Context, tools: &[&str]) -> Result<Value> {
     )
 }
 
+fn check_config_sync(
+    tool: &str,
+    requested: Option<&str>,
+    live: &Snapshot,
+    source: &Snapshot,
+    force_live: bool,
+) -> Result<()> {
+    policy::require_sync(&live.text, &source.text, force_live).map_err(|mut error| {
+        if error.code == "mise_config_drift" {
+            let show = |snapshot: &Snapshot| {
+                let path = crate::output::sanitize(&snapshot.anchor.requested.to_string_lossy(), false);
+                let pin = policy::pin(&snapshot.text, tool).unwrap_or_else(|_| "版本待核对".into());
+                format!("{path}（{tool} {pin}）")
+            };
+            let command = requested.map_or_else(
+                || format!("mo agent upgrade {tool}"),
+                |version| format!("mo agent install {tool} {version}"),
+            );
+            error.message = format!(
+                "这次升级还没开始。本机的 mise 设置和保存的来源不同。\n  本机 {}\n  设置来源 {}\n先运行 mo config reconcile 看哪里不同。\n如果只想改这台电脑，先运行 {command} --local --dry-run 看会改什么。请带上原来的目录选项。",
+                show(live),
+                show(source),
+            );
+        }
+        error
+    })
+}
+
 fn prepare(
     ctx: &Context,
     tool: &str,
@@ -188,7 +227,7 @@ fn prepare(
         }
         let live = Snapshot::capture(&live_path)?;
         let source = Snapshot::capture(&source_path)?;
-        policy::require_sync(&live.text, &source.text, force_live)?;
+        check_config_sync(tool, version.as_deref(), &live, &source, force_live)?;
         let prev_live_pin = policy::pin(&live.text, tool)?;
         if version.is_none() {
             let mise = gate::executable(ctx, "mise")?;
@@ -221,7 +260,11 @@ fn prepare(
         version,
         force_live,
         mise,
-        profiles: ai_state::profiles(ctx)?,
+        profiles: if tool == "claude" {
+            ai_state::profiles(ctx)?
+        } else {
+            vec![]
+        },
     })
 }
 
@@ -312,7 +355,7 @@ fn plan(ctx: &Context, upgrade: &Upgrade) -> Result<Plan> {
     };
     let mut warnings = vec![format!("ai-native-v1:{}", fingerprint(upgrade)?)];
     if upgrade.force_live {
-        warnings.push("--force-live 仅更新本机，不写静态源声明".into());
+        warnings.push("--local 更新本机安装和本机 mise 设置，保留设置来源".into());
     }
     if upgrade.tool == "mimo" {
         warnings.push("mimo 为厂商工具，升级不可回滚；未知结果必须先恢复核验".into());
