@@ -83,13 +83,15 @@ pub(crate) fn error_text(error: &crate::error::Error) -> String {
     if error.code == "cancelled" {
         return "已取消。".into();
     }
+    if let Some(guidance) = &error.guidance {
+        return format!(
+            "错误表现　{}\n错误原因　{}\n正确用法　{}",
+            sanitize(&guidance.problem, false),
+            sanitize(&error.message, true),
+            sanitize(&guidance.usage, true)
+        );
+    }
     let next = match error.code.as_str() {
-        "recovery_required"
-        | "migration_recovery_required"
-        | "confirmation_required"
-        | "mise_config_drift"
-        | "mark_failed_unsupported"
-        | "model_keychain_update_pending" => "",
         "operation_busy" => "等另一个操作结束，再用 mo recover 看有没有要检查的结果。",
         "operation_still_running" | "operation_in_flight" => "请先等上一次操作结束。",
         "plan_stale" | "recovery_scope_changed" | "operation_conflict" => {
@@ -110,13 +112,24 @@ pub(crate) fn error_text(error: &crate::error::Error) -> String {
         "project_scope_unsupported" => {
             "--project 可用来看项目里的对象。先在列表里找到要操作的对象。"
         }
-        _ => "如果需要帮助，记下刚才的命令和下面的错误编号。",
+        "absolute_path_required" => "把路径改为以 / 开头的本机绝对路径，再运行原命令。",
+        _ => "",
     };
-    let mut text = sanitize(&error.message, true);
+    let reason = if error.code == "absolute_path_required" {
+        format!(
+            "此处需要本机绝对路径，收到「{}」。",
+            sanitize(&error.message, false)
+        )
+    } else {
+        sanitize(&error.message, true)
+    };
+    let mut text = format!(
+        "错误表现　命令未完成\n错误原因　{reason}（{}）",
+        sanitize(&error.code, false)
+    );
     if !next.is_empty() {
-        let _ = write!(text, "\n{next}");
+        let _ = write!(text, "\n正确用法　{next}");
     }
-    let _ = write!(text, "\n错误编号 {}", sanitize(&error.code, false));
     text
 }
 

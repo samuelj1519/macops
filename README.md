@@ -159,6 +159,8 @@ Explicit native apply and query operations use the owner's chezmoi configuration
 
 For supported GitHub skills, macops stores a recipe and calls Skills CLI. The recipe specifies the repository, commit, member, client, installation name, and any manual-only or derived content policy.
 
+Use `--recipe` with the absolute path to a local macops recipe JSON file. For a GitHub repository such as a multi-skill kit, run `mo recommend OWNER/REPO` to find installation instructions for your client. When macops cannot build an executable plan, it can show recognized manual commands from the pinned repository documentation or point you to the instructions.
+
 ```sh
 mo --dry-run skill install --recipe /absolute/path/recipe.json
 mo skill install --recipe /absolute/path/recipe.json

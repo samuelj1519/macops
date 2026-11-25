@@ -288,13 +288,21 @@ pub struct SkillSelection {
 pub enum SkillCmd {
     #[command(about = "按固定配方安装技能")]
     Install {
-        #[arg(long)]
+        #[arg(
+            long,
+            value_name = "ABSOLUTE_JSON_PATH",
+            help = "本机技能配方 JSON 文件的绝对路径。GitHub 仓库可用 mo recommend 查看安装说明"
+        )]
         recipe: PathBuf,
     },
     #[command(about = "按固定配方将已有技能纳入管理")]
     Adopt {
         id: String,
-        #[arg(long)]
+        #[arg(
+            long,
+            value_name = "ABSOLUTE_JSON_PATH",
+            help = "本机技能配方 JSON 文件的绝对路径"
+        )]
         recipe: PathBuf,
     },
     #[command(name = "uninstall", alias = "remove", about = "卸载已纳入管理的技能")]

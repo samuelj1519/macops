@@ -620,7 +620,17 @@ pub fn worker_after(
 }
 fn read_recipe(path: &Path) -> Result<(Recipe, InputFence)> {
     let (witness, raw) = disk::witness(path)?;
-    let recipe: Recipe = policy::decode(&raw.ok_or_else(required)?)?;
+    let raw = raw.ok_or_else(|| {
+        Error::attention(
+            "native_skills_recipe_required",
+            format!("本机没有找到配方文件「{}」。", path.display()),
+        )
+        .with_guidance(
+            "无法读取 --recipe 指定的技能配方。",
+            "确认配方 JSON 文件存在，把实际绝对路径传给 --recipe，再运行原命令。",
+        )
+    })?;
+    let recipe: Recipe = policy::decode(&raw)?;
     policy::validate(&recipe)?;
     Ok((
         recipe,
@@ -1676,6 +1686,58 @@ pub(crate) fn matches_upgrade(
             .revision
             .as_ref()
             .is_none_or(|commit| &previous.source.commit == commit))
+}
+
+pub(crate) fn validate_recipe_argument(command: &Command) -> Result<()> {
+    let Command::Skill {
+        command: Some(command),
+        ..
+    } = command
+    else {
+        return Ok(());
+    };
+    let (path, invocation) = match command {
+        SkillCmd::Install { recipe } => (recipe, "mo skill install"),
+        SkillCmd::Adopt { recipe, .. } => (recipe, "mo skill adopt NAME"),
+        _ => return Ok(()),
+    };
+    if path.is_absolute() {
+        return Ok(());
+    }
+    let value = path.to_str().unwrap_or_default();
+    let qualified = value.starts_with("https://github.com/") || value.starts_with("github.com/");
+    let repository = if qualified
+        || !path
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("json"))
+    {
+        crate::recommend_upstream::repository_subject(
+            value.strip_prefix("github.com/").unwrap_or(value),
+        )
+    } else {
+        None
+    };
+    let problem = format!("无法读取 --recipe 指定的配方「{}」。", path.display());
+    let local_usage = format!("{invocation} --recipe \"/绝对路径/recipe.json\"");
+    let (reason, usage) = if let Some(repo) = repository {
+        (
+            "--recipe 需要本机技能配方 JSON 文件的绝对路径，收到的是 GitHub 仓库。",
+            format!(
+                "安装能力包请查看 https://github.com/{repo} 的安装说明。检查来源可运行 mo recommend {repo}。"
+            ),
+        )
+    } else if qualified || value.contains("://") {
+        (
+            "--recipe 需要本机技能配方 JSON 文件的绝对路径，收到的是网络链接。",
+            format!("先取得本地配方文件，再运行 {local_usage}，将示例路径换为实际配方文件。"),
+        )
+    } else {
+        (
+            "--recipe 需要以 / 开头的本机技能配方 JSON 文件路径。",
+            format!("运行 {local_usage}，将示例路径换为实际配方文件。"),
+        )
+    };
+    Err(Error::new("absolute_path_required", reason).with_guidance(problem, usage))
 }
 
 fn explicit_recipe(

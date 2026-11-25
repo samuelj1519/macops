@@ -333,6 +333,132 @@ fn repository_evidence(
     })
 }
 
+fn install_word(value: &str) -> bool {
+    value.len() <= 100
+        && value
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_alphanumeric)
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
+}
+
+fn matching_install_source(source: &str, separator: char, repository: &str) -> bool {
+    let (name, revision) = source
+        .split_once(separator)
+        .map_or((source, None), |(name, revision)| (name, Some(revision)));
+    revision.is_none_or(install_word)
+        && repository_subject(name).is_some_and(|name| name.eq_ignore_ascii_case(repository))
+}
+
+fn skills_install_command(line: &str, repository: &str) -> bool {
+    let mut words = line.split_ascii_whitespace();
+    if words.next() != Some("npx") {
+        return false;
+    }
+    let Some(mut package) = words.next() else {
+        return false;
+    };
+    if matches!(package, "--yes" | "-y") {
+        let Some(next) = words.next() else {
+            return false;
+        };
+        package = next;
+    }
+    if !(package == "skills" || package.strip_prefix("skills@").is_some_and(install_word))
+        || words.next() != Some("add")
+        || !words
+            .next()
+            .is_some_and(|source| matching_install_source(source, '@', repository))
+    {
+        return false;
+    }
+    while let Some(option) = words.next() {
+        match option {
+            "--yes" | "-y" | "--copy" | "--global" | "-g" => {}
+            "--agent" if words.next().is_some_and(install_word) => {}
+            "--skill"
+                if words
+                    .next()
+                    .is_some_and(|name| matches!(name, "'*'" | "\"*\"") || install_word(name)) => {}
+            _ => return false,
+        }
+    }
+    true
+}
+
+fn claude_install_command(words: &[&str]) -> bool {
+    matches!(words, ["claude", "plugin", "install", id] | ["claude", "plugin", "install", id, "--scope", "user" | "project" | "local"]
+        if id.split_once('@').is_some_and(|(name, market)| install_word(name) && install_word(market)))
+}
+
+fn markdown_fence(line: &str) -> Option<(u8, usize, &str)> {
+    let marker = *line.as_bytes().first()?;
+    if !matches!(marker, b'`' | b'~') {
+        return None;
+    }
+    let length = line.bytes().take_while(|byte| *byte == marker).count();
+    (length >= 3).then(|| (marker, length, line[length..].trim()))
+}
+
+fn documented_install_options(evidence: &RepositoryEvidence) -> Vec<Value> {
+    let mut skills = None;
+    let mut claude = None;
+    for (index, document) in evidence.documents.iter().enumerate() {
+        let mut block = None;
+        let mut market = None;
+        for line in document.content.lines().map(str::trim) {
+            if let Some((marker, length, language)) = markdown_fence(line) {
+                match block {
+                    None => {
+                        block = Some((
+                            marker,
+                            length,
+                            matches!(language, "sh" | "bash" | "zsh" | "shell"),
+                        ));
+                    }
+                    Some((open, minimum, _))
+                        if open == marker && length >= minimum && language.is_empty() =>
+                    {
+                        block = None;
+                    }
+                    _ => {}
+                }
+                market = None;
+                continue;
+            }
+            if !block.is_some_and(|(_, _, shell)| shell) || line.is_empty() {
+                continue;
+            }
+            let preceding_market = market.take();
+            if line.len() > 512 {
+                continue;
+            }
+            let words: Vec<_> = line.split_ascii_whitespace().collect();
+            if skills.is_none() && skills_install_command(line, &evidence.repository) {
+                skills = Some(
+                    json!({"manager":"Skills CLI","document":index,"commands":[words.join(" ")]}),
+                );
+            }
+            if claude.is_none() {
+                if let ["claude", "plugin", "marketplace", "add", source] = words.as_slice() {
+                    if matching_install_source(source, '#', &evidence.repository) {
+                        market = Some(words.join(" "));
+                    }
+                } else if claude_install_command(&words)
+                    && let Some(preceding) = preceding_market
+                {
+                    claude = Some(
+                        json!({"manager":"Claude Code","document":index,"commands":[preceding,words.join(" ")]}),
+                    );
+                }
+            }
+        }
+    }
+    [skills, claude].into_iter().flatten().collect()
+}
+
 pub(crate) fn show_repository(
     ctx: &Context,
     repo: &str,
@@ -385,6 +511,10 @@ fn repository_review(
                 "evidenceStatus":if documents.is_empty() {"documents-unavailable"} else {"public-commit"},
                 "canExecute":false,"persistentWrites":false
             });
+            let manual = documented_install_options(&evidence);
+            if !manual.is_empty() {
+                data["manualInstall"] = json!(manual);
+            }
             if let Some(market) = codex_marketplace {
                 data["codexMarketplace"] = market;
             }

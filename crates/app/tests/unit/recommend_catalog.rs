@@ -1347,3 +1347,48 @@ fn independent_retry_requires_the_frozen_activation_before_settling_an_old_opera
     }
     Ok(())
 }
+
+#[test]
+fn recommendation_explains_manual_installation_when_no_plan_can_run() {
+    let data = json!({
+        "query":"example/kit",
+        "evidenceStatus":"public-commit",
+        "documents":[{"path":"README.md"}, {"path":"INSTALL.md"}],
+        "manualInstall":[{"manager":"Skills CLI","document":0,"commands":["npx skills add example/kit"]}],
+    });
+    let text = manual_install_text(&data);
+    assert!(text.starts_with("错误表现") && text.contains("错误原因") && text.contains("正确用法"));
+    assert!(text.contains("Skills CLI · README.md") && text.contains("npx skills add example/kit"));
+    let fallback =
+        manual_install_text(&json!({"documents":[{"path":"README.md"}, {"path":"INSTALL.md"}]}));
+    assert!(fallback.contains("打开上面的 INSTALL.md"));
+    let limited = manual_install_text(&json!({"reason":"recommend_github_rate_limited"}));
+    assert!(
+        limited.contains("GitHub 匿名 API 查询额度已用完")
+            && limited.contains("等 GitHub 查询额度恢复后")
+    );
+    let no_docs = manual_install_text(
+        &json!({"repository":"example/kit","evidenceStatus":"documents-unavailable"}),
+    );
+    assert!(no_docs.contains("打开 https://github.com/example/kit"));
+}
+
+#[test]
+fn repository_model_failure_or_empty_response_has_a_next_step() {
+    for (status, expected) in [
+        ("profile-unavailable", "运行 mo recommend --setup"),
+        ("transport-unavailable", "检查网络"),
+        ("deadline", "请求超时"),
+        ("http-status", "选 t 测试连接"),
+        ("output-limit", "按来源文档继续"),
+        ("unverified-response", "按来源文档继续"),
+        ("suggested", "没有返回可引用的安装方式"),
+    ] {
+        assert!(
+            recommendation_model_hint(&json!({"status":status,"candidates":[]}))
+                .is_some_and(|hint| hint.contains(expected))
+        );
+    }
+    assert!(recommendation_model_hint(&json!({"status":"local-only"})).is_none());
+    assert!(recommendation_model_hint(&json!({"status":"suggested","candidates":[{}]})).is_none());
+}

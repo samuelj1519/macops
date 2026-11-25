@@ -247,14 +247,11 @@ pub(crate) fn choose(ctx: &Context, data: Value) -> Result<Value> {
             }
         }
     }
-    if let Some(hint) = recommendation_keychain_hint(data["model"]["status"].as_str()) {
+    if let Some(hint) = recommendation_model_hint(&data["model"]) {
         terminal(TerminalLine::Note, hint);
     }
     show_codex_market(&data["codexMarketplace"]);
     let known = data["known"].as_array().map_or(&[][..], Vec::as_slice);
-    if let Some(reason) = data["reason"].as_str() {
-        terminal(TerminalLine::Note, &source_notice(reason));
-    }
     let installs = install_choices(ctx, &data, known)?;
     if installs.is_empty() {
         if let Some(repo) = search_repository(ctx, &data)? {
@@ -263,8 +260,11 @@ pub(crate) fn choose(ctx: &Context, data: Value) -> Result<Value> {
                 crate::recommend_upstream::show_repository(ctx, &repo, false, true)?,
             );
         }
-        eprintln!("当前没有可执行的已核验安装计划");
+        eprintln!("{}", manual_install_text(&data));
         return Ok(data);
+    }
+    if let Some(reason) = data["reason"].as_str() {
+        terminal(TerminalLine::Note, &source_notice(reason));
     }
     for (index, choice) in installs.iter().enumerate() {
         eprintln!("  {} {}", index + 1, choice.label());
@@ -274,6 +274,85 @@ pub(crate) fn choose(ctx: &Context, data: Value) -> Result<Value> {
         return Ok(json!({"mode":"cancelled"}));
     };
     install_choice(ctx, package)
+}
+
+fn manual_install_text(data: &Value) -> String {
+    use crate::browser::sanitize;
+    use std::fmt::Write as _;
+    let mut text = String::from("错误表现　当前没有可执行的已核验安装计划");
+    let documents = data["documents"].as_array().map_or(&[][..], Vec::as_slice);
+    if documents.is_empty() {
+        if let Some(reason) = data["reason"].as_str() {
+            let _ = write!(text, "\n错误原因　{}", source_notice(reason));
+            let usage = match reason {
+                "recommend_github_rate_limited" => "等 GitHub 查询额度恢复后，再运行原命令。",
+                "recommend_github_not_found" => {
+                    "核对 GitHub 仓库名称和访问权限，再运行 mo recommend OWNER/REPO。"
+                }
+                _ => "核对来源地址和网络连接，再运行 mo recommend OWNER/REPO。",
+            };
+            let _ = write!(text, "\n正确用法　{usage}");
+        } else {
+            text.push_str("\n错误原因　没有可核对的安装说明或本机配方。");
+            if let Some(repo) = data["repository"]
+                .as_str()
+                .and_then(crate::recommend_upstream::repository_subject)
+            {
+                let _ = write!(
+                    text,
+                    "\n正确用法　打开 https://github.com/{repo} 查找项目的安装说明。"
+                );
+            } else {
+                text.push_str(
+                    "\n正确用法　已知 GitHub 仓库时，运行 mo recommend OWNER/REPO 查看来源。",
+                );
+            }
+        }
+        return text;
+    }
+    text.push_str("\n错误原因　找到了项目的安装说明，但缺少 mo 可直接执行的配方或插件验证条件。");
+    if let Some(manual) = data["manualInstall"]
+        .as_array()
+        .filter(|rows| !rows.is_empty())
+    {
+        text.push_str(
+            "\n正确用法　按使用的安装工具选择。以下命令来自上面列出的固定提交文档，需手动执行。",
+        );
+        for item in manual {
+            if let (Some(manager), Some(document), Some(commands)) = (
+                item["manager"].as_str(),
+                item["document"]
+                    .as_u64()
+                    .and_then(|index| usize::try_from(index).ok())
+                    .and_then(|index| documents.get(index)),
+                item["commands"].as_array(),
+            ) && let Some(path) = document["path"].as_str()
+            {
+                let _ = write!(
+                    text,
+                    "\n  {} · {}",
+                    sanitize(manager, false),
+                    sanitize(path, false)
+                );
+                for command in commands.iter().filter_map(Value::as_str) {
+                    let _ = write!(text, "\n    {}", sanitize(command, false));
+                }
+            }
+        }
+    } else {
+        let path = documents
+            .iter()
+            .find(|document| document["path"] == "INSTALL.md")
+            .or_else(|| documents.first())
+            .and_then(|document| document["path"].as_str())
+            .unwrap_or("项目文档");
+        let _ = write!(
+            text,
+            "\n正确用法　打开上面的 {}，按你使用的客户端选择安装方式。",
+            sanitize(path, false)
+        );
+    }
+    text
 }
 
 fn install_choice(ctx: &Context, choice: &InstallChoice) -> Result<Value> {
@@ -435,14 +514,27 @@ fn target_numbers(count: usize) -> Result<Vec<usize>> {
 
 fn source_notice(reason: &str) -> String {
     match reason {
-        "recommend_github_rate_limited" => {
-            "GitHub 匿名 API 额度已用完。请等额度恢复后重试。".into()
-        }
-        "recommend_github_not_found" => {
-            "GitHub 找不到可公开访问的仓库或文件。请核对仓库名和访问权限。".into()
-        }
+        "recommend_github_rate_limited" => "GitHub 匿名 API 查询额度已用完。".into(),
+        "recommend_github_not_found" => "GitHub 找不到可公开访问的仓库或文件。".into(),
         _ => format!("来源核对未完成 · {reason}"),
     }
+}
+
+fn recommendation_model_hint(model: &Value) -> Option<&'static str> {
+    let status = model["status"].as_str()?;
+    recommendation_keychain_hint(Some(status)).or_else(|| match status {
+        "profile-unavailable" => Some("推荐模型配置暂不可用。运行 mo recommend --setup 检查设置。"),
+        "transport-unavailable" => Some("推荐模型连接失败。检查网络，或按来源文档继续。"),
+        "deadline" => Some("推荐模型请求超时。可以重试，也可以按来源文档继续。"),
+        "http-status" => {
+            Some("推荐模型服务返回了错误。运行 mo recommend --setup 并选 t 测试连接。")
+        }
+        "output-limit" | "unverified-response" => Some("推荐模型回答无法核对。请按来源文档继续。"),
+        "suggested" if model["candidates"].as_array().is_some_and(Vec::is_empty) => {
+            Some("推荐模型没有返回可引用的安装方式。请按来源文档继续。")
+        }
+        _ => None,
+    })
 }
 
 fn recommendation_keychain_hint(status: Option<&str>) -> Option<&'static str> {

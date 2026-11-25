@@ -309,7 +309,7 @@ impl Browser {
             || ctx.chezmoi.destination.is_some()
             || ctx.chezmoi.config.is_some()
         {
-            self.notice = "这次只选了配置文件的位置。要维护软件或技能，请去掉 chezmoi 目录选项。\n错误编号 config_scope_unsupported".into();
+            self.notice = "错误表现　无法维护软件或技能。\n错误原因　当前指定了 chezmoi 配置目录（config_scope_unsupported）。\n正确用法　去掉 chezmoi 目录选项后再运行 mo。".into();
             return None;
         }
         let id = self.selected()?;

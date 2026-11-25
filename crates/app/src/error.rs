@@ -9,6 +9,14 @@ pub struct Error {
     pub message: String,
     #[serde(skip)]
     pub exit: u8,
+    #[serde(skip)]
+    pub(crate) guidance: Option<Guidance>,
+}
+
+#[derive(Debug)]
+pub(crate) struct Guidance {
+    pub problem: String,
+    pub usage: String,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -20,6 +28,7 @@ impl Error {
             code: code.into(),
             message: message.into(),
             exit: 1,
+            guidance: None,
         }
     }
 
@@ -29,7 +38,19 @@ impl Error {
             code: code.into(),
             message: message.into(),
             exit: 3,
+            guidance: None,
         }
+    }
+    pub(crate) fn with_guidance(
+        mut self,
+        problem: impl Into<String>,
+        usage: impl Into<String>,
+    ) -> Self {
+        self.guidance = Some(Guidance {
+            problem: problem.into(),
+            usage: usage.into(),
+        });
+        self
     }
 }
 

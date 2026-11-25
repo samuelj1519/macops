@@ -391,7 +391,7 @@ fn specialized_previews_and_fallbacks_keep_unknown_states_explicit()
 }
 
 #[test]
-fn plain_errors_put_the_reason_first_and_keep_diagnostics_after_the_next_step() {
+fn plain_errors_explain_the_failure_and_only_show_supported_usage() {
     use crate::error::Error;
     let cases = [
         ("recovery_required", "mo recover OP-123"),
@@ -418,16 +418,26 @@ fn plain_errors_put_the_reason_first_and_keep_diagnostics_after_the_next_step() 
         ("exact_version_required", "完整版本号"),
         ("invalid_version", "完整版本号"),
         ("project_scope_unsupported", "项目里的对象"),
-        ("uncategorized", "记下刚才的命令"),
+        ("uncategorized", "mo recover OP-123"),
     ];
     for (code, next) in cases {
         let error = Error::attention(code, "先看原因\nmo recover OP-123\x1b");
         let text = error_text(&error);
-        assert!(text.starts_with("先看原因\n"));
+        assert!(text.starts_with("错误表现　命令未完成\n错误原因　先看原因\n"));
         assert!(text.contains(next), "{text}");
-        assert!(text.ends_with(&format!("错误编号 {code}")));
+        assert!(text.contains(&format!("（{code}）")));
+        assert!(!text.contains("记下刚才的命令"));
         assert!(!text.contains('\x1b'));
     }
+    let path = error_text(&Error::new("absolute_path_required", "relative"));
+    assert!(path.contains("收到「relative」") && path.contains("本机绝对路径"));
+    let unknown = error_text(&Error::new("uncategorized", "没有更多可判断的信息"));
+    assert!(!unknown.contains("正确用法"));
+    let guided = Error::new("fixture", "问题原因").with_guidance("问题表现", "适用命令");
+    assert_eq!(
+        error_text(&guided),
+        "错误表现　问题表现\n错误原因　问题原因\n正确用法　适用命令"
+    );
     assert_eq!(
         error_text(&Error::attention("cancelled", "fixture")),
         "已取消。"

@@ -346,6 +346,8 @@ fn repository_proposals(
                 "name, scope: global|project|unknown, document: number, version: string|null, summary: Chinese text }] }. ",
                 "Cite the document number. Rank equivalent upstream methods using toolsPresent. ",
                 "Distinguish an npx invocation from a persistent installation and identify the native agent for marketplace plugins. ",
+                "In the Chinese summary, tell the user which documented installer or client to use, ",
+                "where it installs, and the next action to take using the cited document. ",
                 "Report only upstream-documented channels. Do not return commands, tool calls, or URLs."
             )},
             {"role":"user","content":json!({"repository":repository,"toolsPresent":available_tools(),"evidence":evidence}).to_string()}

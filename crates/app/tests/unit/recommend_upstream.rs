@@ -851,3 +851,103 @@ fn repository_review_preserves_a_complete_claude_offer_and_drops_partial_evidenc
     assert!(!ctx.state.exists());
     Ok(())
 }
+
+#[test]
+fn a_repository_review_exposes_pinned_manual_commands_without_an_execution_plan() -> TestResult {
+    use clap::Parser as _;
+    let home = tempfile::tempdir_in("/private/tmp")?;
+    let cli = crate::cli::Cli::try_parse_from([
+        "macops",
+        "--home",
+        home.path().to_str().ok_or("home")?,
+        "recommend",
+        "example/kit",
+    ])?;
+    let ctx = Context::from_cli(&cli, &mut Vec::new())?;
+    let commit = "c".repeat(40);
+    let skills = "npx --yes skills@1.8.1 add example/kit@v1.8.0 --skill '*' --agent codex --agent cursor --copy --yes";
+    let marketplace = "claude plugin marketplace add example/kit#v1.8.0";
+    let plugin = "claude plugin install toolkit@local --scope user";
+    let docs = format!("# Install\n```sh\n{skills}\n```\n```sh\n{marketplace}\n{plugin}\n```\n");
+    let data = repository_review(&ctx, "example/kit", false, |url| {
+        if url.ends_with("/example/kit") {
+            Ok(json!({"full_name":"example/kit","private":false}))
+        } else if url.ends_with("/commits?per_page=1") {
+            Ok(json!([{"sha":commit}]))
+        } else if url.contains("/readme?") {
+            assert!(url.ends_with(&format!("?ref={commit}")));
+            Ok(json!({"path":"README.md","type":"file","encoding":"base64",
+                "content":base64::engine::general_purpose::STANDARD.encode(&docs)}))
+        } else {
+            Err(unavailable())
+        }
+    });
+    assert_eq!(data["evidenceStatus"], "public-commit");
+    assert_eq!(data["canExecute"], false);
+    assert_eq!(data["persistentWrites"], false);
+    assert!(data.get("claudeMarketplace").is_none());
+    assert_eq!(
+        data["manualInstall"],
+        json!([
+            {"manager":"Skills CLI","document":0,"commands":[skills]},
+            {"manager":"Claude Code","document":0,"commands":[marketplace,plugin]}
+        ])
+    );
+    assert!(!ctx.state.exists());
+    Ok(())
+}
+
+#[test]
+fn manual_install_options_reject_unrelated_sources_and_shell_operators() {
+    let source = "example/kit";
+    for invalid in [
+        "npx --yes unrelated add example/kit",
+        "npx skills add other/kit",
+        "npx skills add example/kit@v1; --yes",
+        "npx skills add example/kit --skill",
+        "npx skills add example/kit --agent 'codex';echo",
+        "npx skills add example/kit --copy && echo after",
+    ] {
+        assert!(!skills_install_command(invalid, source), "{invalid}");
+    }
+    assert!(!claude_install_command(&[
+        "claude",
+        "plugin",
+        "install",
+        "bad@market;echo"
+    ]));
+    assert!(!claude_install_command(&[
+        "claude",
+        "plugin",
+        "install",
+        "valid@market",
+        "--scope",
+        "unknown"
+    ]));
+}
+
+#[test]
+fn documented_commands_stay_in_shell_fences_and_claude_steps_stay_together() -> TestResult {
+    let evidence = RepositoryEvidence {
+        repository: "example/kit".into(),
+        commit: crate::policy::source_git::ObjectId::parse(&"a".repeat(40))?,
+        default_branch: None,
+        documents: vec![Document {
+            path: "README.md".into(),
+            content: concat!(
+                "````text\n```sh\nnpx skills add example/kit --global\n```\n````\n",
+                "```bash\nclaude plugin marketplace add example/kit#v1",
+                "\nclaude plugin marketplace add \"foreign/kit\"",
+                "\nclaude plugin install unrelated@foreign --scope user\n```\n",
+                "~~~sh\nnpx\tskills add example/kit --agent codex --copy\n~~~\n",
+            )
+            .into(),
+        }],
+    };
+    assert_eq!(
+        documented_install_options(&evidence),
+        [json!({"manager":"Skills CLI","document":0,
+               "commands":["npx skills add example/kit --agent codex --copy"]})]
+    );
+    Ok(())
+}

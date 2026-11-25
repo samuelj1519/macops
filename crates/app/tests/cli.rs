@@ -61,6 +61,97 @@ fn plain(f: &Fixture, args: &[&str]) -> std::io::Result<std::process::Output> {
 }
 
 #[test]
+fn skill_install_recipe_errors_distinguish_github_from_a_local_file() -> TestResult {
+    let f = Fixture::new()?;
+    for source in [
+        "samuelj1519/devnorm-kit",
+        "https://github.com/samuelj1519/devnorm-kit",
+        "github.com/samuelj1519/devnorm-kit",
+    ] {
+        let args = ["skill", "install", "--recipe", source];
+        let out = plain(&f, &args)?;
+        assert_code(&out, 1);
+        assert_eq!(out.stdout, [] as [u8; 0]);
+        let text = String::from_utf8(out.stderr)?;
+        let lines: Vec<_> = text.lines().collect();
+        assert_eq!(lines.len(), 3, "{text}");
+        assert!(lines[0].starts_with("错误表现") && lines[0].contains(source));
+        assert!(lines[1].starts_with("错误原因") && lines[1].contains("GitHub 仓库"));
+        assert!(
+            lines[2].starts_with("正确用法")
+                && lines[2].contains("mo recommend samuelj1519/devnorm-kit")
+        );
+        assert!(!text.contains("错误编号"));
+        let (out, json) = f.run(&args)?;
+        assert_code(&out, 1);
+        assert_eq!(json["error"]["code"], "absolute_path_required");
+    }
+
+    for (args, example) in [
+        (
+            &["skill", "install", "--recipe", "recipes/devnorm.json"][..],
+            "mo skill install --recipe",
+        ),
+        (
+            &[
+                "skill",
+                "adopt",
+                "devnorm",
+                "--recipe",
+                "recipes/devnorm.json",
+            ][..],
+            "mo skill adopt NAME --recipe",
+        ),
+    ] {
+        let out = plain(&f, args)?;
+        assert_code(&out, 1);
+        let text = String::from_utf8(out.stderr)?;
+        assert!(
+            text.contains("以 / 开头") && text.contains(example),
+            "{text}"
+        );
+        assert!(!text.contains("mo recommend"));
+    }
+    let out = plain(&f, &["skill", "install", "--recipe=-not-a-user/local"])?;
+    assert_code(&out, 1);
+    assert!(!String::from_utf8(out.stderr)?.contains("mo recommend -not-a-user"));
+
+    let url = "https://github.com/example/kit/blob/main/recipe.json";
+    let out = plain(&f, &["skill", "install", "--recipe", url])?;
+    assert_code(&out, 1);
+    assert!(String::from_utf8(out.stderr)?.contains("收到的是网络链接"));
+
+    let missing = f.file("missing.json");
+    let out = plain(
+        &f,
+        &[
+            "skill",
+            "install",
+            "--recipe",
+            missing.to_str().ok_or("fixture path")?,
+        ],
+    )?;
+    assert_code(&out, 3);
+    let text = String::from_utf8(out.stderr)?;
+    assert!(text.contains("本机没有找到配方文件") && text.contains("确认配方 JSON 文件存在"));
+    assert!(!f.file("state").exists());
+    fs::create_dir(f.file("state"))?;
+    let pending = f.file("state/active.json");
+    fs::write(&pending, "synthetic unreadable recovery record")?;
+    let (out, json) = f.run(&[
+        "skill",
+        "install",
+        "--recipe",
+        "github.com/samuelj1519/devnorm-kit",
+    ])?;
+    assert_code(&out, 1);
+    assert_eq!(json["error"]["code"], "absolute_path_required");
+    assert_eq!(fs::read(pending)?, b"synthetic unreadable recovery record");
+
+    Ok(())
+}
+
+#[test]
 fn main_journeys_show_the_selected_scope_without_executing_previews() -> TestResult {
     let f = Fixture::new()?;
     native_skill_fixture(&f, &["fixture-skill"])?;

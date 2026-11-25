@@ -124,6 +124,7 @@ fn run(cli: &cli::Cli, warnings: &mut Vec<String>) -> error::Result<CommandOutpu
         || cli.chezmoi_config.is_some();
     policy::cli::config_scope(&cli.command, chezmoi_requested)?;
     validate_project_scope(&cli.command)?;
+    native_skills::validate_recipe_argument(&cli.command)?;
     if matches!(cli.command, cli::Command::Recommend { setup: true, .. }) {
         let setup = context::RecommendSetupContext::from_cli(cli, warnings)?;
         return recommend_setup::run(&setup, cli.json, cli.dry_run).map(CommandOutput::Data);
