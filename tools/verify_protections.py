@@ -25,18 +25,18 @@ def remove_block(source, needle):
 def mutate(root, name):
     directory = root / "crates/app/src"
     if name == "gate":
-        path = directory / "operations.rs"
+        path = directory / "operations/mod.rs"
         source = path.read_text()
         start = source.index("    let mut gate =", source.index("pub fn worker("))
         end = source.index("    let journal:", start)
         path.write_text(source[:start] + source[end:])
         return ["--test", "cli", "valid_worker_journal_without_gate_never_executes"]
     if name == "cache-identity":
-        path = directory / "cache.rs"
+        path = directory / "catalog/cache.rs"
         path.write_text(remove_block(path.read_text(), "        if !crate::policy::cache::candidate_matches("))
-        return ["--lib", "cache::tests::changed_inode_is_quarantined_and_never_deleted"]
+        return ["--lib", "catalog::cache::tests::changed_inode_is_quarantined_and_never_deleted"]
     if name == "home":
-        path = directory / "process.rs"
+        path = directory / "operations/command.rs"
         source = path.read_text()
         old = 'c.env("HOME", paths::read_path(&scope.home)?)\n        .current_dir(&scope.home);'
         if source.count(old) != 1:

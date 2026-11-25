@@ -387,7 +387,7 @@ pub enum AgentCmd {
         about = "安装或更新一个 Agent CLI（mimo、codex、claude、cursor、kimi、dsh、codegraph）"
     )]
     Install {
-        #[arg(value_parser=crate::ai::parse_tool)]
+        #[arg(value_parser=crate::agent::ai::parse_tool)]
         tool: String,
         version: Option<String>,
         #[arg(
@@ -399,7 +399,7 @@ pub enum AgentCmd {
     },
     #[command(about = "升级 Agent CLI；省略对象时检查全部工具的配置差异")]
     Upgrade {
-        #[arg(value_parser=crate::ai::parse_tool)]
+        #[arg(value_parser=crate::agent::ai::parse_tool)]
         tool: Option<String>,
         #[arg(
             long = "local",

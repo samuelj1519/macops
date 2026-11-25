@@ -66,7 +66,7 @@ fn claude_checkout_verifies_exact_manifest_before_writing_and_discards_failed_gi
         ],
     )?;
     assert_eq!(slot.name, "checkout");
-    assert_eq!(crate::source_tree::observe(&slot)?, Some(tree));
+    assert_eq!(crate::source::source_tree::observe(&slot)?, Some(tree));
     assert!(files.contains(&("hooks/fixture".into(), true, sha(b"fixture"))));
     assert!(!target.path.join("checkout/.git").exists());
     Ok(())

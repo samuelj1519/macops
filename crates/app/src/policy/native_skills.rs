@@ -83,7 +83,7 @@ pub fn installation_id(payload: &Path) -> Result<String> {
     crate::policy::source_git::Component::parse(name)?;
     let mut parent = path.clone();
     parent.pop();
-    crate::resource::id(
+    crate::domain::resource::id(
         "capability",
         &("skills-cli-install-v1", "global", &parent, name),
     )

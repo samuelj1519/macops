@@ -2,7 +2,7 @@
 use super::*;
 use crate::domain::fingerprint;
 use crate::{
-    resource::{Data, Management, Resource, State},
+    domain::resource::{Data, Management, Resource, State},
     test_support::TestResult,
 };
 
@@ -264,7 +264,7 @@ fn non_utf8_paths_cannot_be_silently_lossily_fingerprinted() {
 
 #[test]
 fn native_baseline_comparison_and_execution_contract_preserve_read_only_authority() -> TestResult {
-    use crate::resource::Comparison;
+    use crate::domain::resource::Comparison;
     let observed = Observation::NativePackage {
         version: "1.0.0".into(),
         source_fingerprint: "source".into(),
@@ -402,7 +402,7 @@ fn native_observer_journal_accepts_only_adopt_with_local_query() -> TestResult {
 
 #[test]
 fn config_observer_baseline_and_inputs_stay_isolated_from_npm_observers() -> TestResult {
-    use crate::resource::Comparison;
+    use crate::domain::resource::Comparison;
     let npm_obs = Observation::NativePackage {
         version: "1.0.0".into(),
         source_fingerprint: "source".into(),
@@ -487,11 +487,11 @@ fn uv_baseline_is_comparable_only_to_bound_tool_observations() {
     };
     assert_eq!(
         baseline(&observed, observed.clone()).comparison,
-        crate::resource::Comparison::Same
+        crate::domain::resource::Comparison::Same
     );
     assert_eq!(
         baseline(&observed, Observation::Missing { evidence: None }).comparison,
-        crate::resource::Comparison::Different
+        crate::domain::resource::Comparison::Different
     );
     assert_eq!(
         baseline(
@@ -501,6 +501,6 @@ fn uv_baseline_is_comparable_only_to_bound_tool_observations() {
             }
         )
         .comparison,
-        crate::resource::Comparison::Unknown
+        crate::domain::resource::Comparison::Unknown
     );
 }

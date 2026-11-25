@@ -1,6 +1,6 @@
 use crate::{
+    domain::resource::Model,
     error::{Error, Result},
-    resource::Model,
 };
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -233,7 +233,7 @@ pub fn plugin_enabled(bytes: &[u8]) -> Result<BTreeMap<String, bool>> {
 }
 
 pub fn skill_target_matches(
-    resource: &crate::resource::Resource,
+    resource: &crate::domain::resource::Resource,
     name: &str,
     logical: &std::path::Path,
     real: Option<&std::path::Path>,
@@ -241,7 +241,7 @@ pub fn skill_target_matches(
     project: Option<&std::path::Path>,
 ) -> bool {
     match &resource.data {
-        crate::resource::Data::Capability {
+        crate::domain::resource::Data::Capability {
             native_id,
             origin,
             contents,
@@ -296,9 +296,9 @@ pub fn legacy_claude_wrapper(bytes: &[u8], helper: &std::path::Path, profile: &s
 
 pub fn bind_runtime(
     binary: &std::path::Path,
-    applications: &[crate::resource::Resource],
+    applications: &[crate::domain::resource::Resource],
 ) -> Option<String> {
-    let matches:Vec<_>=applications.iter().filter(|r|matches!(&r.data,crate::resource::Data::Application{releases,..} if releases.iter().any(|v|v.path.as_ref().is_some_and(|p|binary.starts_with(p))))).collect();
+    let matches:Vec<_>=applications.iter().filter(|r|matches!(&r.data,crate::domain::resource::Data::Application{releases,..} if releases.iter().any(|v|v.path.as_ref().is_some_and(|p|binary.starts_with(p))))).collect();
     if matches.len() == 1 {
         Some(matches[0].id.clone())
     } else {
@@ -532,9 +532,9 @@ pub fn application(
     native: &str,
     name: &str,
     root: &std::path::Path,
-    releases: Vec<crate::resource::Release>,
-) -> Result<crate::resource::Resource> {
-    use crate::resource::{self, Data, Management, Resource, State};
+    releases: Vec<crate::domain::resource::Release>,
+) -> Result<crate::domain::resource::Resource> {
+    use crate::domain::resource::{self, Data, Management, Resource, State};
     Ok(Resource {
         id: resource::id("application", &(manager, root, native))?,
         name: source_label(name),
@@ -583,10 +583,10 @@ pub fn mcp_local(bytes: &[u8], project: &std::path::Path) -> Result<Vec<McpRecor
 }
 
 pub fn insert_capability(
-    resources: &mut BTreeMap<String, crate::resource::Resource>,
-    incoming: crate::resource::Resource,
+    resources: &mut BTreeMap<String, crate::domain::resource::Resource>,
+    incoming: crate::domain::resource::Resource,
 ) -> bool {
-    use crate::resource::{Data, State};
+    use crate::domain::resource::{Data, State};
     use std::collections::btree_map::Entry;
     match resources.entry(incoming.id.clone()) {
         Entry::Vacant(slot) => {

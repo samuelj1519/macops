@@ -75,7 +75,7 @@ fn untrusted_claim_cannot_use_pinned_digest_to_execute_a_different_binary() -> T
         recipe: "example".into(),
     };
     error(
-        crate::native_plugins::run(&ctx, &command, true, false),
+        crate::agent::native_plugins::run(&ctx, &command, true, false),
         "native_plugin_binary_changed",
     );
     assert!(!ctx.state.exists());
@@ -260,7 +260,10 @@ impl Operation {
             key: "example".into(),
             registry: f.declaration(),
             before: make_snapshot(f)?,
-            state: crate::capability_store::binding(&Directory::open(&f.state)?, &f.state)?,
+            state: crate::capability::capability_store::binding(
+                &Directory::open(&f.state)?,
+                &f.state,
+            )?,
         };
         let (instance, recipe) = f.binding()?;
         let call = invocation(&instance, &recipe.native_id(), &f.state, ctx.timeout_secs)?;
@@ -455,7 +458,7 @@ fn preparation_persists_only_the_frozen_plan_journal_and_launch_intent() -> Test
 
     assert_eq!(journal.phase, Phase::Prepared);
     assert!(journal.process_group.is_none());
-    crate::store::validate_journal(&journal)?;
+    crate::operations::store::validate_journal(&journal)?;
     assert!(is_plugin(&journal));
     assert_eq!(
         journal.plan.package.id,

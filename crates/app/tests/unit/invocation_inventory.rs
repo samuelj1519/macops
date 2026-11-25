@@ -27,7 +27,7 @@ fn readonly_policy_assessment_finds_missing_metadata_without_creating_files() ->
     let skill = home.join(".agents/skills/example/SKILL.md");
     fs::create_dir_all(skill.parent().ok_or("parent")?)?;
     fs::write(&skill, "---\nname: example\n---\nbody\n")?;
-    let authority = crate::governance::capture(&ctx)?;
+    let authority = crate::operations::governance::capture(&ctx)?;
     let plan = assess(&ctx, &authority)?;
     assert_eq!(plan.patches.len(), 2);
     assert_eq!(plan.missing, vec!["absent"]);
@@ -82,7 +82,10 @@ impl PolicyFixture {
         Ok(path)
     }
     fn assess(&self) -> Result<Assessment> {
-        assess(&self.ctx, &crate::governance::capture(&self.ctx)?)
+        assess(
+            &self.ctx,
+            &crate::operations::governance::capture(&self.ctx)?,
+        )
     }
     fn book(&self, book: &OverlayRecord) -> Result<()> {
         let path = self.ctx.home.join(".agents/invocation-overlays.json");

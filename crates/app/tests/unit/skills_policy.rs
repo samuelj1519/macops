@@ -16,7 +16,7 @@ fn change_id_and_commit_revision_validation_are_safe_and_stable() -> TestResult 
 
 #[test]
 fn selectors_match_exact_ids_aliases_and_plugin_groups_without_matching_other_kinds() {
-    use crate::resource::{Management, Origin, Revision, State};
+    use crate::domain::resource::{Management, Origin, Revision, State};
     let mut resource = Resource {
         id: "capability:one".into(),
         name: "pstack@market".into(),

@@ -84,7 +84,7 @@ fn model_policy_limits_model_input_and_validates_only_token_shapes() -> TestResu
         api_token(b"synthetic-profile-key")?,
         "synthetic-profile-key"
     );
-    let docs = crate::policy::recommend::public_analysis("node")?.ok_or("snapshot")?;
+    let docs = crate::recommend::candidate::public_analysis("node")?.ok_or("snapshot")?;
     let body: Value = serde_json::from_str(&request(docs.facts()))?;
     assert_eq!(body["model"], MODEL);
     assert_eq!(body["stream"], false);

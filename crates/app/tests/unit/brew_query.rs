@@ -17,7 +17,7 @@ fn absent_slot(
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
         Err(e) => return Err(e.into()),
     }
-    let physical = crate::paths::read_path(path)?;
+    let physical = crate::platform::fs::read_path(path)?;
     let mut parent = physical.parent().ok_or("slot parent")?;
     while !parent.exists() {
         parent = parent.parent().ok_or("slot ancestor")?;
@@ -180,12 +180,12 @@ fn frozen_journal(
         crate::domain::BrewConsent::Yes,
     )?;
     let journal = crate::operations::new_journal(ctx, plan)?;
-    let directory = crate::paths::Directory::open(&store.path)?;
+    let directory = crate::platform::fs::Directory::open(&store.path)?;
     let run = BrewRunState {
         schema_version: 2,
         operation_id: journal.id.clone(),
         plan_sha256: journal.plan_sha256.clone(),
-        state: crate::capability_store::binding(&directory, &store.path)?,
+        state: crate::capability::capability_store::binding(&directory, &store.path)?,
         catalog: ctx.catalog.clone(),
         expected_loader_paths: expected_loader_paths(
             &q.binding,
@@ -220,7 +220,7 @@ fn worker_context_epoch_and_frozen_invocation_cannot_be_replaced() -> TestResult
     execution_owner(&journal, &run)?;
     let projection =
         policy::invocation_projection(&policy::checked_plan(&journal.plan)?.ok_or("plan")?)?;
-    let invocation = crate::native_runner::FrozenInvocation {
+    let invocation = crate::operations::native_runner::FrozenInvocation {
         command: projection.command,
         env: BTreeMap::from([("HOME".into(), ctx.home.to_str().ok_or("home")?.into())]),
         cwd: projection.cwd,

@@ -128,7 +128,7 @@ fn owned_query_does_not_inherit_private_file_or_stdin_descriptors() -> TestResul
 fn bound_capture_keeps_raw_output_anonymous_and_refuses_before_spawn_when_namespace_changes()
 -> TestResult {
     let directory = tempfile::tempdir_in("/private/tmp")?;
-    let root = crate::paths::Directory::open(directory.path())?;
+    let root = crate::platform::fs::Directory::open(directory.path())?;
     let mut command = Command::new("/bin/sh");
     command
         .args(["-c", "printf private-output; printf private-error >&2"])

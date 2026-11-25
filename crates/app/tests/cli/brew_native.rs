@@ -17,7 +17,7 @@ fn bound_catalog(f: &Fixture) -> TestResultString {
     fs::create_dir(&prefix)?;
     fs::create_dir(&cellar)?;
     let helper = f.root.path().join("query.rb");
-    let bytes = include_bytes!("../../src/brew/query-v1.rb");
+    let bytes = include_bytes!("../../src/software/brew/query-v1.rb");
     fs::write(&helper, bytes)?;
     let node = json!({"identity":{"device":7,"inode":8},"mode":33216,"size":32,"modified_ns":42});
     let context_id = format!("brew-context:{}", digest(&json!(["brew", prefix]))?);

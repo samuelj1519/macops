@@ -185,7 +185,7 @@ fn diff_and_receipt_views_cover_missing_destinations_budgets_and_rebound_parents
     fs::remove_file(source.join("dot_zshrc"))?;
     fs::remove_dir_all(&missing_dest)?;
     fs::create_dir_all(&missing_dest)?;
-    let (_, cov) = crate::resource_configs::collect(&ctx, &[], None)?;
+    let (_, cov) = crate::config::resource_configs::collect(&ctx, &[], None)?;
     assert!(
         cov.iter()
             .any(|c| c.issues.iter().any(|i| i == "adopted_config_unobserved"))

@@ -107,7 +107,7 @@ fn native_check_and_typed_candidate_cache_are_readonly_for_native_registry_and_s
     assert_eq!(fs::read(disk::lock_path(&ctx))?, before);
     assert_eq!(fs::read(ctx.home.join("check-called"))?, b"checked");
     let id = policy::installation_id(&disk::payload(&ctx, "alpha")?)?;
-    let now = crate::store::now();
+    let now = crate::operations::store::now();
     let scope = cache_scope(&ctx);
     let candidate = crate::policy::source_index::Candidate {
         member: id.clone(),
@@ -160,7 +160,7 @@ fn native_check_and_typed_candidate_cache_are_readonly_for_native_registry_and_s
 fn source_groups_and_recipe_changes_cannot_silently_rebind_the_installed_contract() -> TestResult {
     let (_temp, ctx, recipe) = fixture()?;
     let adopted = adopt(&ctx, &recipe)?;
-    let authority = crate::governance::capture(&ctx)?;
+    let authority = crate::operations::governance::capture(&ctx)?;
     let channels = authority
         .paths
         .dataset(crate::policy::governance::Dataset::SourceChannels);
@@ -207,7 +207,7 @@ fn source_groups_and_recipe_changes_cannot_silently_rebind_the_installed_contrac
     );
     assert!(!ctx.home.join("check-called").exists());
     let operation = adopted["journal"]["id"].as_str().ok_or("id")?;
-    let mut journal: Journal = crate::paths::regular_json(
+    let mut journal: Journal = crate::platform::fs::regular_json(
         &ctx.state
             .join("operations")
             .join(format!("{operation}.json")),
@@ -265,9 +265,9 @@ fn interrupted_adoption_finishes_only_original_owned_records_without_any_native_
 {
     let (_temp, ctx, recipe) = fixture()?;
     let store = Store::lock(&ctx)?;
-    disk::private(&ctx.config)?;
-    disk::private(&ctx.data)?;
-    disk::private(&ctx.state.join("native-skills/receipts"))?;
+    scoped_files::private(&ctx.config)?;
+    scoped_files::private(&ctx.data)?;
+    scoped_files::private(&ctx.state.join("native-skills/receipts"))?;
     let (frozen, plan) = plan(&ctx, recipe, Action::Adopt, InputFence::default())?;
     let mut journal = crate::operations::new_journal(&ctx, plan)?;
     disk::write_new(&frozen_path(&journal), &frozen)?;
@@ -305,10 +305,10 @@ fn tracking_cache_uses_actual_native_folder_hash_and_ignores_repository_only_com
 -> TestResult {
     let (_temp, ctx, mut recipe) = fixture()?;
     recipe.source.tracking_ref = Some("main".into());
-    let mut rows = policy::registry(disk::regular(&disk::lock_path(&ctx))?.as_deref())?;
+    let mut rows = policy::registry(scoped_files::regular(&disk::lock_path(&ctx))?.as_deref())?;
     let id = policy::installation_id(&disk::payload(&ctx, "alpha")?)?;
     let scope = cache_scope(&ctx);
-    let now = crate::store::now();
+    let now = crate::operations::store::now();
     let candidate = crate::policy::source_index::Candidate {
         member: id.clone(),
         repository: "owner/repo".into(),
@@ -563,7 +563,7 @@ fn root_tracking_cases(ctx: &Context, recipe: &Recipe, cache: &CheckCache) -> Te
         .get_mut(&id)
         .ok_or("candidate")?
         .locator_sha256 = policy::locator(&recipe, &id)?;
-    let mut rows = policy::registry(disk::regular(&disk::lock_path(ctx))?.as_deref())?;
+    let mut rows = policy::registry(scoped_files::regular(&disk::lock_path(ctx))?.as_deref())?;
     rows.get_mut("alpha").ok_or("row")?["skillPath"] = json!("SKILL.md");
     rows.get_mut("alpha").ok_or("row")?["skillFolderHash"] = json!("a".repeat(40));
     let same = cached_row(ctx, &recipe, &cache, &rows)?;

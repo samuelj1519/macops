@@ -15,7 +15,7 @@ pub fn skill_capability_id(
     source: &str,
 ) -> Result<String> {
     let clean = crate::policy::paths::lexical(record)?;
-    crate::resource::id(
+    crate::domain::resource::id(
         "capability",
         &("skills-cli", clean, name, source_type, source),
     )
@@ -35,7 +35,7 @@ pub fn plugin_capability_id(profile_id: &str, native_id: &str) -> String {
 }
 
 pub fn codex_capability_id(profile_id: &str, native_id: &str) -> Result<String> {
-    crate::resource::id("capability", &("codex-plugin", profile_id, native_id))
+    crate::domain::resource::id("capability", &("codex-plugin", profile_id, native_id))
 }
 
 fn codex_cache_binding<'a>(
@@ -48,7 +48,7 @@ fn codex_cache_binding<'a>(
     let version = payload.file_name()?.to_str()?;
     (record.file_name().and_then(std::ffi::OsStr::to_str) == Some("config.toml")
         && valid_plugin_id(native_id)
-        && crate::native_plugins::valid_name(version)
+        && crate::agent::native_plugins::valid_name(version)
         && payload.parent()
             == Some(
                 root.join("plugins/cache")
@@ -125,7 +125,7 @@ pub fn validate_package(package: &Package) -> Result<()> {
         CapabilityKind::CodexPlugin => {
             crate::policy::paths::lexical(record)?;
             let root = record.parent().ok_or_else(invalid_plan)?;
-            let profile = crate::resource::id("agent", &("codex", root)).ok();
+            let profile = crate::domain::resource::id("agent", &("codex", root)).ok();
             if package.kind != Kind::Plugin
                 || manager != "codex-config"
                 || source.is_some()

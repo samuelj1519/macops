@@ -1,5 +1,5 @@
 use super::*;
-use crate::{cli::Cli, migration_scan, test_support::TestResult};
+use crate::{cli::Cli, migration::migration_scan, test_support::TestResult};
 use clap::Parser;
 use std::{
     fs as disk,
@@ -53,10 +53,13 @@ fn fixture() -> std::result::Result<(tempfile::TempDir, Context), Box<dyn std::e
 fn prepared(ctx: &Context) -> Result<(Store, Batch)> {
     let store = Store::lock(ctx)?;
     let scan = migration_scan::capture(ctx, true)?;
-    Ok((store, prepare(ctx, scan, &crate::store::operation_id())?))
+    Ok((
+        store,
+        prepare(ctx, scan, &crate::operations::store::operation_id())?,
+    ))
 }
 
-use crate::store::Store;
+use crate::operations::store::Store;
 
 #[test]
 fn old_writer_observation_is_rechecked_at_placement_and_commit() -> TestResult {
@@ -120,7 +123,7 @@ fn committed_cleanup_retains_ledger_when_a_legacy_writer_returns() -> TestResult
 }
 
 fn seed_window(ctx: &Context, window: &str, count: usize) -> Result<Batch> {
-    let id = crate::store::operation_id();
+    let id = crate::operations::store::operation_id();
     let scan = migration_scan::capture(ctx, true)?;
     let batch = if window == "active-before-pending" {
         let result = prepare_with(ctx, scan, &id, || {
@@ -260,7 +263,7 @@ fn frozen_destination_roots_cannot_be_replaced_or_relearned_before_staging() -> 
         disk::create_dir_all(&ctx.config)?;
         disk::set_permissions(&ctx.config, disk::Permissions::from_mode(0o700))?;
         disk::write(ctx.config.join("foreign"), "preserve")?;
-        assert!(prepare(&ctx, scan, &crate::store::operation_id()).is_err());
+        assert!(prepare(&ctx, scan, &crate::operations::store::operation_id()).is_err());
         assert_eq!(
             disk::read_to_string(ctx.config.join("foreign"))?,
             "preserve"
@@ -407,7 +410,7 @@ fn reused_migration_parent_must_still_be_private_before_creating_another_root() 
 fn governance_observation_detects_a_migration_registered_after_its_initial_read() -> TestResult {
     let (_temp, ctx) = fixture()?;
     let _store = Store::lock(&ctx)?;
-    let observed = crate::governance::capture(&ctx)?;
+    let observed = crate::operations::governance::capture(&ctx)?;
     disk::write(ctx.state.join(ACTIVE), "unknown active record")?;
     assert_eq!(
         observed.verify().err().ok_or("late marker")?.code,

@@ -29,7 +29,7 @@ fn setup() -> Result<(
         profile.join("settings.json"),
         br#"{"model":"original","env":{"CANARY":"fixture-secret"}}"#,
     )?;
-    let candidate = crate::resource_agents::profile_roots(&ctx)?
+    let candidate = crate::agent::resource_agents::profile_roots(&ctx)?
         .into_iter()
         .find(|resource| resource.name == "claude:mi")
         .ok_or_else(conflict)?;
@@ -114,7 +114,7 @@ impl crate::test_support::PluginTargetFixture {
         if client == "codex" {
             let dir = ctx.home.join(".codex");
             fs::create_dir(&dir)?;
-            let selected = crate::resource_agents::profile_roots(&ctx)?
+            let selected = crate::agent::resource_agents::profile_roots(&ctx)?
                 .into_iter()
                 .find(|item| item.name == "codex:default")
                 .ok_or_else(conflict)?;
@@ -160,7 +160,7 @@ fn recovers_after_the_payload_and_first_record_were_published() -> TestResult {
     store.save(&reserved.journal)?;
     let other_path = ctx.home.join(".claude-other");
     fs::create_dir(&other_path)?;
-    let other_profile = crate::resource_agents::profile_roots(&ctx)?
+    let other_profile = crate::agent::resource_agents::profile_roots(&ctx)?
         .into_iter()
         .find(|item| item.name == "claude:other")
         .ok_or("other profile")?;
@@ -176,7 +176,7 @@ fn recovers_after_the_payload_and_first_record_were_published() -> TestResult {
     assert!(recovery_matches(&reserved.journal, Some(&target))?);
     let store = Store::lock(&ctx)?;
     move_tree(&reserved.publication.trees[0])?;
-    crate::source_files::publish_checked(&reserved.publication.files[0], || Ok(()))?;
+    crate::source::source_files::publish_checked(&reserved.publication.files[0], || Ok(()))?;
     drop(store);
     let recovered = crate::operations::recover_before_write_checked(&ctx, None, |journal| {
         recovery_matches(journal, Some(&target))
@@ -191,7 +191,7 @@ fn recovers_after_the_payload_and_first_record_were_published() -> TestResult {
         fs::read(live.join("plugins/cache/fixture-market/item/1.0/SKILL.md"))?,
         b"fixture plugin"
     );
-    let settings: Value = crate::paths::regular_json(&live.join("settings.json"))?;
+    let settings: Value = crate::platform::fs::regular_json(&live.join("settings.json"))?;
     assert_eq!(settings["model"], "original");
     assert_eq!(settings["enabledPlugins"]["item@fixture-market"], true);
     assert_eq!(
@@ -232,7 +232,7 @@ fn blocks_a_changed_configuration_and_preserves_the_prepared_objects() -> TestRe
     assert_eq!(fs::read(&settings)?, changed);
     assert!(plugin.payload.is_dir());
     assert_eq!(
-        crate::source_files::position(&reserved.publication.files[2])?,
+        crate::source::source_files::position(&reserved.publication.files[2])?,
         Position::Unknown
     );
     let mut journal = crate::operations::locked_journal(&store, &reserved.journal.id)?;
@@ -350,7 +350,7 @@ fn failure_while_staging_last_file_cleans_all_earlier_preimages() -> TestResult 
             .exists()
     );
     assert!(plugin.payload.exists());
-    let history = crate::store::history(&ctx)?;
+    let history = crate::operations::store::history(&ctx)?;
     assert!(history.is_empty(), "{history:?}");
     Ok(())
 }
@@ -645,7 +645,7 @@ fn refuses_to_continue_from_a_changed_pinned_marketplace_checkout() -> TestResul
     fs::create_dir(&remote)?;
     fs::write(remote.join("manifest"), b"fixed manifest")?;
     let original = slot(&remote)?;
-    let witness = crate::source_tree::observe(&original)?.ok_or("marketplace evidence")?;
+    let witness = crate::source::source_tree::observe(&original)?.ok_or("marketplace evidence")?;
     let checkout = (original, witness);
     let plugin = InstalledPlugin {
         checkout: Some(&checkout),
@@ -699,7 +699,7 @@ fn failed_reservation_write_keeps_authoritative_sidecar_and_leaves_live_files_in
     let before = fs::read(ctx.state.join(&name))?;
     assert!(publish(&ctx, &store, &native, &target, &plugin).is_err());
     assert_eq!(fs::read(ctx.state.join(name))?, before);
-    assert!(crate::store::active(&ctx)?.is_none());
+    assert!(crate::operations::store::active(&ctx)?.is_none());
     assert!(plugin.payload.exists());
     assert!(
         !target
@@ -734,7 +734,7 @@ fn a_new_target_cannot_claim_an_old_prepared_publication() -> TestResult {
     )?);
     let settings = target.open()?.path.join("settings.json");
     assert!(fs::read_to_string(settings)?.contains("original"));
-    assert!(crate::store::active(&ctx)?.is_none());
+    assert!(crate::operations::store::active(&ctx)?.is_none());
     Ok(())
 }
 

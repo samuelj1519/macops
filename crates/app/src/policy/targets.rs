@@ -1,7 +1,7 @@
 use crate::{
+    domain::resource,
     domain::{Action, Journal, Kind, Observation, Package, Provider},
     error::{Error, Result},
-    resource,
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -120,11 +120,11 @@ pub fn validate_journal(journal: &Journal) -> Result<()> {
 mod tests;
 
 pub fn merge_views(
-    items: Vec<crate::resource::Resource>,
-) -> (Vec<crate::resource::Resource>, bool) {
-    use crate::resource::{Data, Management, State};
+    items: Vec<crate::domain::resource::Resource>,
+) -> (Vec<crate::domain::resource::Resource>, bool) {
+    use crate::domain::resource::{Data, Management, State};
     use std::collections::btree_map::Entry;
-    let mut map = BTreeMap::<String, (crate::resource::Resource, BTreeSet<String>)>::new();
+    let mut map = BTreeMap::<String, (crate::domain::resource::Resource, BTreeSet<String>)>::new();
     for mut incoming in items {
         let recipe = match &incoming.data {
             Data::Application { recipe_ref, .. } => recipe_ref.clone(),
@@ -175,8 +175,8 @@ pub fn merge_views(
     (resources, conflict)
 }
 
-pub fn baseline(before: &Observation, current: Observation) -> crate::resource::Baseline {
-    use crate::resource::{Baseline, Comparison};
+pub fn baseline(before: &Observation, current: Observation) -> crate::domain::resource::Baseline {
+    use crate::domain::resource::{Baseline, Comparison};
     let comparable = (matches!(before, Observation::UvTool { .. })
         && matches!(
             current,

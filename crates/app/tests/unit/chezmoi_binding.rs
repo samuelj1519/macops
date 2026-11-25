@@ -36,7 +36,7 @@ fn native_paths_and_query_errors_do_not_echo_secret_stdout() -> TestResult {
         (None, true, b"SYNTHETIC_SECRET".to_vec()),
         (Some(0), false, vec![0xff]),
     ] {
-        let output = crate::process::BinaryOutput {
+        let output = crate::platform::process::BinaryOutput {
             code,
             uncertain,
             stdout,

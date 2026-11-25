@@ -1,5 +1,5 @@
 use super::*;
-use crate::codex_install::{
+use crate::agent::codex_install::{
     InitialActivation, install_using, managed_profiles,
     tests::{FIXTURE as CODEX_FIXTURE, fake_binary, fixture_context, offer},
 };
@@ -177,7 +177,8 @@ fn session_admission_fences_market_registration_but_accepts_native_boolean_edits
     let workspace = Directory::open(&ctx.home)?;
     let config = selected.profile.path.join(CONFIG);
     let original = fs::read(&config)?;
-    let (_, native_toggle) = crate::codex_install::set_enabled(&original, "item@market", true)?;
+    let (_, native_toggle) =
+        crate::agent::codex_install::set_enabled(&original, "item@market", true)?;
     fs::write(&config, &native_toggle)?;
     admit(&ctx, &selected, &workspace, None, None, &FIXTURE)?;
     let original_url = offer()?.url()?;
@@ -216,7 +217,7 @@ fn session_rechecks_frozen_directory_identities_after_native_evidence_reads() ->
             let allocation = fs::read_dir(state)?
                 .filter_map(std::result::Result::ok)
                 .map(|entry| entry.path())
-                .find(|path| crate::codex_install::reserved_name(path))
+                .find(|path| crate::agent::codex_install::reserved_name(path))
                 .ok_or_else(stale)?;
             fs::rename(allocation.join("tmp"), allocation.join("original-tmp"))?;
             symlink("/private/tmp", allocation.join("tmp"))?;
@@ -243,14 +244,14 @@ fn session_dialog_displays_the_owned_plugin_and_writes_only_after_confirmation()
     assert!(details_using(&ctx, "codex:default", &FIXTURE).is_none());
     let base = details_using(&ctx, &label, &FIXTURE).ok_or("profile details")?;
     fs::create_dir(ctx.home.join(".codex"))?;
-    let (profiles, _) = crate::resource_agents::collect(&ctx, None, &[])?;
+    let (profiles, _) = crate::agent::resource_agents::collect(&ctx, None, &[])?;
     assert!(profiles.iter().any(|profile| profile.name == label
-        && profile.management == crate::resource::Management::Adopted));
+        && profile.management == crate::domain::resource::Management::Adopted));
     assert!(
         profiles
             .iter()
             .any(|profile| profile.name == "codex:default"
-                && profile.management == crate::resource::Management::Untracked)
+                && profile.management == crate::domain::resource::Management::Untracked)
     );
     assert_eq!(base.plugin, "item@market");
     assert_eq!(base.preference, "按原生设置");
@@ -454,13 +455,13 @@ fn admitted_session_lease_blocks_uninstall_until_the_inherited_descriptor_closes
     let (_command, lease) = admit(&ctx, &selected, &workspace, None, None, &FIXTURE)?;
     let flags = rustix::io::fcntl_getfd(&lease).map_err(std::io::Error::from)?;
     assert!(!flags.contains(rustix::io::FdFlags::CLOEXEC));
-    let blocked = crate::resource_agents::uninstall(&ctx, &label, false, true)
+    let blocked = crate::agent::resource_agents::uninstall(&ctx, &label, false, true)
         .err()
         .ok_or("a session with a lease must block uninstall")?;
     assert_eq!(blocked.code, "agent_profile_in_use");
     assert!(selected.root.path.exists());
     drop(lease);
-    let archived = crate::resource_agents::uninstall(&ctx, "Codex · item", false, true)?;
+    let archived = crate::agent::resource_agents::uninstall(&ctx, "Codex · item", false, true)?;
     assert_eq!(archived["phase"], "succeeded");
     assert!(!selected.root.path.exists());
     assert_eq!(managed_profiles(&ctx)?, []);

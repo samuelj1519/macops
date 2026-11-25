@@ -151,7 +151,7 @@ fn legacy_invocation_metadata_is_read_only_from_the_recorded_tree() -> TestResul
     fs::write(root.join("agents/openai.yaml"), policy)?;
     let slot = slot(temp.path(), "skill")?;
     let tree = observe(&slot)?.ok_or("recorded skill tree")?;
-    let read = |relative| crate::source_invocation::metadata(&slot, &tree, relative);
+    let read = |relative| crate::source::source_invocation::metadata(&slot, &tree, relative);
     assert_eq!(read("SKILL.md")?.as_deref(), Some(skill.as_slice()));
     assert_eq!(
         read("agents/openai.yaml")?.as_deref(),

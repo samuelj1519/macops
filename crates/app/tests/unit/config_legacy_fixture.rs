@@ -32,7 +32,7 @@ pub(super) fn apply(ctx: &Context, key: &str, dry: bool, _yes: bool) -> Result<V
         ));
     };
     let mapping = config_inventory::discover(ctx);
-    let receipts = crate::target::receipts(ctx)?;
+    let receipts = crate::catalog::target::receipts(ctx)?;
     let warnings = policy::validate_static_apply_eligibility(
         &mapping.coverage.state,
         &mapping.coverage.issues,

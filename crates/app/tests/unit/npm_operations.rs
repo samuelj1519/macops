@@ -81,18 +81,18 @@ fn replacing_an_ancestor_changes_empty_namespace_observation_even_with_same_leaf
     let ancestor = root.path().join("ancestor");
     let prefix = ancestor.join("prefix");
     fs::create_dir_all(&prefix)?;
-    let query = crate::npm_local::capture(
+    let query = crate::software::npm_local::capture(
         &prefix,
         "demo",
         crate::domain::NpmContract::DeclaredV1,
         false,
     )?;
-    let before = crate::npm_local::observe(&query, false, &mut 1024)?;
+    let before = crate::software::npm_local::observe(&query, false, &mut 1024)?;
     let relocated = root.path().join("relocated");
     fs::rename(&ancestor, &relocated)?;
     fs::create_dir(&ancestor)?;
     fs::rename(relocated.join("prefix"), &prefix)?;
-    let current = crate::npm_local::observe(&query, false, &mut 1024)?;
+    let current = crate::software::npm_local::observe(&query, false, &mut 1024)?;
     assert!(matches!(&before, Observation::Missing { .. }));
     assert!(matches!(&current, Observation::Missing { .. }));
     assert_ne!(before, current);

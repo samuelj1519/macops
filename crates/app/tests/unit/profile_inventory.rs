@@ -28,7 +28,7 @@ fn profile_assessment_builds_owned_changes_without_writing_configs_or_exposing_c
     let target = profile.join("settings.json");
     let before = br#"{ "model" : "custom-\u006dodel", "env":{"TOKEN":"PRIVATE_VALUE"} }"#;
     fs::write(&target, before)?;
-    let authority = crate::governance::capture(&ctx)?;
+    let authority = crate::operations::governance::capture(&ctx)?;
     let selected = crate::policy::profile_select::split(delivery::Selection::Explicit(vec![
         "profile:mi".into(),
     ]))?;
@@ -102,7 +102,11 @@ fn configuration_provenance_hashes_bind_live_and_source_independently() -> TestR
         ctx.settings.join("manifests/skill-profiles.json"),
         br#"{"claude":{"mi":{"plugins_off":["p@vendor"]}}}"#,
     )?;
-    let plan = assess(&ctx, &crate::governance::capture(&ctx)?, &selected()?)?;
+    let plan = assess(
+        &ctx,
+        &crate::operations::governance::capture(&ctx)?,
+        &selected()?,
+    )?;
     assert_ne!(
         hash(&plan, &ctx, &source_file)?,
         hash(&plan, &ctx, &ctx.home.join(".claude-mi/settings.json"))?
@@ -136,7 +140,11 @@ fn pstack_provenance_uses_the_actual_registered_release_even_with_the_same_skill
                 &json!({"version":2,"plugins":{"pstack@cursor-plugins":[{"scope":"user","installPath":payload,"version":version}]}}),
             )?,
         )?;
-        let plan = assess(&ctx, &crate::governance::capture(&ctx)?, &selected()?)?;
+        let plan = assess(
+            &ctx,
+            &crate::operations::governance::capture(&ctx)?,
+            &selected()?,
+        )?;
         hashes.push(hash(&plan, &ctx, &root.join("settings.json"))?);
     }
     assert_ne!(hashes[0], hashes[1]);
@@ -161,7 +169,11 @@ fn ignored_git_objects_do_not_expand_or_invalidate_static_profile_source_scope()
         ctx.settings.join("manifests/skill-profiles.json"),
         br#"{"claude":{"mi":{"plugins_off":["p@vendor"]}}}"#,
     )?;
-    let plan = assess(&ctx, &crate::governance::capture(&ctx)?, &selected()?)?;
+    let plan = assess(
+        &ctx,
+        &crate::operations::governance::capture(&ctx)?,
+        &selected()?,
+    )?;
     assert_eq!(plan.patches.len(), 2);
     fs::write(deep.join("pack"), b"unrelated Git metadata")?;
     plan.verify()?;
@@ -183,15 +195,23 @@ fn redirected_source_preserves_its_root_directive_but_rejects_unexamined_outer_c
         ctx.settings.join("manifests/skill-profiles.json"),
         br#"{"claude":{"mi":{"plugins_off":["p@vendor"]}}}"#,
     )?;
-    let plan = assess(&ctx, &crate::governance::capture(&ctx)?, &selected()?)?;
+    let plan = assess(
+        &ctx,
+        &crate::operations::governance::capture(&ctx)?,
+        &selected()?,
+    )?;
     assert!(plan.patches.iter().any(|p| p.path == target));
     fs::write(source.join(".chezmoidata.json"), b"{}")?;
     assert!(plan.verify().is_err());
     assert_eq!(
-        assess(&ctx, &crate::governance::capture(&ctx)?, &selected()?)
-            .err()
-            .ok_or("unknown control")?
-            .code,
+        assess(
+            &ctx,
+            &crate::operations::governance::capture(&ctx)?,
+            &selected()?
+        )
+        .err()
+        .ok_or("unknown control")?
+        .code,
         "profile_config_dynamic_source"
     );
     assert_eq!(fs::read(target)?, b"{}");

@@ -108,11 +108,11 @@ struct Batch {
 }
 fn batch(f: &Fixture, change: &str) -> std::result::Result<Batch, Box<dyn std::error::Error>> {
     let store = Store::lock(&f.ctx)?;
-    let authority = crate::governance::capture(&f.ctx)?;
-    let assessment = crate::invocation_inventory::assess(&f.ctx, &authority)?;
+    let authority = crate::operations::governance::capture(&f.ctx)?;
+    let assessment = crate::capability::invocation_inventory::assess(&f.ctx, &authority)?;
     let root = backup(&authority, change)?;
     let blobs = files::Blobs::create(&root)?;
-    let operation = crate::store::operation_id();
+    let operation = crate::operations::store::operation_id();
     let manifest = manifest(&f.ctx, &authority, &assessment, &operation, change, &blobs)?;
     let raw = bytes(&manifest)?;
     let digest = files::hash(&raw);
@@ -338,10 +338,10 @@ fn adopted_receipt(
         paths: vec![],
         exact_version_required: false,
     };
-    let query = crate::capability_local::capture(&package)?;
+    let query = crate::capability::capability_local::capture(&package)?;
     let receipt = Receipt {
         scope: Some(f.ctx.scope.clone()),
-        observation: crate::capability_local::observe_default(&package.id, &query)?,
+        observation: crate::capability::capability_local::observe_default(&package.id, &query)?,
         query: Some(QuerySpec::LocalCapability(query)),
         package,
         operation_id: "OP-ADOPT".into(),
@@ -389,7 +389,7 @@ fn partial_commit_recovery_preserves_an_adopted_payload_and_its_full_before_rece
         return Err("query".into());
     };
     assert_eq!(
-        crate::capability_local::observe_default(&receipt.package.id, &query)?,
+        crate::capability::capability_local::observe_default(&receipt.package.id, &query)?,
         receipt.observation
     );
     Ok(())
@@ -611,7 +611,7 @@ fn no_pending_cannot_finish_a_batch_with_unpublished_staging_or_missing_retained
 #[test]
 fn duplicate_change_ids_do_not_replace_immutable_backups() -> TestResult {
     let f = Fixture::new()?;
-    let authority = crate::governance::capture(&f.ctx)?;
+    let authority = crate::operations::governance::capture(&f.ctx)?;
     let root = backup(&authority, "EXCLUSIVE")?;
     Store::atomic_bytes(root.file(), "marker", b"retained", true)?;
     assert!(backup(&authority, "EXCLUSIVE").is_err());
@@ -774,12 +774,15 @@ fn native_link_batch_creates_missing_parent_retires_owned_links_and_keeps_model_
 
 fn link_batch(f: &Fixture, change: &str) -> std::result::Result<Batch, Box<dyn std::error::Error>> {
     let store = Store::lock(&f.ctx)?;
-    let authority = crate::governance::capture(&f.ctx)?;
-    let plan =
-        crate::link_inventory::assess(&f.ctx, &authority, crate::policy::delivery::Selection::All)?;
+    let authority = crate::operations::governance::capture(&f.ctx)?;
+    let plan = crate::capability::link_inventory::assess(
+        &f.ctx,
+        &authority,
+        crate::policy::delivery::Selection::All,
+    )?;
     let root = backup(&authority, change)?;
     let blobs = files::Blobs::create(&root)?;
-    let operation = crate::store::operation_id();
+    let operation = crate::operations::store::operation_id();
     let manifest = links_manifest(&f.ctx, &authority, &plan, &operation, change, &blobs)?;
     let raw = bytes(&manifest)?;
     let digest = files::hash(&raw);
@@ -997,7 +1000,7 @@ fn original_v2_codex_policy_wire_and_mode_less_readonly_links_remain_fully_recov
 fn fixed_recipe_book_witness_is_unique_and_bound_to_the_recovery_config_root() -> TestResult {
     let f = Fixture::new()?;
     let mut b = batch(&f, "RECIPE-BOOK-SCOPE")?;
-    let book_path = crate::native_skills::book_path(&f.ctx);
+    let book_path = crate::skills::native_skills::book_path(&f.ctx);
     assert_eq!(b.manifest.schema_version, policy::POLICY_MANIFEST_VERSION);
     let book = policy::recipe_book_witness(&b.manifest)?.clone();
     assert_eq!(book.path, book_path);
@@ -1057,7 +1060,7 @@ fn legacy_policy_recovery_preserves_pending_when_a_fixed_recipe_owns_a_planned_t
 }
 
 fn declare_example_recipe(ctx: &Context) -> TestResult {
-    let book = crate::native_skills::book_path(ctx);
+    let book = crate::skills::native_skills::book_path(ctx);
     fs::create_dir_all(&ctx.config)?;
     fs::write(
         book,
@@ -1446,7 +1449,7 @@ fn a_governance_journal_cannot_recover_another_categorys_manifest() -> TestResul
     b.journal.plan.package.id = "governance:links".into();
     b.journal.plan.recipe_sha256 = fingerprint(&b.journal.plan.package)?;
     b.journal.plan_sha256 = fingerprint(&b.journal.plan)?;
-    crate::store::validate_journal(&b.journal)?;
+    crate::operations::store::validate_journal(&b.journal)?;
     assert!(load(&b.store, &b.journal).is_err());
     assert!(b.manifest.pending.exists());
     Ok(())

@@ -96,7 +96,7 @@ fn browser_rows_keep_application_and_profile_resource_ids() -> TestResult {
     ])?;
     let ctx = Context::from_cli(&cli, &mut vec![])?;
     for (kind, category) in [(Kind::Apps, "applications"), (Kind::Agents, "agents")] {
-        let snapshot = crate::resource_inventory::snapshot(&ctx, Some(category), None)?;
+        let snapshot = crate::catalog::resource_inventory::snapshot(&ctx, Some(category), None)?;
         let (_, view) = Session::load(&ctx, kind)?;
         assert!(!snapshot.resources.is_empty());
         for resource in &snapshot.resources {
@@ -106,7 +106,7 @@ fn browser_rows_keep_application_and_profile_resource_ids() -> TestResult {
                 .find(|item| item.id == resource.id)
                 .ok_or("ID missing in browser")?;
             assert_eq!(item.name, resource.name);
-            if let crate::resource::Data::Agent { model, profile, .. } = &resource.data {
+            if let crate::domain::resource::Data::Agent { model, profile, .. } = &resource.data {
                 let expected = format!("fixture-{profile}");
                 assert_eq!(model.selected.as_deref(), Some(expected.as_str()));
                 assert!(item.details.contains(&format!("模型 {expected}")));
@@ -118,7 +118,7 @@ fn browser_rows_keep_application_and_profile_resource_ids() -> TestResult {
 
 #[test]
 fn agent_row_hides_the_generated_label_suffix_and_keeps_the_profile_identity() -> TestResult {
-    use crate::resource::{Data, Management, Model, Resource, RuntimeBinding, State};
+    use crate::domain::resource::{Data, Management, Model, Resource, RuntimeBinding, State};
     let path = std::path::PathBuf::from("/fixture/claude-profile.AbC123/home/.claude");
     let item = resource_item(
         Resource {

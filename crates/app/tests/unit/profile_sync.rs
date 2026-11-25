@@ -98,9 +98,13 @@ fn adopted_plugin_receipts_project_settings_before_mutation_and_match_the_final_
             &json!({"version":2,"plugins":{"review@official":[{"scope":"user","installPath":payload,"version":"1.0.0"}]}}),
         )?,
     )?;
-    let package =
-        crate::capability_local::resolve_package(&ctx, "plugin:review@official", false, false)?
-            .ok_or("package")?;
+    let package = crate::capability::capability_local::resolve_package(
+        &ctx,
+        "plugin:review@official",
+        false,
+        false,
+    )?
+    .ok_or("package")?;
     let plan = crate::operations::plan(&ctx, &package, Action::Adopt, None, false)?;
     crate::operations::execute(&ctx, plan, false, true)?;
     let old = fs::read(ctx.state.join("receipts.json"))?;
@@ -114,7 +118,7 @@ fn adopted_plugin_receipts_project_settings_before_mutation_and_match_the_final_
         return Err("query".into());
     };
     assert_eq!(
-        crate::capability_local::observe_default(&package.id, query)?,
+        crate::capability::capability_local::observe_default(&package.id, query)?,
         receipt.observation
     );
     let Observation::CapabilityPack {
@@ -245,12 +249,12 @@ fn reviewer_retired_unselected_owner_is_still_reported_pending() -> TestResult {
 fn reviewer_absent_config_lookup_cannot_change_after_profile_assessment() -> TestResult {
     let (_temp, ctx, _rule) = fixture()?;
     fs::write(ctx.home.join(".claude-mi/settings.json"), b"{}")?;
-    let governance = crate::governance::capture(&ctx)?;
+    let governance = crate::operations::governance::capture(&ctx)?;
     let selected =
         crate::policy::profile_select::split(crate::policy::delivery::Selection::Explicit(vec![
             "profile:mi".into(),
         ]))?;
-    let assessment = crate::profile_inventory::assess(&ctx, &governance, &selected)?;
+    let assessment = crate::agent::profile_inventory::assess(&ctx, &governance, &selected)?;
     assert_eq!(assessment.patches.len(), 1);
     let source = ctx.home.join("elsewhere-source");
     fs::create_dir_all(source.join("dot_claude-mi"))?;
@@ -261,7 +265,7 @@ fn reviewer_absent_config_lookup_cannot_change_after_profile_assessment() -> Tes
         &config,
         serde_json::to_vec(&json!({"sourceDir":source,"destDir":ctx.home}))?,
     )?;
-    let now = crate::config_inventory::discover(&ctx);
+    let now = crate::config::config_inventory::discover(&ctx);
     assert!(
         now.candidates
             .iter()
@@ -331,18 +335,18 @@ fn reviewer_new_chezmoi_lookup_blocks_frozen_profile_transaction_before_live_wri
     let (_temp, ctx, _rule) = fixture()?;
     let target = ctx.home.join(".claude-mi/settings.json");
     fs::write(&target, b"{}")?;
-    let governance = crate::governance::capture(&ctx)?;
+    let governance = crate::operations::governance::capture(&ctx)?;
     let selected =
         crate::policy::profile_select::split(crate::policy::delivery::Selection::Explicit(vec![
             "profile:mi".into(),
         ]))?;
     let assessment = Assessment {
         links: None,
-        configuration: crate::profile_inventory::assess(&ctx, &governance, &selected)?,
+        configuration: crate::agent::profile_inventory::assess(&ctx, &governance, &selected)?,
         profiles_selected: true,
     };
     let store = Store::lock(&ctx)?;
-    let operation = crate::store::operation_id();
+    let operation = crate::operations::store::operation_id();
     let root = backup(&governance, "LOOKUP-CHANGED")?;
     let blobs = files::Blobs::create(&root)?;
     let frozen = manifest(
@@ -490,17 +494,17 @@ fn reviewer_higher_priority_default_source_lookup_cannot_change_after_assessment
         "XDG_CONFIG_DIRS".into(),
         ctx.home.join("absent-config-dirs"),
     );
-    let governance = crate::governance::capture(&ctx)?;
+    let governance = crate::operations::governance::capture(&ctx)?;
     let selected =
         crate::policy::profile_select::split(crate::policy::delivery::Selection::Explicit(vec![
             "profile:mi".into(),
         ]))?;
-    let assessment = crate::profile_inventory::assess(&ctx, &governance, &selected)?;
+    let assessment = crate::agent::profile_inventory::assess(&ctx, &governance, &selected)?;
     assert_eq!(assessment.patches.len(), 2);
     let primary = ctx.home.join(".local/share/chezmoi");
     fs::create_dir_all(primary.join("dot_claude-mi"))?;
     fs::write(primary.join("dot_claude-mi/settings.json"), b"{}")?;
-    let now = crate::config_inventory::discover(&ctx);
+    let now = crate::config::config_inventory::discover(&ctx);
     assert_eq!(now.roots.ok_or("roots")?.configured_source, primary);
     let verified = assessment.verify();
     eprintln!("DEFAULT_SOURCE_LOOKUP_VERIFY={verified:?}");
@@ -513,8 +517,8 @@ fn reviewer_higher_priority_default_source_lookup_cannot_change_after_assessment
 
 #[test]
 fn reviewer_v4_live_source_recovery_preserves_before_after_and_unknown_boundaries() -> TestResult {
-    use crate::capability_tx::{candidate_for, prepare, recover_journal};
-    use crate::store::Phase;
+    use crate::capability::capability_tx::{candidate_for, prepare, recover_journal};
+    use crate::operations::store::Phase;
     for step in 0..=4 {
         let (_temp, mut ctx, _rule) = fixture()?;
         let target = ctx.home.join(".claude-mi/settings.json");
@@ -528,17 +532,17 @@ fn reviewer_v4_live_source_recovery_preserves_before_after_and_unknown_boundarie
         fs::write(&source_target, source_before)?;
         ctx.chezmoi.source = Some(source);
         ctx.chezmoi.destination = Some(ctx.home.clone());
-        let governance = crate::governance::capture(&ctx)?;
+        let governance = crate::operations::governance::capture(&ctx)?;
         let selected = crate::policy::profile_select::split(
             crate::policy::delivery::Selection::Explicit(vec!["profile:mi".into()]),
         )?;
         let assessment = Assessment {
             links: None,
-            configuration: crate::profile_inventory::assess(&ctx, &governance, &selected)?,
+            configuration: crate::agent::profile_inventory::assess(&ctx, &governance, &selected)?,
             profiles_selected: true,
         };
         let store = Store::lock(&ctx)?;
-        let operation = crate::store::operation_id();
+        let operation = crate::operations::store::operation_id();
         let change = format!("REVIEW-V4-{step}");
         let root = backup(&governance, &change)?;
         let blobs = files::Blobs::create(&root)?;

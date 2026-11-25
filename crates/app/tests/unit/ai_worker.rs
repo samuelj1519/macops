@@ -1,5 +1,5 @@
 use super::*;
-use crate::{ai_state::Mise, cli::Cli, domain::fingerprint, test_support::TestResult};
+use crate::{agent::ai_state::Mise, cli::Cli, domain::fingerprint, test_support::TestResult};
 use clap::Parser;
 use std::{fs, path::PathBuf};
 

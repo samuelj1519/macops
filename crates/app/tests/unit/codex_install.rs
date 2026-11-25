@@ -222,12 +222,12 @@ fn installs_into_an_existing_codex_profile_with_original_preferences() -> TestRe
         &settings,
         b"model = 'fixture-existing'\n[features]\nfast_mode = true\n",
     )?;
-    let candidate = crate::resource_agents::profile_roots(&ctx)?
+    let candidate = crate::agent::resource_agents::profile_roots(&ctx)?
         .into_iter()
         .find(|item| item.name == "codex:default")
         .ok_or("missing target")?;
-    let target = crate::resource_agents::InstallTarget::capture(&ctx, &candidate)?;
-    crate::resource_agents::enroll(&ctx, &target)?;
+    let target = crate::agent::resource_agents::InstallTarget::capture(&ctx, &candidate)?;
+    crate::agent::resource_agents::enroll(&ctx, &target)?;
     let result = install_with_target(
         &ctx,
         offer()?,
@@ -263,11 +263,11 @@ fn existing_codex_target_continues_verified_market_and_never_replaces_an_already
         let profile = ctx.home.join(".codex");
         fs::create_dir(&profile)?;
         fs::write(profile.join(CONFIG), "model = 'fixture-existing'\n")?;
-        let candidate = crate::resource_agents::profile_roots(&ctx)?
+        let candidate = crate::agent::resource_agents::profile_roots(&ctx)?
             .into_iter()
             .find(|item| item.name == "codex:default")
             .ok_or("missing target")?;
-        let target = crate::resource_agents::InstallTarget::capture(&ctx, &candidate)?;
+        let target = crate::agent::resource_agents::InstallTarget::capture(&ctx, &candidate)?;
         let store = Store::lock(&ctx)?;
         let offer = offer()?;
         let binary = fake_binary(&ctx)?;
@@ -293,11 +293,13 @@ fn existing_codex_target_continues_verified_market_and_never_replaces_an_already
         assert_eq!(market.phase, Phase::Succeeded);
         fs::create_dir(checkout.join(".git"))?;
         fs::write(checkout.join(".git/HEAD"), b"ref: refs/heads/main\n")?;
-        assert!(crate::plugin_target::recovery_matches(
+        assert!(crate::agent::plugin_target::recovery_matches(
             &market,
             Some(&target)
         )?);
-        assert!(!crate::plugin_target::recovery_matches(&market, None)?);
+        assert!(!crate::agent::plugin_target::recovery_matches(
+            &market, None
+        )?);
         if plugin_done {
             let installed = stage(
                 &ctx,
@@ -323,12 +325,12 @@ fn existing_codex_target_continues_verified_market_and_never_replaces_an_already
         };
         assert!(run(InitialActivation::Disabled).is_err());
         assert_eq!(
-            crate::store::history(&ctx)?.len(),
+            crate::operations::store::history(&ctx)?.len(),
             if plugin_done { 2 } else { 1 }
         );
         let first = run(InitialActivation::Enabled)?;
         assert_eq!(first["journal"]["phase"], "succeeded");
-        assert_eq!(crate::store::history(&ctx)?.len(), 3);
+        assert_eq!(crate::operations::store::history(&ctx)?.len(), 3);
         assert_eq!(
             fs::read(profile.join(".tmp/marketplaces/market/.git/HEAD"))?,
             b"ref: refs/heads/main\n"
@@ -344,19 +346,19 @@ fn existing_codex_target_continues_verified_market_and_never_replaces_an_already
             )?,
             first
         );
-        assert_eq!(crate::store::history(&ctx)?.len(), 3);
+        assert_eq!(crate::operations::store::history(&ctx)?.len(), 3);
         fs::write(
             profile.join("plugins/cache/market/item/1.0.0/.codex-plugin/plugin.json"),
             b"unexpected modification",
         )?;
         assert!(run(InitialActivation::Enabled).is_err());
-        assert_eq!(crate::store::history(&ctx)?.len(), 3);
+        assert_eq!(crate::operations::store::history(&ctx)?.len(), 3);
     }
     Ok(())
 }
 
 fn awaiting_publication(ctx: &Context, journal: &Journal) -> Result<bool> {
-    let records = crate::store::history(ctx)?;
+    let records = crate::operations::store::history(ctx)?;
     let (candidates, _) = awaiting_followup(ctx, &records)?;
     Ok(candidates.contains(&journal.id))
 }
@@ -468,7 +470,7 @@ fn a_successor_completed_during_codex_resume_confirmation_is_never_replayed() ->
         Ok(())
     });
     assert!(chosen.is_err());
-    let history = crate::store::history(&ctx)?;
+    let history = crate::operations::store::history(&ctx)?;
     assert_eq!(history.len(), 3);
     assert_eq!(
         history
@@ -519,7 +521,7 @@ fn public_agent_resume_routes_to_codex_and_cannot_bypass_binary_verification() -
         .err()
         .ok_or("fake native binary is not authorized")?;
     assert_eq!(error.code, "codex_install_binary_unverified");
-    assert_eq!(crate::store::history(&ctx)?.len(), 1);
+    assert_eq!(crate::operations::store::history(&ctx)?.len(), 1);
     Ok(())
 }
 
@@ -569,7 +571,7 @@ fn isolated_market_retry_resumes_the_frozen_install_at_most_once() -> TestResult
         Err(Error::attention("cancelled", "fixture"))
     });
     assert_eq!(cancelled.err().ok_or("refused")?.code, "cancelled");
-    assert_eq!(crate::store::history(&ctx)?.len(), 1);
+    assert_eq!(crate::operations::store::history(&ctx)?.len(), 1);
 
     let binary = fake_binary(&ctx)?;
     let run = |mode| install_using(&ctx, offer.clone(), binary.clone(), &FIXTURE, mode);
@@ -580,7 +582,7 @@ fn isolated_market_retry_resumes_the_frozen_install_at_most_once() -> TestResult
             .code,
         "plugin_install_activation_changed"
     );
-    assert_eq!(crate::store::history(&ctx)?.len(), 1);
+    assert_eq!(crate::operations::store::history(&ctx)?.len(), 1);
     let result = run(InitialActivation::Enabled)?;
     assert_eq!(result["journal"]["phase"], "succeeded");
     let receipt = result["journal"]["id"]
@@ -589,13 +591,13 @@ fn isolated_market_retry_resumes_the_frozen_install_at_most_once() -> TestResult
     assert!(receipt.ends_with("-receipt"));
     assert_ne!(receipt, format!("{}-receipt", market.id));
     assert!(result["codexHome"].is_string());
-    assert_eq!(crate::store::history(&ctx)?.len(), 3);
+    assert_eq!(crate::operations::store::history(&ctx)?.len(), 3);
     assert!(!awaiting_publication(&ctx, &market)?);
     assert!(resume_using(&ctx, &market, false, true, &FIXTURE, |_, _| Ok(())).is_err());
     let store = Store::lock(&ctx)?;
     let status = recover_using(&ctx, &store, &mut checked, false, false, &FIXTURE)?;
     assert_eq!(status["continuationRequired"], false);
-    assert_eq!(crate::store::history(&ctx)?.len(), 3);
+    assert_eq!(crate::operations::store::history(&ctx)?.len(), 3);
 
     Ok(())
 }
@@ -628,12 +630,12 @@ fn explicit_codex_continuation_publishes_the_pinned_offer() -> TestResult {
         Ok(())
     })?;
     assert_eq!(result["journal"]["phase"], "succeeded");
-    let native = crate::store::history(&ctx)?
+    let native = crate::operations::store::history(&ctx)?
         .into_iter()
         .find(|journal| journal.id == market.id)
         .ok_or("original market")?;
     assert!(!awaiting_publication(&ctx, &native)?);
-    assert_eq!(crate::store::history(&ctx)?.len(), 3);
+    assert_eq!(crate::operations::store::history(&ctx)?.len(), 3);
     let mut another_scope = ctx.clone();
     another_scope.cache = ctx.home.join("another-cache");
     assert_eq!(
@@ -658,7 +660,7 @@ fn explicit_codex_continuation_publishes_the_pinned_offer() -> TestResult {
         InitialActivation::Enabled,
     )?;
     assert_ne!(separate["codexHome"], result["codexHome"]);
-    assert_eq!(crate::store::history(&ctx)?.len(), 6);
+    assert_eq!(crate::operations::store::history(&ctx)?.len(), 6);
 
     Ok(())
 }
@@ -668,11 +670,11 @@ fn codex_resume_rechecks_the_frozen_destination_after_confirmation() -> TestResu
     let (_temp, ctx) = fixture_context()?;
     let target_path = ctx.home.join(".codex");
     fs::create_dir(&target_path)?;
-    let row = crate::resource_agents::profile_roots(&ctx)?
+    let row = crate::agent::resource_agents::profile_roots(&ctx)?
         .into_iter()
         .find(|row| row.name == "codex:default")
         .ok_or("existing config")?;
-    let target = crate::resource_agents::InstallTarget::capture(&ctx, &row)?;
+    let target = crate::agent::resource_agents::InstallTarget::capture(&ctx, &row)?;
     let store = Store::lock(&ctx)?;
     let mut prepared = prepare_source(
         &ctx,
@@ -703,7 +705,7 @@ fn codex_resume_rechecks_the_frozen_destination_after_confirmation() -> TestResu
         result.err().ok_or("rebound directory")?.code,
         "agent_install_target_changed"
     );
-    assert_eq!(crate::store::history(&ctx)?.len(), 1);
+    assert_eq!(crate::operations::store::history(&ctx)?.len(), 1);
     assert!(!target_path.join("plugins").exists());
     Ok(())
 }
@@ -815,7 +817,7 @@ fn missing_original_after_and_prepared_without_gate_never_dispatch_another_stage
         let recovered = recover_using(&ctx, &store, &mut journal, false, false, &FIXTURE)?;
         assert_eq!(recovered["phase"], serde_json::to_value(expected)?);
         assert_eq!(managed_profiles(&ctx)?, []);
-        assert_eq!(crate::store::history(&ctx)?.len(), 1);
+        assert_eq!(crate::operations::store::history(&ctx)?.len(), 1);
     }
     Ok(())
 }
@@ -903,7 +905,7 @@ fn running_and_unproven_exit_block_resolution_known_exit_can_be_closed() -> Test
     let closed = recover_using(&ctx, &store, &mut journal, true, true, &FIXTURE)?;
     assert_eq!(closed["phase"], "failed");
     assert_eq!(managed_profiles(&ctx)?, []);
-    assert_eq!(crate::store::history(&ctx)?.len(), 1);
+    assert_eq!(crate::operations::store::history(&ctx)?.len(), 1);
     Ok(())
 }
 
@@ -955,7 +957,7 @@ fn the_plugin_gate_requires_the_original_market_exit_and_matching_projection() -
 
     fs::write(prepared.market().join("target-replacement"), "altered")?;
     assert!(stage_before(&second, &state, &market, &FIXTURE).is_err());
-    assert_eq!(crate::store::history(&ctx)?.len(), 1);
+    assert_eq!(crate::operations::store::history(&ctx)?.len(), 1);
     assert_eq!(managed_profiles(&ctx)?, []);
     Ok(())
 }
@@ -1162,7 +1164,7 @@ fn uncertified_binary_and_acquisition_failure_cannot_leave_a_dispatchable_plan()
     .ok_or("proof unavailable")?;
     assert_eq!(error.code, "fixture_source_unavailable");
     assert!(!ctx.state.join("active.json").exists());
-    assert_eq!(crate::store::history(&ctx)?.len(), 0);
+    assert_eq!(crate::operations::store::history(&ctx)?.len(), 0);
     assert_eq!(managed_profiles(&ctx)?, []);
     assert!(
         !fs::read_dir(&ctx.state)?
@@ -1389,7 +1391,7 @@ fn disabled_activation_recovers_exact_derived_image_without_repeat_or_post_publi
     );
     assert_eq!(managed_profiles(&ctx)?.len(), 1);
     let receipts = fs::read(ctx.state.join("receipts.json"))?;
-    assert_eq!(crate::store::history(&ctx)?.len(), 3);
+    assert_eq!(crate::operations::store::history(&ctx)?.len(), 3);
     assert_eq!(
         profile.regular_config_snapshot(leaf, 64 * 1024)?.1.identity,
         replaced.identity

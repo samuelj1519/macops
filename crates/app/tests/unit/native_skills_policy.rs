@@ -433,7 +433,7 @@ fn filesystem_bytes_that_cannot_be_json_paths_never_become_an_argv_locator_or_in
     assert!(installation_id(Path::new("/home/.git")).is_err());
     assert_eq!(
         installation_id(Path::new("/home/.agents/skills/alpha"))?,
-        crate::resource::id(
+        crate::domain::resource::id(
             "capability",
             &(
                 "skills-cli-install-v1",

@@ -22,7 +22,7 @@ fn declared_adoption_prepares_full_metadata_without_changing_payload_or_state() 
     let payload = home.join(".agents/skills/alpha");
     fs::create_dir_all(&payload)?;
     fs::write(payload.join("SKILL.md"), b"body")?;
-    let authority = crate::governance::capture(&ctx)?;
+    let authority = crate::operations::governance::capture(&ctx)?;
     let assessment =
         assess_adoption(&ctx, &authority, "asset:alpha", false)?.ok_or("assessment")?;
     assert_eq!(assessment.baseline.source.repository, "owner/repo");
@@ -65,7 +65,7 @@ fn declared_adoption_cannot_infer_no_conflict_from_an_unknown_native_registry() 
         assert_eq!(
             assess_adoption(
                 &ctx,
-                &crate::governance::capture(&ctx)?,
+                &crate::operations::governance::capture(&ctx)?,
                 "asset:alpha",
                 false
             )

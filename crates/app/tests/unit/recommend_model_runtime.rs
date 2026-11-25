@@ -57,7 +57,7 @@ fn repository_proposals_require_bound_documents_and_a_closed_shape() -> TestResu
 #[test]
 fn repository_model_sends_only_public_evidence_with_an_endpoint_bound_key() -> TestResult {
     let temp = tempfile::tempdir_in("/private/tmp")?;
-    let profile = serde_json::from_value::<crate::recommend_setup::Profile>(json!({
+    let profile = serde_json::from_value::<crate::recommend::setup::Profile>(json!({
         "schemaVersion":1,"enabled":true,"endpoint":"https://models.example.test/v1/chat/completions",
         "model":"explicit-model","account":"setup-test"
     }))?;
@@ -126,7 +126,7 @@ printf '%s\n200' '{"choices":[{"message":{"content":"OK"}}]}'
         policy::ENDPOINT,
         "https://models.example.test/chat/completions",
     ] {
-        let profile = serde_json::from_value::<crate::recommend_setup::Profile>(json!({
+        let profile = serde_json::from_value::<crate::recommend::setup::Profile>(json!({
             "schemaVersion":1,"enabled":true,"endpoint":endpoint,"model":"fixture","account":"setup-test"
         }))?;
         let deadline = || Instant::now() + Duration::from_secs(4);
@@ -151,7 +151,7 @@ fn script(base: &Path, name: &str, body: &str) -> Result<PathBuf, io::Error> {
 }
 
 fn brief() -> crate::error::Result<PublicAnalysis> {
-    crate::policy::recommend::public_analysis("jq")?
+    crate::recommend::candidate::public_analysis("jq")?
         .ok_or_else(|| crate::error::Error::new("fixture", "expected public input"))
 }
 
@@ -282,7 +282,7 @@ fn model_runtime_enforces_one_deadline_and_reaps_its_own_processes() -> TestResu
         let pid = fs::read_to_string(pidfile)
             .map_err(|e| format!("{waiting} fixture PID unavailable: {e}"))?
             .parse()?;
-        assert!(!crate::process::group_alive(pid), "{waiting}");
+        assert!(!crate::platform::process::group_alive(pid), "{waiting}");
     }
     Ok(())
 }
@@ -330,10 +330,10 @@ fn model_runtime_reaps_the_leader_after_stopping_closed_output_group_members() -
     assert_eq!(output, b"public result");
     let pgid = fs::read_to_string(group)?.parse()?;
     let limit = Instant::now() + Duration::from_secs(2);
-    while crate::process::group_alive(pgid) && Instant::now() < limit {
+    while crate::platform::process::group_alive(pgid) && Instant::now() < limit {
         std::thread::sleep(Duration::from_millis(10));
     }
-    assert!(!crate::process::group_alive(pgid));
+    assert!(!crate::platform::process::group_alive(pgid));
     Ok(())
 }
 
@@ -493,7 +493,7 @@ fn public_model_status_reports_only_redacted_outcomes_without_host_authenticatio
         "--setup",
     ])?;
     let ctx = Context::from_cli(&cli, &mut vec![])?;
-    let profile = serde_json::from_value::<crate::recommend_setup::Profile>(json!({
+    let profile = serde_json::from_value::<crate::recommend::setup::Profile>(json!({
         "schemaVersion": 1, "enabled": true, "endpoint": "https://example.test/chat/completions",
         "model": "fixture", "account": "fixture-account"
     }))?;
@@ -558,7 +558,7 @@ fn exhausted_public_model_budget_exits_before_any_native_or_remote_read() -> Tes
     // Simulate an already exhausted runtime budget, independent of argument parsing.
     ctx.isolated = false;
     ctx.timeout_secs = 0;
-    let profile = serde_json::from_value::<crate::recommend_setup::Profile>(json!({
+    let profile = serde_json::from_value::<crate::recommend::setup::Profile>(json!({
         "schemaVersion": 1, "enabled": true, "endpoint": "https://example.test/chat/completions",
         "model": "fixture", "account": "fixture-account"
     }))?;
@@ -585,7 +585,7 @@ fn exhausted_public_model_budget_exits_before_any_native_or_remote_read() -> Tes
 #[test]
 fn explicit_model_request_uses_the_same_fixed_key_and_configured_endpoint() -> TestResult {
     let temp = tempfile::tempdir_in("/private/tmp")?;
-    let profile = serde_json::from_value::<crate::recommend_setup::Profile>(json!({
+    let profile = serde_json::from_value::<crate::recommend::setup::Profile>(json!({
         "schemaVersion":2,"enabled":true,"endpoint":"https://models.example.test/v1/chat/completions",
         "model":"selected-model","account":"setup-test"
     }))?;
@@ -646,16 +646,20 @@ fn default_explicit_model_respects_paused_or_unreadable_settings() -> TestResult
     let mut configured = json!({"schemaVersion":2, "enabled":false,
         "endpoint":"https://example.test/chat/completions","model":"fixture-model",
         "account":format!("setup-{}", "a".repeat(64))});
-    crate::native_skills_files::write_cas(&path, None, &serde_json::to_vec(&configured)?)?;
+    crate::skills::native_skills_files::write_cas(&path, None, &serde_json::to_vec(&configured)?)?;
     assert_eq!(annotate(&ctx, &analysis, None)["status"], "local-only");
     let before = fs::read(&path)?;
     configured["enabled"] = json!(true);
-    crate::native_skills_files::write_cas(&path, Some(&before), &serde_json::to_vec(&configured)?)?;
+    crate::skills::native_skills_files::write_cas(
+        &path,
+        Some(&before),
+        &serde_json::to_vec(&configured)?,
+    )?;
     let annotation = annotate(&ctx, &analysis, None);
     assert_eq!(annotation["model"], "fixture-model");
     assert_eq!(annotation["status"], "deadline");
     let before = fs::read(&path)?;
-    crate::native_skills_files::write_cas(&path, Some(&before), b"{}")?;
+    crate::skills::native_skills_files::write_cas(&path, Some(&before), b"{}")?;
     assert_eq!(
         annotate(&ctx, &analysis, None)["status"],
         "profile-unavailable"
@@ -690,7 +694,7 @@ fn invalid_legacy_account_exits_before_loading_any_credential() -> TestResult {
 #[test]
 fn configured_annotation_stops_if_silent_credentials_are_denied_or_corrupt() -> TestResult {
     let temp = tempfile::tempdir_in("/private/tmp")?;
-    let profile = serde_json::from_value::<crate::recommend_setup::Profile>(json!({
+    let profile = serde_json::from_value::<crate::recommend::setup::Profile>(json!({
         "schemaVersion":2,"enabled":true,"endpoint":"https://models.example.test/chat/completions",
         "model":"current-model","account":"setup-test"
     }))?;

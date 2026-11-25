@@ -46,7 +46,7 @@ def source_inventory(root, policy):
             classified[name] = "declaration"
         elif pure:
             classified[name] = "pure"
-            if re.search(r"\b(?:std|crate)::(?:fs|process|thread|context|inventory|providers|operations|store|index_store|legacy)\b|std::env::(?:var|var_os|vars|vars_os|set_var|remove_var|current_dir)\b|\buse\s+std::\{[^;]*\b(?:fs|process|thread|env)\b", text):
+            if re.search(r"\b(?:std|crate)::(?:fs|process|thread|context|inventory|providers|operations|store|index_store|legacy|platform|catalog)\b|std::env::(?:var|var_os|vars|vars_os|set_var|remove_var|current_dir)\b|\buse\s+std::\{[^;]*\b(?:fs|process|thread|env)\b", text):
                 fail(f"pure module depends on effects: {name}")
         elif name in policy["io_files"]:
             classified[name] = "io"

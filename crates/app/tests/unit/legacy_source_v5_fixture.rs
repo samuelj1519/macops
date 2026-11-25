@@ -11,7 +11,7 @@ use crate::policy::{
 pub(super) fn legacy_v5_fixture() -> std::result::Result<PreparedUpgrade, Box<dyn std::error::Error>>
 {
     let (temp, ctx) = complete_upgrade_context()?;
-    let authority = crate::governance::capture(&ctx)?;
+    let authority = crate::operations::governance::capture(&ctx)?;
     let managed_before = authority.read(
         crate::policy::governance::Dataset::ManagedAssets,
         16 * 1024 * 1024,
@@ -43,7 +43,7 @@ pub(super) fn legacy_v5_fixture() -> std::result::Result<PreparedUpgrade, Box<dy
         roots.push(root);
         edits.extend(rows);
     }
-    let created_at = crate::store::now();
+    let created_at = crate::operations::store::now();
     let native =
         crate::policy::source_projection::native(Some(&native_before), &roots, created_at)?;
     for root in &mut roots {
@@ -94,12 +94,12 @@ fn legacy_payload(name: &str) -> Payload {
 
 fn legacy_root(
     ctx: &Context,
-    authority: &crate::governance::Governance,
+    authority: &crate::operations::governance::Governance,
     applied: &crate::policy::source_invocation::Applied,
     key: &str,
 ) -> std::result::Result<(UpgradedRoot, Vec<Edit>), Box<dyn std::error::Error>> {
     let mut edits = vec![];
-    let current = crate::source_inventory::assess_adoption(ctx, authority, key, false)?
+    let current = crate::source::source_inventory::assess_adoption(ctx, authority, key, false)?
         .ok_or("legacy source")?;
     let mut payload = legacy_payload(&current.baseline.source.canonical_name);
     let base_sha256 = payload.shape(0, 0o700).digest()?;
@@ -166,8 +166,12 @@ fn legacy_root(
         .keep();
     let retained = Directory::open(&retained)?;
     fs::set_permissions(&retained.path, fs::Permissions::from_mode(0o700))?;
-    let (retained, after) =
-        crate::source_payload::materialize(&retained, "payload", &payload, current.tree.mode)?;
+    let (retained, after) = crate::source::source_payload::materialize(
+        &retained,
+        "payload",
+        &payload,
+        current.tree.mode,
+    )?;
     let root = UpgradedRoot {
         baseline: current.baseline.clone(),
         change: crate::policy::source_tree::Change {
@@ -195,7 +199,7 @@ fn legacy_root(
 
 fn legacy_batch(
     ctx: &Context,
-    authority: &crate::governance::Governance,
+    authority: &crate::operations::governance::Governance,
     roots: Vec<UpgradedRoot>,
     images: &[Option<Vec<u8>>; 4],
     created_at: u64,
@@ -205,7 +209,7 @@ fn legacy_batch(
         .dataset(crate::policy::governance::Dataset::InvocationRules);
     let invocation = witness(&invocation_path)?.0;
     let store = Store::lock(ctx)?;
-    let operation = crate::store::operation_id();
+    let operation = crate::operations::store::operation_id();
     let root = backup(authority, &operation)?;
     let blobs = files::Blobs::create(&root)?;
     let mut manifest = Manifest {
@@ -247,7 +251,7 @@ fn legacy_batch(
         let pair = if before == after {
             None
         } else {
-            Some(crate::source_files::stage(
+            Some(crate::source::source_files::stage(
                 &witness,
                 after.as_deref().ok_or("image")?,
                 after_mode.ok_or("mode")?,

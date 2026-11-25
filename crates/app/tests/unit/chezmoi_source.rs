@@ -17,7 +17,7 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> std::result::Result<Self, Box<dyn std::error::Error>> {
-        let temporary = crate::paths::read_path(Path::new("/tmp"))?;
+        let temporary = crate::platform::fs::read_path(Path::new("/tmp"))?;
         let root = tempfile::Builder::new()
             .permissions(fs::Permissions::from_mode(0o700))
             .tempdir_in(temporary)?;
@@ -848,7 +848,7 @@ fn system_home_classification_only_reads_the_account_location() -> TestResult {
     let uid = nix::unistd::geteuid();
     let user = nix::unistd::User::from_uid(uid)?.ok_or("local account")?;
     let mut ctx = f.context.clone();
-    ctx.home = crate::paths::read_path(&user.dir)?;
+    ctx.home = crate::platform::fs::read_path(&user.dir)?;
     ctx.state = ctx.home.join(".local/state/macops");
     assert!(!sources::check_scope(&ctx)?);
     Ok(())

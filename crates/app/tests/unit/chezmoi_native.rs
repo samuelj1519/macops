@@ -143,7 +143,7 @@ impl Fixture {
     }
 
     fn bind_files(&mut self, program: &[u8]) -> TestResult {
-        use crate::paths::Directory;
+        use crate::platform::fs::Directory;
 
         fs::write(&self.binding.program, program)?;
         fs::set_permissions(&self.binding.program, fs::Permissions::from_mode(0o700))?;
@@ -315,7 +315,7 @@ fn unknown_native_cache_is_metadata_only_and_bad_shapes_fail_closed() -> TestRes
     assert!(cached_list(&f.ctx).is_err());
     assert_eq!(
         cached_snapshot(&f.ctx).coverage.state,
-        crate::resource::CoverageState::Invalid
+        crate::domain::resource::CoverageState::Invalid
     );
     Ok(())
 }
@@ -599,12 +599,12 @@ fn matching_file_evidence_requires_original_success_to_publish_the_receipt() -> 
         *id
     );
     let stored_receipt = fs::read(f.ctx.state.join("receipts.json"))?;
-    let (resources, coverage) = crate::resource_configs::collect(&f.ctx, &[], None)?;
+    let (resources, coverage) = crate::config::resource_configs::collect(&f.ctx, &[], None)?;
     let selected = resources
         .iter()
         .find(|item| &item.id == id)
         .ok_or("receipt inventory entry")?;
-    let crate::resource::Data::Config {
+    let crate::domain::resource::Data::Config {
         owner,
         baseline: Some(baseline),
         ..
@@ -613,8 +613,11 @@ fn matching_file_evidence_requires_original_success_to_publish_the_receipt() -> 
         return Err("expected native configuration receipt baseline".into());
     };
     assert_eq!(owner, "chezmoi-native-cached");
-    assert_eq!(selected.status, crate::resource::State::Unknown);
-    assert_eq!(baseline.comparison, crate::resource::Comparison::Unknown);
+    assert_eq!(selected.status, crate::domain::resource::State::Unknown);
+    assert_eq!(
+        baseline.comparison,
+        crate::domain::resource::Comparison::Unknown
+    );
     assert!(coverage.iter().any(|report| {
         report
             .issues

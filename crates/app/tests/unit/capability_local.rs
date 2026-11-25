@@ -166,8 +166,8 @@ fn multi_profile_claude_plugins_require_disambiguation_and_detect_settings_drift
             .code,
         "ambiguous"
     );
-    let profiles = crate::resource_agents::profile_roots(&ctx)?;
-    let (caps, _) = crate::resource_capabilities::collect(&ctx, &profiles, None)?;
+    let profiles = crate::agent::resource_agents::profile_roots(&ctx)?;
+    let (caps, _) = crate::capability::resource_capabilities::collect(&ctx, &profiles, None)?;
     let mi_cap = caps
         .iter()
         .find(|r| {
@@ -184,7 +184,7 @@ fn multi_profile_claude_plugins_require_disambiguation_and_detect_settings_drift
         home.join(".claude-mi/settings.json"),
         r#"{"enabledPlugins":{"review@official":false}}"#,
     )?;
-    let (caps_after, _) = crate::resource_capabilities::collect(&ctx, &profiles, None)?;
+    let (caps_after, _) = crate::capability::resource_capabilities::collect(&ctx, &profiles, None)?;
     let mi_after = caps_after
         .iter()
         .find(|r| r.id == pkg.id)
@@ -194,7 +194,10 @@ fn multi_profile_claude_plugins_require_disambiguation_and_detect_settings_drift
         ..
     } = &mi_after.data
     {
-        assert_eq!(base.comparison, crate::resource::Comparison::Different);
+        assert_eq!(
+            base.comparison,
+            crate::domain::resource::Comparison::Different
+        );
     } else {
         return Err("missing baseline on adopted plugin".into());
     }
@@ -234,11 +237,12 @@ fn deleted_and_rebound_adopted_plugins_stay_visible_with_truthful_diagnostics() 
     let pkg = resolve_package(&ctx, "plugin:review@official", false, false)?.ok_or("plugin")?;
     let plan = crate::operations::plan(&ctx, &pkg, crate::domain::Action::Adopt, None, false)?;
     crate::operations::execute(&ctx, plan, false, true)?;
-    let profiles = crate::resource_agents::profile_roots(&ctx)?;
+    let profiles = crate::agent::resource_agents::profile_roots(&ctx)?;
 
     fs::remove_dir_all(root.join("plugins/cache"))?;
     fs::remove_file(root.join("plugins/installed_plugins.json"))?;
-    let (caps_deleted, _) = crate::resource_capabilities::collect(&ctx, &profiles, None)?;
+    let (caps_deleted, _) =
+        crate::capability::resource_capabilities::collect(&ctx, &profiles, None)?;
     let retained = caps_deleted
         .iter()
         .find(|r| r.id == pkg.id)
@@ -257,7 +261,8 @@ fn deleted_and_rebound_adopted_plugins_stay_visible_with_truthful_diagnostics() 
 
     fs::remove_dir_all(root.join("plugins"))?;
     fs::create_dir_all(root.join("plugins"))?;
-    let (_, cov_rebound) = crate::resource_capabilities::collect(&ctx, &profiles, None)?;
+    let (_, cov_rebound) =
+        crate::capability::resource_capabilities::collect(&ctx, &profiles, None)?;
     assert!(cov_rebound.iter().any(|c| {
         c.issues
             .iter()

@@ -591,7 +591,7 @@ fn codex_capability_receipts_bind_profile_cache_and_selected_registration() -> T
     let root = Path::new("/fixture/codex");
     let record = root.join("config.toml");
     let payload = root.join("plugins/cache/market/fixture/1.0.0");
-    let profile = crate::resource::id("agent", &("codex", root))?;
+    let profile = crate::domain::resource::id("agent", &("codex", root))?;
     let id = codex_capability_id(&profile, "fixture@market")?;
     let mut pkg = plugin_pkg();
     pkg.id = id.clone();

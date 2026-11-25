@@ -1,11 +1,11 @@
 use crate::{
+    domain::resource::CoverageState,
     domain::{
         Action, ConfigAnchor, ConfigAuthority, ConfigFileStamp, FileId, Observation, Plan,
         Provider, Receipt,
     },
     error::{Error, Result},
     policy::{config_local::valid_digest, parsers::exact_version},
-    resource::CoverageState,
 };
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::PathBuf};

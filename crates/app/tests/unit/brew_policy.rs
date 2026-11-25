@@ -13,7 +13,7 @@ fn stable_owner_excludes_every_binding_field_and_keeps_prefix_and_native_name() 
         k.full_name = name.into();
         assert_eq!(
             logical_id(&k)?,
-            crate::resource::id("application", &("brew", &k.canonical_prefix, name))?
+            crate::domain::resource::id("application", &("brew", &k.canonical_prefix, name))?
         );
     }
     let mut changed = q.clone();

@@ -1,80 +1,35 @@
-mod ai;
-mod ai_gate;
-mod ai_payload;
-mod ai_state;
-mod ai_tx;
-mod brew;
+mod agent;
 mod browser;
-mod cache;
-mod capabilities;
-mod capability_guard;
-mod capability_local;
-mod capability_receipts;
-mod capability_store;
-mod capability_tx;
-mod chezmoi_binding;
-mod chezmoi_native;
-mod claude_install;
-mod claude_install_source;
+mod capability;
+mod catalog;
 mod cli;
-mod codex_install;
-mod codex_install_source;
-mod config_inventory;
-mod config_local;
-mod config_tx;
+mod config;
 mod context;
 mod domain;
 mod error;
-mod governance;
-mod identity;
-mod index_store;
-mod inventory;
-mod invocation_inventory;
-mod link_inventory;
-mod manifest;
-mod metadata;
 mod migration;
-mod migration_fs;
-mod migration_scan;
-mod migration_tx;
-mod migration_writers;
-mod mise_owner;
-mod native_plugin_tx;
-mod native_plugins;
-mod native_plugins_files;
-mod native_runner;
-mod native_skills;
-mod native_skills_assets;
-mod native_skills_files;
-mod native_skills_steps;
 mod operations;
 mod output;
-mod paths;
-mod plugin_marketplaces;
-mod plugin_target;
+mod platform;
 mod policy;
-mod process;
-mod profile_install;
-mod profile_inventory;
-mod providers;
 mod recommend;
-mod recommend_keychain;
-mod recommend_model;
-mod recommend_setup;
-mod recommend_upstream;
-mod resource;
-mod resource_agents;
-mod resource_capabilities;
-mod resource_configs;
-mod resource_inventory;
-mod resource_software;
-mod service;
-mod store;
-mod target;
+mod skills;
+mod software;
+mod source;
 mod terminal;
-mod updates;
-mod uv_local;
-mod uv_ownership;
+
+use agent::{
+    ai, claude_install, codex_install, metadata, native_plugin_tx, native_plugins,
+    plugin_marketplaces, resource_agents,
+};
+use capability::{capabilities, capability_tx};
+use catalog::{cache, inventory, resource_inventory, target, updates};
+use config::{chezmoi_native, config_tx};
+use migration::migration_tx;
+use operations::{manifest, native_runner, store};
+use skills::native_skills;
+use software::{brew, npm_adoption, service};
+use source::source_tx;
 
 use clap::{CommandFactory, Parser};
 use serde_json::{Value, json};
@@ -127,7 +82,7 @@ fn run(cli: &cli::Cli, warnings: &mut Vec<String>) -> error::Result<CommandOutpu
     native_skills::validate_recipe_argument(&cli.command)?;
     if matches!(cli.command, cli::Command::Recommend { setup: true, .. }) {
         let setup = context::RecommendSetupContext::from_cli(cli, warnings)?;
-        return recommend_setup::run(&setup, cli.json, cli.dry_run).map(CommandOutput::Data);
+        return recommend::run_setup(&setup, cli.json, cli.dry_run).map(CommandOutput::Data);
     }
     let ctx = context::Context::from_cli(cli, warnings)?;
     if cli.json
@@ -738,7 +693,7 @@ fn run_scoped_entry(
             model,
             keychain_account,
             ..
-        } => run_recommend(
+        } => recommend::run(
             cli,
             ctx,
             product.as_deref(),
@@ -746,7 +701,8 @@ fn run_scoped_entry(
             github.as_deref(),
             *model,
             keychain_account.as_deref(),
-        ),
+        )
+        .map(Some),
         cli::Command::Agent {
             command: Some(command),
             ..
@@ -840,47 +796,6 @@ fn run_market(
         browser::browse_marketplaces(ctx, &data)?;
     }
     Ok(data)
-}
-
-fn run_recommend(
-    cli: &cli::Cli,
-    ctx: &context::Context,
-    product: Option<&str>,
-    evidence: Option<&std::path::Path>,
-    github: Option<&str>,
-    model: bool,
-    keychain_account: Option<&str>,
-) -> error::Result<Option<Value>> {
-    let Some(product) = product else {
-        return Err(error::Error::new(
-            "recommend_target_required",
-            "recommend 需要一个目标，或使用 --setup 配置模型",
-        ));
-    };
-    let interactive = recommend::interactive(cli);
-    let repository = if evidence.is_none() && github.is_none() && !model {
-        recommend_upstream::repository_subject(product.trim())
-    } else {
-        None
-    };
-    let data = if let Some(repository) = repository {
-        recommend_upstream::show_repository(ctx, repository, cli.dry_run, interactive)?
-    } else {
-        recommend::show(
-            ctx,
-            product,
-            evidence,
-            github,
-            model,
-            keychain_account,
-            cli.dry_run,
-        )?
-    };
-    if interactive {
-        recommend::choose(ctx, data).map(Some)
-    } else {
-        Ok(Some(data))
-    }
 }
 
 fn run_recovery(cli: &cli::Cli, ctx: &context::Context) -> error::Result<Option<Value>> {
@@ -1095,7 +1010,7 @@ fn service_read(ctx: &context::Context, command: &cli::ServiceCmd) -> error::Res
         return Err(error::Error::new("undeclared_service", name));
     }
     let spec = domain::CommandSpec {
-        program: process::executable("brew")?,
+        program: crate::operations::command::executable("brew")?,
         args: vec![
             "services".into(),
             "info".into(),
@@ -1103,7 +1018,7 @@ fn service_read(ctx: &context::Context, command: &cli::ServiceCmd) -> error::Res
             "--json".into(),
         ],
     };
-    let out = process::query(&ctx.scope, &spec)?;
+    let out = crate::operations::command::query(&ctx.scope, &spec)?;
     if out.code != Some(0) || out.uncertain {
         return Err(error::Error::new("service_unobserved", "服务状态查询失败"));
     }
@@ -1832,8 +1747,6 @@ fn run_adoption(cli: &cli::Cli, ctx: &context::Context) -> error::Result<Value> 
 
 use crate::policy::cli::{attention, selected};
 
-mod npm_adoption;
-mod npm_local;
 #[cfg(test)]
 #[path = "../tests/unit/support.rs"]
 mod test_support;
@@ -1845,19 +1758,3 @@ mod native_plugins_test_fixture;
 #[cfg(test)]
 #[path = "../tests/unit/profile_codec_regressions.rs"]
 mod profile_codec_regressions;
-
-mod source_tree;
-
-mod source_git;
-
-mod source_inventory;
-
-mod source_tx;
-
-mod source_payload;
-
-mod source_files;
-
-mod source_invocation;
-
-mod source_plugins;

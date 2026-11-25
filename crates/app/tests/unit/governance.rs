@@ -256,7 +256,8 @@ fn v2_committed_authority_checks_anchored_native_aliases_and_requires_converted_
     let original = home.join(".agents/managed-assets.json");
     fs::create_dir_all(home.join(".agents"))?;
     fs::write(&original, br#"{"legacy":true}"#)?;
-    let (_, original_proof) = crate::migration_fs::snapshot(&original)?.ok_or("original proof")?;
+    let (_, original_proof) =
+        crate::migration::migration_fs::snapshot(&original)?.ok_or("original proof")?;
     let mut ledger = committed(&ctx)?;
     ledger.schema_version = policy::LEDGER_VERSION;
     ledger.converted.insert(

@@ -45,7 +45,7 @@ fn link_assessment_never_changes_models_default_claude_cursor_or_foreign_placeme
     fs::create_dir_all(home.join(".claude/skills/alpha"))?;
     fs::create_dir_all(home.join(".cursor/skills/alpha"))?;
     let before = fs::read(&model)?;
-    let authority = crate::governance::capture(&ctx)?;
+    let authority = crate::operations::governance::capture(&ctx)?;
     let plan = assess(&ctx, &authority, Selection::All)?;
     assert_eq!(plan.patches.len(), 2);
     assert_eq!(plan.summary()["incomplete"], true);
@@ -97,7 +97,7 @@ fn partial_selection_keeps_other_sources_and_never_claims_equivalent_foreign_lin
     let beta = ctx.home.join(".claude-mi/skills/beta");
     std::os::unix::fs::symlink("../../.agents//skills/alpha", &alpha)?;
     std::os::unix::fs::symlink("../../.agents/skills/beta", &beta)?;
-    let authority = crate::governance::capture(&ctx)?;
+    let authority = crate::operations::governance::capture(&ctx)?;
     let plan = assess(&ctx, &authority, Selection::Explicit(vec!["alpha".into()]))?;
     assert_eq!(plan.patches.len(), 0);
     assert_eq!(plan.conflicts.len(), 1);
@@ -120,7 +120,7 @@ fn native_copies_devnorm_and_unknown_legacy_placements_stay_in_place() -> TestRe
         "../../.agents/skills/obsolete",
         ctx.home.join(".claude-mi/skills/obsolete"),
     )?;
-    let authority = crate::governance::capture(&ctx)?;
+    let authority = crate::operations::governance::capture(&ctx)?;
     let plan = assess(&ctx, &authority, Selection::All)?;
     assert_eq!(plan.patches.len(), 2);
     assert!(
@@ -143,7 +143,7 @@ fn native_lock_missing_payload_and_unknown_channel_schema_block_preparation() ->
         &path,
         br#"{"version":3,"skills":{"absent":{"source":"owner/repo","sourceType":"github"}}}"#,
     )?;
-    let authority = crate::governance::capture(&ctx)?;
+    let authority = crate::operations::governance::capture(&ctx)?;
     assert_eq!(
         assess(&ctx, &authority, Selection::All)
             .err()

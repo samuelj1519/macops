@@ -1,6 +1,6 @@
 use super::*;
 use crate::{
-    claude_install_source::{MARKET, PLUGIN},
+    agent::claude_install_source::{MARKET, PLUGIN},
     policy::source_git::ObjectId,
     test_support::TestResult,
 };
@@ -10,7 +10,7 @@ const MARKET_DOC: &[u8] =
     br#"{"name":"fixture-market","plugins":[{"name":"fixture-plugin","source":"./"}]}"#;
 const PLUGIN_DOC: &[u8] = br#"{"name":"fixture-plugin","version":"1.0.0"}"#;
 const SKILL: &[u8] = b"---\nname: fixture\n---\nTest\n";
-const FILES: &[crate::codex_install_source::VerifiedFile<'static>] = &[
+const FILES: &[crate::agent::codex_install_source::VerifiedFile<'static>] = &[
     (MARKET, false, MARKET_DOC),
     (PLUGIN, false, PLUGIN_DOC),
     ("skills/fixture/SKILL.md", false, SKILL),
@@ -88,7 +88,8 @@ fn mock_native(input: &Frozen) -> Result<()> {
 const FIXTURE: NativeIo = NativeIo {
     progress: |_| {},
     binary: |reader, path| {
-        if reader.binary(path)? != crate::codex_install_source::sha(b"fixture Claude binary") {
+        if reader.binary(path)? != crate::agent::codex_install_source::sha(b"fixture Claude binary")
+        {
             return Err(invalid());
         }
         Ok(())
@@ -154,7 +155,7 @@ const FIXTURE: NativeIo = NativeIo {
 
 #[test]
 fn installs_into_an_enrolled_existing_claude_profile_without_touching_its_sibling() -> TestResult {
-    use crate::resource::Management;
+    use crate::domain::resource::Management;
     static STAGES: std::sync::Mutex<Vec<Stage>> = std::sync::Mutex::new(Vec::new());
     let (_run, ctx, offer, binary) = fixture()?;
     let profile = ctx.home.join(".claude-mi");
@@ -164,12 +165,12 @@ fn installs_into_an_enrolled_existing_claude_profile_without_touching_its_siblin
     json_file(&settings, &original)?;
     let neighbor = ctx.home.join(".claude-glm/settings.json");
     let unchanged = fs::read(&neighbor)?;
-    let candidate = crate::resource_agents::profile_roots(&ctx)?
+    let candidate = crate::agent::resource_agents::profile_roots(&ctx)?
         .into_iter()
         .find(|item| item.name == "claude:mi")
         .ok_or("missing target")?;
-    let target = crate::resource_agents::InstallTarget::capture(&ctx, &candidate)?;
-    crate::resource_agents::enroll(&ctx, &target)?;
+    let target = crate::agent::resource_agents::InstallTarget::capture(&ctx, &candidate)?;
+    crate::agent::resource_agents::enroll(&ctx, &target)?;
     assert_eq!(fs::read(&settings)?, serde_json::to_vec(&original)?);
     let native = NativeIo {
         progress: |stage| STAGES.lock().expect("stage observer").push(stage),
@@ -233,7 +234,7 @@ fn installs_into_an_enrolled_existing_claude_profile_without_touching_its_siblin
         install_with_target(&ctx, offer, binary, false, &FIXTURE, Some(target.clone())).is_err()
     );
     assert_eq!(fs::read(ctx.home.join("native-calls"))?, calls);
-    let adopted = crate::resource_agents::profile_roots(&ctx)?
+    let adopted = crate::agent::resource_agents::profile_roots(&ctx)?
         .into_iter()
         .filter(|profile| profile.management == Management::Adopted)
         .collect::<Vec<_>>();
@@ -250,13 +251,13 @@ fn choosing_another_profile_for_the_same_offer_does_not_reuse_the_first_installa
     let second_dir = ctx.home.join(".claude-kimi");
     fs::create_dir(&second_dir)?;
     fs::write(second_dir.join("settings.json"), br#"{"model":"kimi"}"#)?;
-    let pick = |name| -> Result<crate::resource_agents::InstallTarget> {
-        let item = crate::resource_agents::profile_roots(&ctx)?
+    let pick = |name| -> Result<crate::agent::resource_agents::InstallTarget> {
+        let item = crate::agent::resource_agents::profile_roots(&ctx)?
             .into_iter()
             .find(|profile| profile.name == name)
             .ok_or_else(invalid)?;
-        let target = crate::resource_agents::InstallTarget::capture(&ctx, &item)?;
-        crate::resource_agents::enroll(&ctx, &target)?;
+        let target = crate::agent::resource_agents::InstallTarget::capture(&ctx, &item)?;
+        crate::agent::resource_agents::enroll(&ctx, &target)?;
         Ok(target)
     };
     let first = install_with_target(
@@ -298,11 +299,11 @@ fn existing_claude_target_resumes_market_or_activation_without_repeating_verifie
 -> TestResult {
     for activation_done in [false, true] {
         let (_run, ctx, offer, binary) = fixture()?;
-        let candidate = crate::resource_agents::profile_roots(&ctx)?
+        let candidate = crate::agent::resource_agents::profile_roots(&ctx)?
             .into_iter()
             .find(|item| item.name == "claude:glm")
             .ok_or("missing target")?;
-        let target = crate::resource_agents::InstallTarget::capture(&ctx, &candidate)?;
+        let target = crate::agent::resource_agents::InstallTarget::capture(&ctx, &candidate)?;
         let store = Store::lock(&ctx)?;
         let enabled = !activation_done;
         let mut prepared = prepare(
@@ -323,7 +324,7 @@ fn existing_claude_target_resumes_market_or_activation_without_repeating_verifie
             },
             &FIXTURE,
         )?;
-        assert!(crate::plugin_target::recovery_matches(
+        assert!(crate::agent::plugin_target::recovery_matches(
             &market,
             Some(&target)
         )?);
@@ -375,11 +376,11 @@ fn existing_claude_target_resumes_market_or_activation_without_repeating_verifie
 #[test]
 fn resumes_an_existing_target_from_the_verified_plugin_stage() -> TestResult {
     let (_run, ctx, offer, binary) = fixture()?;
-    let candidate = crate::resource_agents::profile_roots(&ctx)?
+    let candidate = crate::agent::resource_agents::profile_roots(&ctx)?
         .into_iter()
         .find(|item| item.name == "claude:glm")
         .ok_or("missing target")?;
-    let target = crate::resource_agents::InstallTarget::capture(&ctx, &candidate)?;
+    let target = crate::agent::resource_agents::InstallTarget::capture(&ctx, &candidate)?;
     let store = Store::lock(&ctx)?;
     let mut prepared = prepare(&ctx, &store, offer.clone(), binary.clone(), true, &FIXTURE)?;
     prepared.target = Some(target.clone());
@@ -435,12 +436,12 @@ fn an_existing_managed_independent_profile_can_be_selected_by_its_physical_ident
     let path = installed["claudeConfigDir"]
         .as_str()
         .ok_or("profile path")?;
-    let targets = crate::resource_agents::profile_roots(&ctx)?;
+    let targets = crate::agent::resource_agents::profile_roots(&ctx)?;
     let selected = targets
         .into_iter()
-        .find(|item| item.management == crate::resource::Management::Adopted)
+        .find(|item| item.management == crate::domain::resource::Management::Adopted)
         .ok_or("adopted profile")?;
-    let target = crate::resource_agents::InstallTarget::capture(&ctx, &selected)?;
+    let target = crate::agent::resource_agents::InstallTarget::capture(&ctx, &selected)?;
     assert_eq!(target.open()?.path, Path::new(path));
     Ok(())
 }
@@ -1635,15 +1636,18 @@ fn installed_managed_claude_profile_has_one_adopted_inventory_identity() -> Test
             .ok_or("managed profile")?,
     );
     ctx.harness.claude = Some(profile.clone());
-    let (observed, _) = crate::resource_agents::collect(&ctx, None, &[])?;
+    let (observed, _) = crate::agent::resource_agents::collect(&ctx, None, &[])?;
     let profiles:Vec<_>=observed.iter().filter(|entry| {
-        matches!(&entry.data, crate::resource::Data::Agent{config_dir,..} if config_dir==&profile)
+        matches!(&entry.data, crate::domain::resource::Data::Agent{config_dir,..} if config_dir==&profile)
     }).collect();
     assert_eq!(profiles.len(), 1);
     assert!(profiles[0].name.starts_with("claude:mo-fixture-plugin-"));
-    assert_eq!(profiles[0].management, crate::resource::Management::Adopted);
+    assert_eq!(
+        profiles[0].management,
+        crate::domain::resource::Management::Adopted
+    );
     assert!(observed.iter().any(|entry| entry.name == "claude:glm"
-        && entry.management == crate::resource::Management::Untracked));
+        && entry.management == crate::domain::resource::Management::Untracked));
     Ok(())
 }
 
@@ -1652,13 +1656,14 @@ fn mirrored_ordinary_claude_profile_needs_the_exact_managed_id() -> TestResult {
     let (_temp, ctx, offer, binary) = fixture()?;
     install_using(&ctx, offer, binary, true, &FIXTURE)?;
     let (_, native_path) = managed_profiles(&ctx)?.pop().ok_or("published profile")?;
-    let managed = crate::resource::id("agent", &("claude", &native_path))?;
-    let resolve = |selector: &str| crate::resource_agents::resolve_session_profile(&ctx, selector);
+    let managed = crate::domain::resource::id("agent", &("claude", &native_path))?;
+    let resolve =
+        |selector: &str| crate::agent::resource_agents::resolve_session_profile(&ctx, selector);
     let label = resolve(&managed)?.name;
     let name = label.strip_prefix("claude:").ok_or("Claude name")?;
     let mirror = ctx.home.join(format!(".claude-{name}"));
     fs::create_dir(&mirror)?;
-    let ordinary = crate::resource::id("agent", &("claude", &mirror))?;
+    let ordinary = crate::domain::resource::id("agent", &("claude", &mirror))?;
     assert_eq!(
         resolve(&label).err().ok_or("ambiguous")?.code,
         "session_profile_ambiguous"
@@ -1941,7 +1946,7 @@ fn assert_claude_launch(
 
 #[test]
 fn claude_session_uses_the_same_confirmation_flow_and_preserves_native_profile() -> TestResult {
-    use crate::codex_install::session::{
+    use crate::agent::codex_install::session::{
         LaunchOptions, PREFERENCE, SessionIo, configure_using, details_using, launch_using,
     };
 
@@ -1954,7 +1959,7 @@ fn claude_session_uses_the_same_confirmation_flow_and_preserves_native_profile()
     );
     let client =
         SessionIo::with_claude(|ctx, path| session_target_using(ctx, path, FIXTURE.binary));
-    let id = crate::resource::id("agent", &("claude", &path))?;
+    let id = crate::domain::resource::id("agent", &("claude", &path))?;
     let config = path.join("settings.json");
     let saved = fs::read(&config)?;
     let mut native_settings = crate::policy::json::parse(&saved)?;
@@ -2081,11 +2086,11 @@ fn uninstall_archives_a_verified_profile_without_rewriting_its_receipt() -> Test
         .nth(2)
         .ok_or("allocation")?
         .to_path_buf();
-    let selected = crate::resource_agents::profile_roots(&ctx)?.into_iter()
-        .find(|item| matches!(&item.data, crate::resource::Data::Agent{config_dir,..} if config_dir==&profile))
+    let selected = crate::agent::resource_agents::profile_roots(&ctx)?.into_iter()
+        .find(|item| matches!(&item.data, crate::domain::resource::Data::Agent{config_dir,..} if config_dir==&profile))
         .ok_or("profile")?;
     let receipts = fs::read(ctx.state.join("receipts.json"))?;
-    let preview = crate::resource_agents::uninstall(&ctx, &selected.id, true, true)?;
+    let preview = crate::agent::resource_agents::uninstall(&ctx, &selected.id, true, true)?;
     let archive = PathBuf::from(preview["archive"].as_str().ok_or("archive")?);
     assert_eq!(preview["persistentWrites"], false);
     assert!(root.exists() && !archive.exists());
@@ -2093,7 +2098,7 @@ fn uninstall_archives_a_verified_profile_without_rewriting_its_receipt() -> Test
     let original_profile = profile.with_file_name(".claude-retained");
     fs::rename(&profile, &original_profile)?;
     fs::create_dir(&profile)?;
-    let replaced = crate::resource_agents::uninstall(&ctx, &selected.id, false, true)
+    let replaced = crate::agent::resource_agents::uninstall(&ctx, &selected.id, false, true)
         .err()
         .ok_or("must refuse a replaced profile directory")?;
     assert_eq!(replaced.code, "agent_install_target_changed");
@@ -2102,7 +2107,7 @@ fn uninstall_archives_a_verified_profile_without_rewriting_its_receipt() -> Test
     fs::rename(original_profile, &profile)?;
 
     fs::create_dir(&archive)?;
-    let collision = crate::resource_agents::uninstall(&ctx, &selected.id, false, true)
+    let collision = crate::agent::resource_agents::uninstall(&ctx, &selected.id, false, true)
         .err()
         .ok_or("must preserve occupied archive")?;
     assert_eq!(collision.code, "agent_profile_archive_exists");
@@ -2110,24 +2115,31 @@ fn uninstall_archives_a_verified_profile_without_rewriting_its_receipt() -> Test
 
     let lease = Directory::open(&root)?;
     fs2::FileExt::try_lock_shared(lease.file())?;
-    let blocked = crate::resource_agents::uninstall(&ctx, &selected.id, false, true)
+    let blocked = crate::agent::resource_agents::uninstall(&ctx, &selected.id, false, true)
         .err()
         .ok_or("held session must prevent uninstall")?;
     assert_eq!(blocked.code, "agent_profile_in_use");
     drop(lease);
 
-    let done =
-        crate::resource_agents::uninstall(&ctx, "Claude Code · fixture-plugin", false, true)?;
+    let done = crate::agent::resource_agents::uninstall(
+        &ctx,
+        "Claude Code · fixture-plugin",
+        false,
+        true,
+    )?;
     assert_eq!(done["phase"], "succeeded");
     assert!(!root.exists());
     assert!(archive.join("home/.claude/settings.json").is_file());
     assert!(ctx.home.join(".claude-glm").exists());
     assert!(
-        crate::resource_agents::profile_roots(&ctx)?
+        crate::agent::resource_agents::profile_roots(&ctx)?
             .iter()
             .all(|item| item.id != selected.id)
     );
     assert_eq!(fs::read(ctx.state.join("receipts.json"))?, receipts);
-    assert_eq!(crate::target::receipts(&ctx)?.installations.len(), 0);
+    assert_eq!(
+        crate::catalog::target::receipts(&ctx)?.installations.len(),
+        0
+    );
     Ok(())
 }

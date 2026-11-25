@@ -104,7 +104,7 @@ fn cache_cleanup_clears_its_references_and_deletes_only_present_owned_content() 
         let borrowed = json!({"version":"borrowed"});
         let mut borrowed_bytes = serde_json::to_vec_pretty(&borrowed)?;
         borrowed_bytes.push(b'\n');
-        let borrowed_hash = crate::index_store::digest(&borrowed_bytes);
+        let borrowed_hash = crate::catalog::index_store::digest(&borrowed_bytes);
         let borrowed_name = format!("{borrowed_hash}.json");
         fs::write(index.join(&borrowed_name), &borrowed_bytes)?;
         assert_eq!(

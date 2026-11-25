@@ -15,7 +15,7 @@ use std::{
 };
 
 pub const SOURCE_COMMIT: &str = "3e47189a707c739ee1278a28a3b845f5834574e6";
-pub const QUERY_SCRIPT: &[u8] = include_bytes!("../brew/query-v1.rb");
+pub const QUERY_SCRIPT: &[u8] = include_bytes!("../software/brew/query-v1.rb");
 pub const EFFECT_CONTRACT: &str = "brew-native-formula-v1";
 const REPORT_LIMIT: usize = 4 * 1024 * 1024;
 
@@ -74,14 +74,14 @@ pub fn logical_id(key: &BrewFormulaKey) -> Result<String> {
         _ => false,
     };
     require(valid, "brew_invalid_identity")?;
-    crate::resource::id(
+    crate::domain::resource::id(
         "application",
         &("brew", &key.canonical_prefix, &key.full_name),
     )
 }
 pub fn context_id(prefix: &Path) -> Result<String> {
     path(prefix)?;
-    crate::resource::id("brew-context", &("brew", prefix))
+    crate::domain::resource::id("brew-context", &("brew", prefix))
 }
 pub fn validate_binding(binding: &BrewContextBinding) -> Result<()> {
     for p in [

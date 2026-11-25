@@ -1,7 +1,7 @@
 use crate::{
     cli::Cli,
     error::{Error, Result},
-    paths,
+    platform::fs as paths,
 };
 use std::path::PathBuf;
 
@@ -100,7 +100,7 @@ impl RecommendSetupContext {
 pub struct Context {
     pub scope: crate::domain::Scope,
     pub harness: HarnessRoots,
-    pub uv: crate::uv_local::DiscoveryInputs,
+    pub uv: crate::software::uv_local::DiscoveryInputs,
     pub timeout_secs: u64,
     pub home: PathBuf,
     pub config: PathBuf,
@@ -111,7 +111,7 @@ pub struct Context {
     pub catalog: PathBuf,
     pub catalog_explicit: bool,
     pub isolated: bool,
-    pub chezmoi: crate::config_inventory::Inputs,
+    pub chezmoi: crate::config::config_inventory::Inputs,
 }
 
 impl Context {
@@ -134,7 +134,7 @@ impl Context {
         let context = Self {
             config: config.clone(),
             harness: HarnessRoots::capture(isolated, warnings)?,
-            uv: crate::uv_local::DiscoveryInputs::capture(isolated),
+            uv: crate::software::uv_local::DiscoveryInputs::capture(isolated),
             data: root(
                 cli.data_dir.as_deref(),
                 "XDG_DATA_HOME",
@@ -158,7 +158,7 @@ impl Context {
                 .unwrap_or_else(|| home.join(".local/settings")),
             catalog_explicit: cli.catalog.is_some(),
             isolated,
-            chezmoi: crate::config_inventory::Inputs::capture(cli, isolated),
+            chezmoi: crate::config::config_inventory::Inputs::capture(cli, isolated),
             home,
         };
         context.validate_roots(cli.settings.is_some())?;

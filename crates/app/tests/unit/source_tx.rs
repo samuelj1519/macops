@@ -40,21 +40,21 @@ fn declared_adoption_is_atomic_metadata_only_and_dry_run_is_read_only() -> TestR
     fs::write(payload.join("SKILL.md"), b"body")?;
     let slot = super::super::source_inventory::assess_adoption(
         &ctx,
-        &crate::governance::capture(&ctx)?,
+        &crate::operations::governance::capture(&ctx)?,
         "asset:alpha",
         false,
     )?
     .ok_or("assessment")?
     .baseline
     .slot;
-    let before = crate::source_tree::observe(&slot)?;
+    let before = crate::source::source_tree::observe(&slot)?;
     let result = adopt(&ctx, "asset:alpha", true, true)?.ok_or("result")?;
     assert_eq!(result["persistentWrites"], false);
     assert!(!ctx.state.exists());
     assert!(!home.join(".agents/backups").exists());
     let result = adopt(&ctx, "asset:alpha", false, true)?.ok_or("result")?;
     assert_eq!(result["status"], "succeeded");
-    assert_eq!(crate::source_tree::observe(&slot)?, before);
+    assert_eq!(crate::source::source_tree::observe(&slot)?, before);
     assert!(!home.join(".agents/.skill-lock.json").exists());
     assert!(!ctx.state.join("receipts.json").exists());
     assert!(!home.join(".agents/invocation-overlays.json").exists());
@@ -88,12 +88,12 @@ fn native_fixture() -> std::result::Result<(tempfile::TempDir, Context), Box<dyn
     Ok((temp, ctx))
 }
 fn prepared(ctx: &Context) -> Result<(Store, Batch, Journal)> {
-    let authority = crate::governance::capture(ctx)?;
+    let authority = crate::operations::governance::capture(ctx)?;
     let assessment =
-        crate::source_inventory::assess_adoption(ctx, &authority, "skill:demo", false)?
+        crate::source::source_inventory::assess_adoption(ctx, &authority, "skill:demo", false)?
             .ok_or_else(invalid)?;
     let store = Store::lock(ctx)?;
-    let authority = crate::governance::capture(ctx)?;
+    let authority = crate::operations::governance::capture(ctx)?;
     let (mut batch, mut journal) = initialize(ctx, &authority, &assessment, &store)?;
     journal.phase = Phase::Running;
     store.save(&journal)?;
@@ -124,7 +124,7 @@ fn native_adoption_preserves_native_raw_bytes_and_existing_heterogeneous_assets(
     assert!(String::from_utf8_lossy(&managed).contains(r#""future":"\u0062""#));
     let doc: Value = serde_json::from_slice(&managed)?;
     assert_eq!(doc["assets"]["old"]["recordHash"], "unrelated");
-    let receipts: Receipts = crate::paths::regular_json(&ctx.state.join("receipts.json"))?;
+    let receipts: Receipts = crate::platform::fs::regular_json(&ctx.state.join("receipts.json"))?;
     assert_eq!(receipts.installations.len(), 1);
     let receipt = receipts.installations.values().next().ok_or("receipt")?;
     assert_eq!(receipt.operation_id, result["operation_id"]);
@@ -132,7 +132,7 @@ fn native_adoption_preserves_native_raw_bytes_and_existing_heterogeneous_assets(
         return Err("query".into());
     };
     assert_eq!(
-        crate::capability_local::observe_default(&receipt.package.id, query)?,
+        crate::capability::capability_local::observe_default(&receipt.package.id, query)?,
         receipt.observation
     );
     Ok(())
@@ -240,11 +240,12 @@ fn foreign_same_bytes_identity_or_payload_empty_directory_blocks_recovery_withou
 fn initial_journal_before_marker_gap_can_recover_exact_before_without_retrying_adoption()
 -> TestResult {
     let (_temp, ctx) = native_fixture()?;
-    let initial = crate::governance::capture(&ctx)?;
-    let assessment = crate::source_inventory::assess_adoption(&ctx, &initial, "skill:demo", false)?
-        .ok_or("assessment")?;
+    let initial = crate::operations::governance::capture(&ctx)?;
+    let assessment =
+        crate::source::source_inventory::assess_adoption(&ctx, &initial, "skill:demo", false)?
+            .ok_or("assessment")?;
     let store = Store::lock(&ctx)?;
-    let authority = crate::governance::capture(&ctx)?;
+    let authority = crate::operations::governance::capture(&ctx)?;
     let (batch, mut journal) = initialize(&ctx, &authority, &assessment, &store)?;
     assert_eq!(journal.phase, Phase::Prepared);
     assert!(!batch.manifest.pending.exists());
@@ -264,7 +265,7 @@ fn ambiguous_declared_and_native_alias_refuses_before_state_creation_but_explici
     let (_temp, ctx) = native_fixture()?;
     fs::create_dir_all(ctx.settings.join("manifests"))?;
     fs::write(ctx.settings.join("manifests/managed-agent-assets.json"),br#"{"assets":{"demo":{"kind":"github-skill","repository":"different/repo","path":"skills/demo"}}}"#)?;
-    assert!(crate::target::resolve(&ctx, "skill:demo").is_err());
+    assert!(crate::catalog::target::resolve(&ctx, "skill:demo").is_err());
     assert_eq!(
         adopt(&ctx, "skill:demo", false, true)
             .err()
@@ -281,8 +282,9 @@ fn ambiguous_declared_and_native_alias_refuses_before_state_creation_but_explici
         "ambiguous"
     );
     assert!(!ctx.state.exists());
-    let package = crate::capability_local::resolve_package(&ctx, "skill:demo", false, false)?
-        .ok_or("native package")?;
+    let package =
+        crate::capability::capability_local::resolve_package(&ctx, "skill:demo", false, false)?
+            .ok_or("native package")?;
     let exact_alias = crate::cli::AdoptTarget {
         key: "skill:demo",
         exact: true,
@@ -294,9 +296,12 @@ fn ambiguous_declared_and_native_alias_refuses_before_state_creation_but_explici
         exact: true,
     };
     assert!(super::adopt(&ctx, exact_id, true, true)?.is_some());
-    assert!(crate::capability_local::resolve_package(&ctx, "skill:demo", false, true)?.is_none());
+    assert!(
+        crate::capability::capability_local::resolve_package(&ctx, "skill:demo", false, true)?
+            .is_none()
+    );
     assert_eq!(
-        crate::capability_local::resolve_package(&ctx, &package.id, false, true)?
+        crate::capability::capability_local::resolve_package(&ctx, &package.id, false, true)?
             .ok_or("exact ID")?
             .id,
         package.id
@@ -363,11 +368,12 @@ fn clearing_pending_requires_the_complete_intended_terminal_state_in_both_direct
 fn native_expected_rejects_unknown_fields_arrays_null_and_wrong_observation_variants() -> TestResult
 {
     let (_temp, ctx) = native_fixture()?;
-    let authority = crate::governance::capture(&ctx)?;
-    let spec = crate::source_inventory::assess_adoption(&ctx, &authority, "skill:demo", false)?
-        .ok_or("assessment")?
-        .native
-        .ok_or("native")?;
+    let authority = crate::operations::governance::capture(&ctx)?;
+    let spec =
+        crate::source::source_inventory::assess_adoption(&ctx, &authority, "skill:demo", false)?
+            .ok_or("assessment")?
+            .native
+            .ok_or("native")?;
     let original = serde_json::to_value(&spec)?;
     let mut changed = original.clone();
     changed["expected"]["future_behavior"] = json!({"ignore":false});
@@ -410,10 +416,10 @@ fn policy_write_and_retirement_advance_full_source_baseline_using_exact_patch_mo
     )?;
     let adopted = adopt(&ctx, "skill:demo", false, true)?.ok_or("adopt")?;
     let id = adopted["member"].as_str().ok_or("id")?;
-    let authority = crate::governance::capture(&ctx)?;
+    let authority = crate::operations::governance::capture(&ctx)?;
     let before = fs::read(&authority.paths.managed)?;
     assert_eq!(
-        crate::capability_tx::sync(&ctx, Some("SOURCE-POLICY"), false, true)?["status"],
+        crate::capability::capability_tx::sync(&ctx, Some("SOURCE-POLICY"), false, true)?["status"],
         "succeeded"
     );
     let book = crate::policy::source_baseline::read(
@@ -422,7 +428,7 @@ fn policy_write_and_retirement_advance_full_source_baseline_using_exact_patch_mo
         nix::unistd::geteuid().as_raw(),
     )?;
     let root = &book.roots[id];
-    let observed = crate::source_tree::observe(&root.slot)?.ok_or("root")?;
+    let observed = crate::source::source_tree::observe(&root.slot)?.ok_or("root")?;
     root.authorize(
         &root.source,
         &root.slot,
@@ -444,7 +450,7 @@ fn policy_write_and_retirement_advance_full_source_baseline_using_exact_patch_mo
         br#"{"schema_version":1,"standalone_manual_only":[]}"#,
     )?;
     assert_eq!(
-        crate::capability_tx::sync(&ctx, Some("SOURCE-RETIRE"), false, true)?["status"],
+        crate::capability::capability_tx::sync(&ctx, Some("SOURCE-RETIRE"), false, true)?["status"],
         "succeeded"
     );
     let book = crate::policy::source_baseline::read(
@@ -456,7 +462,7 @@ fn policy_write_and_retirement_advance_full_source_baseline_using_exact_patch_mo
     root.authorize(
         &root.source,
         &root.slot,
-        &crate::source_tree::observe(&root.slot)?.ok_or("root")?,
+        &crate::source::source_tree::observe(&root.slot)?.ok_or("root")?,
         &ctx.home,
         nix::unistd::geteuid().as_raw(),
     )?;
@@ -484,7 +490,7 @@ fn policy_projection_cannot_bless_preexisting_full_mode_or_empty_directory_drift
         let receipts = fs::read(ctx.state.join("receipts.json"))?;
         let skill = fs::read(root.join("SKILL.md"))?;
         assert_eq!(
-            crate::capability_tx::sync(&ctx, Some("SOURCE-DRIFT"), false, true)
+            crate::capability::capability_tx::sync(&ctx, Some("SOURCE-DRIFT"), false, true)
                 .err()
                 .ok_or("drift")?
                 .code,
@@ -510,7 +516,7 @@ fn strict_v5_manifest_rejects_invalid_identity_paths_ledger_order_and_candidate_
 -> TestResult {
     let (_temp, ctx) = native_fixture()?;
     let (_store, batch, _journal) = prepared(&ctx)?;
-    let authority = crate::governance::capture(&ctx)?;
+    let authority = crate::operations::governance::capture(&ctx)?;
     let owner = nix::unistd::geteuid().as_raw();
     let original = serde_json::to_value(&batch.manifest)?;
     for (pointer, value) in [
@@ -603,7 +609,7 @@ fn v5_rejects_forged_read_witnesses_mismatched_native_targets_and_unrecorded_res
 -> TestResult {
     let (_temp, ctx) = native_fixture()?;
     let (store, mut batch, _journal) = prepared(&ctx)?;
-    let authority = crate::governance::capture(&ctx)?;
+    let authority = crate::operations::governance::capture(&ctx)?;
     let owner = nix::unistd::geteuid().as_raw();
     let good = batch.manifest.clone();
     for variant in 0..8 {
@@ -676,11 +682,10 @@ fn v5_rejects_forged_read_witnesses_mismatched_native_targets_and_unrecorded_res
     let forward = pending.ledgers[0].forward.as_mut().ok_or("forward")?;
     forward.target = good.ledgers[0].witness.path.clone();
     forward.after = good.ledgers[0].witness.state.clone();
-    forward.staged = Some(
-        forward
-            .target
-            .with_file_name(format!(".{}.cap.tmp", crate::store::operation_id())),
-    );
+    forward.staged = Some(forward.target.with_file_name(format!(
+        ".{}.cap.tmp",
+        crate::operations::store::operation_id()
+    )));
     assert!(policy::validate_pending(&good, &pending, &pending.manifest_sha256).is_err());
     for staged in [
         "relative".into(),
@@ -707,16 +712,16 @@ fn source_scope_overlap_is_rejected_before_lock_preparation_can_write_inside_the
     for ancestor in [false, true] {
         let (_temp, mut ctx) = native_fixture()?;
         let payload = ctx.home.join(".agents/skills/demo");
-        let slot = crate::source_inventory::assess_adoption(
+        let slot = crate::source::source_inventory::assess_adoption(
             &ctx,
-            &crate::governance::capture(&ctx)?,
+            &crate::operations::governance::capture(&ctx)?,
             "skill:demo",
             false,
         )?
         .ok_or("assessment")?
         .baseline
         .slot;
-        let before = crate::source_tree::observe(&slot)?;
+        let before = crate::source::source_tree::observe(&slot)?;
         ctx.state = if ancestor {
             ctx.home.join(".agents/skills")
         } else {
@@ -729,7 +734,7 @@ fn source_scope_overlap_is_rejected_before_lock_preparation_can_write_inside_the
                 .code,
             "source_path_overlap"
         );
-        assert_eq!(crate::source_tree::observe(&slot)?, before);
+        assert_eq!(crate::source::source_tree::observe(&slot)?, before);
         assert!(!ctx.state.join("write.lock").exists());
         assert!(!ctx.home.join(".agents/backups").exists());
     }
@@ -740,7 +745,7 @@ fn v5_authority_rejects_full_tree_mismatch_layout_overlap_and_invalid_native_bin
 {
     let (_temp, ctx) = native_fixture()?;
     let (_store, batch, _journal) = prepared(&ctx)?;
-    let authority = crate::governance::capture(&ctx)?;
+    let authority = crate::operations::governance::capture(&ctx)?;
     let owner = nix::unistd::geteuid().as_raw();
     for variant in 0..4 {
         let mut manifest = batch.manifest.clone();
@@ -778,9 +783,9 @@ fn known_candidate_receipt_matches_native_observation_after_exchange_without_lea
         source_tree::Change,
     };
     let (_temp, ctx) = native_fixture()?;
-    let assessment = crate::source_inventory::assess_adoption(
+    let assessment = crate::source::source_inventory::assess_adoption(
         &ctx,
-        &crate::governance::capture(&ctx)?,
+        &crate::operations::governance::capture(&ctx)?,
         "skill:demo",
         false,
     )?
@@ -815,7 +820,7 @@ fn known_candidate_receipt_matches_native_observation_after_exchange_without_lea
             ("empty".into(), Entry::Directory { mode: 0o755 }),
         ]),
     };
-    let (retained, after_tree) = crate::source_payload::materialize(
+    let (retained, after_tree) = crate::source::source_payload::materialize(
         &Directory::open(&private)?,
         "payload",
         &payload,
@@ -840,16 +845,16 @@ fn known_candidate_receipt_matches_native_observation_after_exchange_without_lea
         before: assessment.tree.clone(),
         after: after_tree,
     };
-    crate::source_tree::publish_checked(&change, || Ok(()))?;
+    crate::source::source_tree::publish_checked(&change, || Ok(()))?;
     fs::write(&native_path, &after)?;
     assert_eq!(
-        crate::capability_local::observe_default(&spec.package.id, &spec.query)?,
+        crate::capability::capability_local::observe_default(&spec.package.id, &spec.query)?,
         expected
     );
     fs::write(&native_path, &before)?;
-    crate::source_tree::restore_checked(&change, || Ok(()))?;
+    crate::source::source_tree::restore_checked(&change, || Ok(()))?;
     assert_eq!(
-        crate::capability_local::observe_default(&spec.package.id, &spec.query)?,
+        crate::capability::capability_local::observe_default(&spec.package.id, &spec.query)?,
         spec.expected
     );
     Ok(())
@@ -910,11 +915,12 @@ fn recovery_checks_the_used_native_registry_scope_and_ignores_unrelated_manager_
 fn a_replaced_state_root_cannot_be_learned_between_lock_and_source_journal_initialization()
 -> TestResult {
     let (_temp, ctx) = native_fixture()?;
-    let initial = crate::governance::capture(&ctx)?;
-    let assessment = crate::source_inventory::assess_adoption(&ctx, &initial, "skill:demo", false)?
-        .ok_or("assessment")?;
+    let initial = crate::operations::governance::capture(&ctx)?;
+    let assessment =
+        crate::source::source_inventory::assess_adoption(&ctx, &initial, "skill:demo", false)?
+            .ok_or("assessment")?;
     let store = Store::lock(&ctx)?;
-    let authority = crate::governance::capture(&ctx)?;
+    let authority = crate::operations::governance::capture(&ctx)?;
     let retained = ctx.home.join("retained-state");
     fs::rename(&ctx.state, &retained)?;
     fs::create_dir(&ctx.state)?;
@@ -1027,7 +1033,7 @@ fn complete_upgrade_context()
         None,
     )?;
     fs::write(&skill, overlay.after.ok_or("applied")?)?;
-    let authority = crate::governance::capture(&ctx)?;
+    let authority = crate::operations::governance::capture(&ctx)?;
     let rules = serde_json::to_vec(
         &json!({"schema_version":1,"standalone_manual_only":["demo"],"plugins":{},"mirror_standalone_upstream_manual":false}),
     )?;
@@ -1079,7 +1085,7 @@ fn legacy_v5_upgrade_recovers_each_actual_root_and_five_ledger_boundary_without_
         };
         assert_eq!(roots.len(), 2);
         for root in roots.iter().take(boundary.min(2)) {
-            crate::source_tree::publish_checked(&root.change, || batch.guard(&store))?;
+            crate::source::source_tree::publish_checked(&root.change, || batch.guard(&store))?;
         }
         for ledger in batch
             .manifest
@@ -1087,9 +1093,10 @@ fn legacy_v5_upgrade_recovers_each_actual_root_and_five_ledger_boundary_without_
             .iter()
             .take(boundary.saturating_sub(2))
         {
-            crate::source_files::publish_checked(ledger.pair.as_ref().ok_or("pair")?, || {
-                batch.guard(&store)
-            })?;
+            crate::source::source_files::publish_checked(
+                ledger.pair.as_ref().ok_or("pair")?,
+                || batch.guard(&store),
+            )?;
         }
         let result = recover_journal(&ctx, &store, &mut journal, false, true)?;
         let after = boundary == 7;
@@ -1097,7 +1104,7 @@ fn legacy_v5_upgrade_recovers_each_actual_root_and_five_ledger_boundary_without_
         for ledger in &batch.manifest.ledgers {
             let pair = ledger.pair.as_ref().ok_or("pair")?;
             assert_eq!(
-                crate::source_files::position(pair)?,
+                crate::source::source_files::position(pair)?,
                 if after {
                     crate::policy::source_tree::Position::OwnAfter
                 } else {
@@ -1105,7 +1112,7 @@ fn legacy_v5_upgrade_recovers_each_actual_root_and_five_ledger_boundary_without_
                 }
             );
             assert_eq!(
-                crate::source_files::observe(&pair.live)?,
+                crate::source::source_files::observe(&pair.live)?,
                 if after {
                     Some(pair.after.clone())
                 } else {
@@ -1115,7 +1122,7 @@ fn legacy_v5_upgrade_recovers_each_actual_root_and_five_ledger_boundary_without_
         }
         for root in roots {
             assert_eq!(
-                crate::source_tree::position(&root.change)?,
+                crate::source::source_tree::position(&root.change)?,
                 if after {
                     crate::policy::source_tree::Position::OwnAfter
                 } else {
@@ -1146,12 +1153,13 @@ fn legacy_v5_upgrade_full_before_and_after_clear_gap_use_frozen_n_and_preserve_t
                 return Err("upgrade".into());
             };
             for root in roots {
-                crate::source_tree::publish_checked(&root.change, || batch.guard(&store))?;
+                crate::source::source_tree::publish_checked(&root.change, || batch.guard(&store))?;
             }
             for ledger in batch.manifest.ledgers.iter().take(3) {
-                crate::source_files::publish_checked(ledger.pair.as_ref().ok_or("pair")?, || {
-                    batch.guard(&store)
-                })?;
+                crate::source::source_files::publish_checked(
+                    ledger.pair.as_ref().ok_or("pair")?,
+                    || batch.guard(&store),
+                )?;
             }
             batch.rollback(&store)?;
             for _ in 0..2 {
@@ -1212,7 +1220,7 @@ fn legacy_v5_upgrade_unknown_retained_or_lost_frozen_candidate_evidence_never_re
 fn legacy_v5_upgrade_frozen_authority_rejects_corrupt_roots_pairs_invocation_witness_and_dynamic_progress()
 -> TestResult {
     let (_temp, ctx, _store, batch, _journal) = prepared_complete_upgrade()?;
-    let authority = crate::governance::capture(&ctx)?;
+    let authority = crate::operations::governance::capture(&ctx)?;
     let owner = nix::unistd::geteuid().as_raw();
     let original = serde_json::to_value(&batch.manifest)?;
     for (pointer, value) in [
@@ -1295,7 +1303,7 @@ fn legacy_v5_upgrade_authority_closes_root_overlap_duplicate_member_and_nonseria
 -> TestResult {
     use std::os::unix::ffi::OsStringExt;
     let (_temp, ctx, _store, batch, _journal) = prepared_complete_upgrade()?;
-    let authority = crate::governance::capture(&ctx)?;
+    let authority = crate::operations::governance::capture(&ctx)?;
     let owner = nix::unistd::geteuid().as_raw();
     for variant in 0..8 {
         let mut manifest = batch.manifest.clone();
@@ -1390,11 +1398,12 @@ fn adoption_rejects_upgrade_pair_authority_and_unchanged_ledger_still_has_exact_
     let raw = batch
         .blobs
         .get(batch.manifest.ledgers[2].after.as_ref().ok_or("after")?)?;
-    batch.manifest.ledgers[2].pair = Some(crate::source_files::stage(&witness, &raw, 0o600)?);
+    batch.manifest.ledgers[2].pair =
+        Some(crate::source::source_files::stage(&witness, &raw, 0o600)?);
     assert!(
         policy::validate(
             &batch.manifest,
-            &crate::governance::capture(&ctx)?.paths,
+            &crate::operations::governance::capture(&ctx)?.paths,
             nix::unistd::geteuid().as_raw()
         )
         .is_err()
@@ -1555,7 +1564,7 @@ fn historical_projection_refuses_foreign_declarations_missing_baseline_and_incon
     manifest.ledgers[0].after = before_image;
     manifest.ledgers[0].after_mode = policy::mode(&manifest.ledgers[0].witness.state);
     manifest.ledgers[0].pair = None;
-    let authority = crate::governance::capture(&ctx)?;
+    let authority = crate::operations::governance::capture(&ctx)?;
     policy::validate(&manifest, &authority.paths, uid)?;
     assert!(verify_projection(&manifest, &batch.blobs).is_err());
     Ok(())
@@ -1651,7 +1660,7 @@ fn historical_projection_requires_the_original_after_metadata_and_receipt_for_pl
     let (_temp, ctx, store, mut batch, _journal) = prepared_complete_upgrade()?;
     batch.publish(&store)?;
     let marker = fs::read(&batch.manifest.pending)?;
-    let authority = crate::governance::capture(&ctx)?;
+    let authority = crate::operations::governance::capture(&ctx)?;
     let owner = nix::unistd::geteuid().as_raw();
     for slot in [Slot::Definitions, Slot::Managed, Slot::Receipts] {
         let mut stale = batch.manifest.clone();
@@ -1723,7 +1732,7 @@ fn historical_declared_only_upgrade_keeps_native_and_receipt_images_unchanged() 
         selected.commit
     );
     baseline.after = Some(batch.blobs.put(&after)?);
-    baseline.pair = Some(crate::source_files::stage(
+    baseline.pair = Some(crate::source::source_files::stage(
         &baseline.witness,
         &after,
         baseline.after_mode.ok_or("managed mode")?,
@@ -1735,7 +1744,7 @@ fn historical_declared_only_upgrade_keeps_native_and_receipt_images_unchanged() 
         unchanged.after_mode = policy::mode(&unchanged.witness.state);
         unchanged.pair = None;
     }
-    let authority = crate::governance::capture(&ctx)?;
+    let authority = crate::operations::governance::capture(&ctx)?;
     policy::validate(&declared_only, &authority.paths, owner)?;
     verify_projection(&declared_only, &batch.blobs)?;
     for index in [0, 3, 4] {

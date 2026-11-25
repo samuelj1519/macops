@@ -1,12 +1,16 @@
+pub(crate) mod install;
+pub(crate) mod plan;
+pub(crate) mod progress;
+
 use crate::{
+    agent::profile_install::Stage,
     browser::{Item, Kind, Session, View, sanitize},
-    chezmoi_native::ViewerFile,
+    config::chezmoi_native::ViewerFile,
     context::Context,
+    domain::resource::Management,
     domain::{Action, Package, Plan, Provider},
     error::{Error, Result},
     operations::RecoveryPreview,
-    profile_install::Stage,
-    resource::Management,
 };
 use crossterm::{
     cursor::Show,
@@ -120,7 +124,7 @@ struct Details {
     actual: Option<Result<ViewerFile>>,
     source: Option<Result<ViewerFile>>,
     recovery: Option<Box<RecoveryPreview>>,
-    agent_session: Option<crate::codex_install::session::Details>,
+    agent_session: Option<crate::agent::codex_install::session::Details>,
     agent_removable: bool,
     skills_native: bool,
 }
@@ -239,7 +243,7 @@ impl Browser {
             self.visible()
                 .get(self.row)
                 .filter(|item| item.management == Management::Adopted)
-                .and_then(|item| crate::codex_install::session::details(ctx, &item.id))
+                .and_then(|item| crate::agent::codex_install::session::details(ctx, &item.id))
         } else {
             None
         };
@@ -248,7 +252,7 @@ impl Browser {
                 .visible()
                 .get(self.row)
                 .is_some_and(|item| item.management == Management::Adopted)
-            && crate::native_skills::accepts_inventory_maintenance(ctx, &id);
+            && crate::skills::native_skills::accepts_inventory_maintenance(ctx, &id);
         self.page = Page::Detail(Box::new(Details {
             actual: (kind == Kind::Config).then(|| session.observed(&id, false)),
             source: (kind == Kind::Config).then(|| session.observed(&id, true)),
@@ -257,7 +261,7 @@ impl Browser {
                 .flatten(),
             agent_session,
             agent_removable: kind == Kind::Agents
-                && crate::resource_agents::resolve_session_profile(ctx, &id).is_ok(),
+                && crate::agent::resource_agents::resolve_session_profile(ctx, &id).is_ok(),
             skills_native,
         }));
     }
@@ -313,7 +317,7 @@ impl Browser {
             return None;
         }
         let id = self.selected()?;
-        let package = match crate::target::resolve(ctx, &id) {
+        let package = match crate::catalog::target::resolve(ctx, &id) {
             Ok(package) => package,
             Err(error) => {
                 self.notice = crate::output::error_text(&error);
@@ -379,7 +383,7 @@ impl Browser {
                 Ok(recovered.result)
             }
             Ok(Some(_)) => {
-                match crate::target::refresh(ctx, &plan.package).and_then(|package| {
+                match crate::catalog::target::refresh(ctx, &plan.package).and_then(|package| {
                     crate::operations::plan(ctx, &package, action, None, action == Action::Adopt)
                 }) {
                     Ok(current) => {
@@ -437,7 +441,7 @@ impl Browser {
 
     fn run_native(&mut self, ctx: &Context, session: &mut Session, action: NativeAction) {
         if let NativeAction::AgentUninstall(label) = &action {
-            let result = crate::resource_agents::uninstall(ctx, label, false, false);
+            let result = crate::agent::resource_agents::uninstall(ctx, label, false, false);
             self.refresh(ctx, session);
             self.notice = match result {
                 Ok(data) => format!(
@@ -450,20 +454,23 @@ impl Browser {
         }
         let result = match action {
             NativeAction::Brew { action, package } => {
-                let result = crate::brew::execute_selected(ctx, &package, action, false, false);
+                let result =
+                    crate::software::brew::execute_selected(ctx, &package, action, false, false);
                 self.operation_result(ctx, session, action, result);
                 return;
             }
             NativeAction::Skills { action, id } => {
-                let result = crate::native_skills::maintain_from_inventory(ctx, &id, action);
+                let result =
+                    crate::skills::native_skills::maintain_from_inventory(ctx, &id, action);
                 self.operation_result(ctx, session, action, result);
                 return;
             }
             NativeAction::AgentPreference(label) => {
-                crate::codex_install::session::configure(ctx, &label)
+                crate::agent::codex_install::session::configure(ctx, &label)
             }
             NativeAction::AgentLaunch(label) => {
-                crate::codex_install::session::launch(ctx, &label, None, false, false).map(|_| ())
+                crate::agent::codex_install::session::launch(ctx, &label, None, false, false)
+                    .map(|_| ())
             }
             NativeAction::AgentUninstall(_) => return,
         };
@@ -612,7 +619,7 @@ impl Browser {
                     sanitize(&plan.package.name, false),
                     sanitize(plan.before.version().unwrap_or("未知"), false),
                     sanitize(plan.target.as_deref().unwrap_or("—"), false),
-                    crate::recommend::plan_scope(ctx, plan),
+                    plan::plan_scope(ctx, plan),
                     if plan.action == Action::Adopt {
                         "记录现有安装基线，保留文件和版本。".into()
                     } else {
@@ -747,7 +754,10 @@ fn details(item: &Item) -> String {
         .join("\n")
 }
 
-fn item_details(item: &Item, session: Option<&crate::codex_install::session::Details>) -> String {
+fn item_details(
+    item: &Item,
+    session: Option<&crate::agent::codex_install::session::Details>,
+) -> String {
     let mut text = details(item);
     if let Some(session) = session {
         use std::fmt::Write;

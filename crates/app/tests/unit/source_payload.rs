@@ -42,7 +42,10 @@ fn private_materialization_preserves_binary_empty_directories_and_modes_without_
         0o700
     );
     assert!(materialize(&parent, "candidate", &payload, 0o755).is_err());
-    assert_eq!(crate::source_tree::observe(&slot)?.as_ref(), Some(&tree));
+    assert_eq!(
+        crate::source::source_tree::observe(&slot)?.as_ref(),
+        Some(&tree)
+    );
     assert!(materialize(&parent, "../outside", &payload, 0o755).is_err());
     fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o755))?;
     assert!(materialize(&parent, "not-private", &payload, 0o755).is_err());

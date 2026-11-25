@@ -1,6 +1,6 @@
 use crate::{
-    chezmoi_native::ConfigBrowser,
     cli::{Cli, Command, SkillCmd},
+    config::chezmoi_native::ConfigBrowser,
     context::Context,
     error::{Error, Result},
     operations::RecoveryState,
@@ -48,7 +48,7 @@ pub(crate) struct Item {
     pub summary: String,
     pub managed: bool,
     #[serde(skip)]
-    pub management: crate::resource::Management,
+    pub management: crate::domain::resource::Management,
     pub directory: bool,
     pub path: Option<PathBuf>,
     pub source: Option<PathBuf>,
@@ -86,14 +86,23 @@ impl Session {
                 let view = browser.view();
                 Ok((Self::Config(Box::new(browser)), view))
             }
-            Kind::Skills => Ok((Self::Skills, crate::capabilities::browse(ctx, false)?)),
-            Kind::Capabilities => Ok((Self::Capabilities, crate::capabilities::browse(ctx, true)?)),
+            Kind::Skills => Ok((
+                Self::Skills,
+                crate::capability::capabilities::browse(ctx, false)?,
+            )),
+            Kind::Capabilities => Ok((
+                Self::Capabilities,
+                crate::capability::capabilities::browse(ctx, true)?,
+            )),
             Kind::Apps => Ok((Self::Apps, resource_view(ctx, "applications")?)),
             Kind::Agents => Ok((Self::Agents, resource_view(ctx, "agents")?)),
             Kind::History => Ok((Self::History, history_view(ctx)?)),
             Kind::Marketplaces => {
-                let data = crate::plugin_marketplaces::list(ctx, None, false, false)?;
-                Ok((Self::Marketplaces, crate::plugin_marketplaces::view(&data)))
+                let data = crate::agent::plugin_marketplaces::list(ctx, None, false, false)?;
+                Ok((
+                    Self::Marketplaces,
+                    crate::agent::plugin_marketplaces::view(&data),
+                ))
             }
         }
     }
@@ -104,8 +113,8 @@ impl Session {
                 browser.refresh(ctx)?;
                 Ok(browser.view())
             }
-            Self::Skills => crate::capabilities::browse(ctx, false),
-            Self::Capabilities => crate::capabilities::browse(ctx, true),
+            Self::Skills => crate::capability::capabilities::browse(ctx, false),
+            Self::Capabilities => crate::capability::capabilities::browse(ctx, true),
             Self::Apps => resource_view(ctx, "applications"),
             Self::Agents => agent_view(ctx),
             Self::History => history_view(ctx),
@@ -120,7 +129,7 @@ impl Session {
         &self,
         id: &str,
         source: bool,
-    ) -> Result<crate::chezmoi_native::ViewerFile> {
+    ) -> Result<crate::config::chezmoi_native::ViewerFile> {
         match self {
             Self::Config(browser) => browser.select_file(id, source),
             _ => Err(Error::attention("file_unavailable", "此入口不提供文件查看")),
@@ -154,7 +163,7 @@ pub(crate) fn browse_marketplaces(ctx: &Context, data: &serde_json::Value) -> Re
         ctx,
         Kind::Marketplaces,
         &mut Session::Marketplaces,
-        crate::plugin_marketplaces::view(data),
+        crate::agent::plugin_marketplaces::view(data),
         false,
     )?;
     Ok(())
@@ -226,7 +235,7 @@ fn history_view(ctx: &Context) -> Result<View> {
             .collect(),
         coverage: "observed",
         difference_coverage: "not_applicable",
-        observed_at: Some(crate::store::now()),
+        observed_at: Some(crate::operations::store::now()),
         note: note.into(),
         incomplete: active_unreadable,
     })
@@ -234,8 +243,8 @@ fn history_view(ctx: &Context) -> Result<View> {
 
 fn history_item(journal: crate::domain::Journal, recovery: RecoveryState) -> Item {
     use crate::{
+        domain::resource::Management,
         domain::{Action, Phase},
-        resource::Management,
     };
     let operation = match journal.plan.action {
         Action::Maintain => "维护",
@@ -310,14 +319,14 @@ fn plain(view: &View, kind: Kind) -> String {
 
 fn resource_view(ctx: &Context, filter: &str) -> Result<View> {
     Ok(view_from_snapshot(
-        crate::resource_inventory::snapshot(ctx, Some(filter), None)?,
+        crate::catalog::resource_inventory::snapshot(ctx, Some(filter), None)?,
         false,
     ))
 }
 
 fn agent_view(ctx: &Context) -> Result<View> {
     let mut view = resource_view(ctx, "agents")?;
-    let tools = crate::ai::list(ctx)?;
+    let tools = crate::agent::ai::list(ctx)?;
     view.items.extend(
         tools["tools"]
             .as_array()
@@ -332,7 +341,7 @@ fn agent_view(ctx: &Context) -> Result<View> {
                     name: name.into(),
                     summary: format!("CLI · {version}"),
                     managed: true,
-                    management: crate::resource::Management::Native,
+                    management: crate::domain::resource::Management::Native,
                     directory: false,
                     path: Some(PathBuf::from(binary)),
                     source: None,
@@ -364,8 +373,8 @@ fn agent_view(ctx: &Context) -> Result<View> {
 }
 
 pub(crate) fn adoption_view(ctx: &Context, name: Option<&str>) -> Result<View> {
-    use crate::resource::{Data, Management, State};
-    let mut snapshot = crate::resource_inventory::applications(ctx, true)?;
+    use crate::domain::resource::{Data, Management, State};
+    let mut snapshot = crate::catalog::resource_inventory::applications(ctx, true)?;
     snapshot.resources.retain(|resource| {
         let Data::Application {
             manager,
@@ -401,7 +410,7 @@ pub(crate) fn adoption_view(ctx: &Context, name: Option<&str>) -> Result<View> {
     Ok(view)
 }
 
-fn view_from_snapshot(snapshot: crate::resource::Snapshot, show_scope: bool) -> View {
+fn view_from_snapshot(snapshot: crate::domain::resource::Snapshot, show_scope: bool) -> View {
     let incomplete = snapshot.incomplete;
     let mut items = snapshot
         .resources
@@ -414,7 +423,7 @@ fn view_from_snapshot(snapshot: crate::resource::Snapshot, show_scope: bool) -> 
         items,
         coverage: if incomplete { "partial" } else { "observed" },
         difference_coverage: "not_applicable",
-        observed_at: Some(crate::store::now()),
+        observed_at: Some(crate::operations::store::now()),
         note: if incomplete {
             "盘点覆盖不完整，详情显示已核验的记录"
         } else {
@@ -425,8 +434,8 @@ fn view_from_snapshot(snapshot: crate::resource::Snapshot, show_scope: bool) -> 
     }
 }
 
-fn resource_item(resource: crate::resource::Resource, show_scope: bool) -> Option<Item> {
-    use crate::resource::{Data, Management};
+fn resource_item(resource: crate::domain::resource::Resource, show_scope: bool) -> Option<Item> {
+    use crate::domain::resource::{Data, Management};
     let mut name = resource.name;
     let (summary, path, agents, details) = match resource.data {
         Data::Application {
@@ -472,7 +481,7 @@ fn resource_item(resource: crate::resource::Resource, show_scope: bool) -> Optio
             model,
             runtime,
         } => {
-            let label = crate::resource_agents::profile_label(&name, &config_dir);
+            let label = crate::agent::resource_agents::profile_label(&name, &config_dir);
             let summary = if label == name {
                 format!("{client} · {profile}")
             } else {

@@ -1,6 +1,6 @@
 use crate::{
+    domain::resource::{Coverage, CoverageState},
     error::{Error, Result},
-    resource::{Coverage, CoverageState},
 };
 use serde::{
     Deserialize,

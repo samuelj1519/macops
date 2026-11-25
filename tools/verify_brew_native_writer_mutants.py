@@ -10,7 +10,7 @@ import stat
 import subprocess
 
 ROOT=Path(__file__).resolve().parents[1]
-POLICY='crates/app/src/brew.rs'
+POLICY='crates/app/src/software/brew.rs'
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
@@ -27,7 +27,7 @@ def main():
     end=source.index('        register_context(',start)
     old_trust=source[start:end]
     replay='    let _replayed = std::process::Command::new(&binding.invocation.command.program)\n        .args(&binding.invocation.command.args).env_clear().envs(&binding.invocation.env)\n        .current_dir(&binding.invocation.cwd).status()?;\n'
-    original_finish='    finish_native(ctx, &store, &mut journal, &binding).map(Some)'
+    original_finish='    finish_native(ctx, store, &mut journal, &binding)\n}\n\n#[cfg(test)]'
     mutations=[
         ('unconfirmed-context-trust',old_trust,'','another_registry_does_not_trust_a_new_context_and_first_explicit_action_confirms'),
         ('wrong-target-accepted','if !policy::expected(&view, &proof.observation) {','if false && !policy::expected(&view, &proof.observation) {','original_nonzero_and_bad_after_remain_unknown_without_native_retry'),

@@ -4,17 +4,20 @@ macops 是面向 macOS 的 Rust CLI。它统一对象、命令、目录查询和
 
 ## 模块与职责
 
-| 层 | 主要模块 | 职责 |
-| --- | --- | --- |
-| 入口 | `cli`、`lib`、`context` | 解析命令，校验作用域并分派。普通命令共用一次上下文解析和迁移检查 |
-| 展示 | `output`、`browser`、`terminal` | 用已校验的上下文展示列表、详情和交互预览，交由对应模块执行已确认的操作 |
-| 产品与策略 | `domain`、`resource`、`policy/*` | 定义安装实例、配方、观察、目录归属、投影和交易状态，核验外部数据形状 |
-| 发现和适配 | `inventory`、`resource_*`、`providers`、`brew`、`npm_local`、`uv_local`、`chezmoi_native` | 将原生信息映射为软件、Agent 档案、能力、配置对象，依据各来源的契约调用工具 |
-| 来源建议 | `recommend`、`recommend_upstream`、`recommend_model`、`recommend_setup` | 核对公开来源，展示安装候选，配置模型和钥匙串引用 |
-| 清单与登记 | `manifest`、`npm_adoption`、`chezmoi_source` | 对照原始归属、作用域和摘要，导出或预演管理意图，并由既有适配器执行获准动作 |
-| 能力维护 | `native_skills`、`native_plugins`、`codex_install`、`claude_install`、`capability_tx` | 固定 Skills 安装配方，核对插件来源，管理单独配置、配置字段和触发策略 |
-| 执行和持久化 | `operations`、`native_runner`、`process`、`store`、`paths` | 冻结计划和运行证据，执行子进程，汇总核对状态，持锁更新操作记录与收据 |
-| 迁移 | `migration`、`migration_tx`、`migration_writers`、`governance` | 核对旧写入方和目标目录，发布迁移账本，按原证据恢复中断的迁移 |
+| 模块 | 职责 |
+| --- | --- |
+| `cli`、`lib`、`context` | 解析命令、校验作用域与分派。普通命令共用上下文解析和迁移检查 |
+| `output`、`browser`、`terminal` | 展示列表、详情、预览和原生命令进度。用户确认后由业务入口执行 |
+| `recommend/` | 核对公开来源，分析并展示安装候选，独立管理模型配置和钥匙串 |
+| `agent/` | 管理 Agent 工具、客户端配置和原生插件，负责配置选择、确认、恢复及目标发布 |
+| `skills/`、`software/`、`config/` | 各自解释技能配方、软件实例和配置目标的原生契约、操作及核对结果 |
+| `catalog/` | 汇总对象清单，解析选择器，读写版本索引和缓存 |
+| `capability/`、`source/` | 管理能力归属和共享字段，核对固定来源与快照，按账本同步及发布 |
+| `domain/`、`policy/` | 定义实例、计划、观察、回执和记录格式。按纯策略验证数据和判断状态 |
+| `operations/`、`migration/` | 通用执行、受管命令环境、操作记录和恢复分派，以及独立的迁移核对与账本 |
+| `platform/` | 处理子进程捕获、进程组时限、路径、目录句柄与文件身份 |
+
+业务入口使用共享的执行和记录接口。`operations::recovery` 调用适配器核对既有操作，核对沿用原记录及已持有的锁。`operations::command` 从原作用域构造命令，`platform::process` 接收已构造的命令和审计回调。平台文件操作负责目录身份，业务层保存并解释自己的写入证据。
 
 纯策略负责决定输入、计划和状态是否可接受。I/O 层提供已经取得的文件身份、内容摘要、进程状态和原生记录。Provider 调用通过程序与独立参数构造。Catalog 中显式命令的可信度与本机脚本相同。
 
@@ -44,7 +47,7 @@ macops 是面向 macOS 的 Rust CLI。它统一对象、命令、目录查询和
 
 管理清单导出正式声明、原生能力登记、可验证的配置缓存和安装收据。输入通过型别、大小、摘要和作用域核验。预演分别显示本地证据差异和原生重放资格。重放的已验范围为已登记的同作用域单个 npm 项，要求正式配方与明确版本。已满足的项在锁内以真实观察核验；其他项委托原生安装或升级流程。
 
-给 Codex 或 Claude Code 的已有配置安装插件时，推荐界面负责显示位置和收集确认，`profile_install` 负责核对原操作、登记和逐个安装。客户端适配器检查原生结果，`plugin_target` 核验写入内容并提交到选定配置。适配器通过安装阶段通知报告进度，终端统一显示。
+给 Codex 或 Claude Code 的已有配置安装插件时，推荐界面提供已核验的候选，`agent::plugin_install` 负责选择位置和确认，`agent::profile_install` 负责已有配置的核对、登记和逐个安装。客户端适配器检查原生结果，`agent::plugin_target` 核验写入内容并提交到选定配置。适配器通过安装阶段通知报告进度，终端统一显示。
 
 ## 操作与恢复
 
@@ -66,6 +69,7 @@ macops 的配置、数据、状态和缓存分别解析 XDG 设置与显式目�
 
 ## 参考
 
+- [模块重构方案](module-refactor-plan.md)
 - [命令执行边界与复查记录](architecture-review.md)
 - [使用入口](../README.md)
 - [验证与门禁](verification.md)

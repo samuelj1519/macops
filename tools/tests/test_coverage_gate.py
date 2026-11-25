@@ -45,7 +45,7 @@ class CoverageBoundary(unittest.TestCase):
                 extra = copy.deepcopy(files[0])
                 if variant == "alias":
                     p = Path(extra["filename"])
-                    extra["filename"] = str(p.parent / "../src" / p.name)
+                    extra["filename"] = str(p.parent / ".." / p.parent.name / p.name)
                 if variant == "foreign":
                     extra["filename"] = "/private/tmp/foreign/src.rs"
                 files.append(extra)
@@ -67,20 +67,21 @@ class CoverageBoundary(unittest.TestCase):
 
     def test_one_pure_module_cannot_hide_behind_the_aggregate(self):
         report = copy.deepcopy(self.report)
-        record = next(f for f in report["data"][0]["files"] if f["filename"].endswith("/domain.rs"))
+        record = next(f for f in report["data"][0]["files"] if f["filename"].endswith("/domain/mod.rs"))
         record["summary"]["lines"] = {"count": 10000, "covered": 9999, "percent": 99.99}
         result = self.verify(report)
-        self.assertTrue(any("pure domain.rs lines" in message for message in result["failures"]))
+        self.assertTrue(any("pure domain/mod.rs lines" in message for message in result["failures"]))
 
     def test_effects_and_policy_reductions_fail(self):
         policy = copy.deepcopy(self.policy)
         policy["overall"]["lines"] = 89
         with self.assertRaises(ValueError):
             self.verify(policy=policy)
-        source = self.root / "crates/app/src/domain.rs"
-        source.write_text("use std::fs;\n")
-        with self.assertRaises(ValueError):
-            self.verify()
+        source = self.root / "crates/app/src/domain/mod.rs"
+        for text in ["use std::fs;", "use crate::platform::process;", "use crate::catalog::inventory;"]:
+            source.write_text(text + "\n")
+            with self.subTest(text=text), self.assertRaisesRegex(ValueError, r"pure module depends on effects: domain/mod\.rs"):
+                self.verify()
 
     def test_required_pure_cannot_be_reclassified_or_inline_tests_hidden(self):
         policy = copy.deepcopy(self.policy)
@@ -92,7 +93,7 @@ class CoverageBoundary(unittest.TestCase):
         policy["declaration_only"].append(module)
         with self.assertRaises(ValueError):
             self.verify(policy=policy)
-        source = self.root / "crates/app/src/domain.rs"
+        source = self.root / "crates/app/src/domain/mod.rs"
         for text in ["#[cfg(test)] mod tests { #[test] fn witness() {} }", "#[cfg(test)] fn fixture_helper() -> bool { true }", "use std::{fs}; fn policy() { fs::read(\"x\"); }"]:
             source.write_text(text)
             with self.assertRaises(ValueError):

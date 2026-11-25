@@ -283,13 +283,13 @@ fn mise_worker_refuses_a_configuration_owner_discovered_after_planning() -> Test
         "app",
     ])?;
     let ctx = Context::from_cli(&cli, &mut vec![])?;
-    assert!(!crate::mise_owner::declared_owner(&ctx)?);
+    assert!(!crate::software::mise_owner::declared_owner(&ctx)?);
     let mut plan = crate::test_support::journal()?.plan;
     plan.package.provider = Provider::Mise {
         package: "fixture-tool".into(),
     };
     plan.before = Observation::Missing { evidence: None };
-    plan.query = Some(QuerySpec::Mise(crate::mise_owner::capture_query(
+    plan.query = Some(QuerySpec::Mise(crate::software::mise_owner::capture_query(
         &ctx.scope,
         crate::domain::CommandSpec {
             program: tool.clone(),
@@ -332,44 +332,5 @@ fn mise_worker_refuses_a_configuration_owner_discovered_after_planning() -> Test
     assert_eq!(blocked.code, "configuration_owner_requires_review");
     assert_eq!(fs::read(&source)?, b"[tools]\nfixture-tool='1.0.0'\n");
     assert!(!ctx.state.exists());
-    Ok(())
-}
-
-#[test]
-fn recovery_approval_cannot_follow_a_replaced_active_journal() -> TestResult {
-    let directory = tempfile::tempdir_in("/private/tmp")?;
-    let cli = Cli::try_parse_from([
-        "macops",
-        "--home",
-        directory.path().to_str().ok_or("home")?,
-        "app",
-    ])?;
-    let ctx = Context::from_cli(&cli, &mut Vec::new())?;
-    let first = new_journal(&ctx, crate::test_support::journal()?.plan)?;
-    let replacement = new_journal(&ctx, first.plan.clone())?;
-    let store = Store::lock(&ctx)?;
-    store.save(&first)?;
-    drop(store);
-    let operation = recover_before_write_with(
-        &ctx,
-        None,
-        |snapshot| {
-            assert_eq!(snapshot.id, first.id);
-            let changed = Store::lock(&ctx)?;
-            changed.save(&replacement)
-        },
-        |_| Ok(true),
-    );
-    assert_eq!(
-        operation
-            .err()
-            .ok_or("a replacement needs its own approval")?
-            .code,
-        "plan_stale"
-    );
-    let current = crate::store::active(&ctx)?.ok_or("active")?;
-    assert_eq!(current.id, replacement.id);
-    assert_eq!(current.phase, Phase::Prepared);
-    assert_eq!(crate::store::history(&ctx)?.len(), 2);
     Ok(())
 }

@@ -1,7 +1,7 @@
 #![cfg(test)]
 use super::*;
 use crate::{
-    resource::{Coverage, CoverageState},
+    domain::resource::{Coverage, CoverageState},
     test_support::TestResult,
 };
 use std::fs;

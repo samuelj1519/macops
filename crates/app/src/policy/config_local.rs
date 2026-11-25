@@ -1,16 +1,16 @@
 use crate::{
+    domain::resource::CoverageState,
     domain::{
         Action, ConfigAnchor, ConfigAuthority, ConfigFileStamp, ConfigModePolicy, FileId, Kind,
         Observation, Package, Plan, Provider, QuerySpec,
     },
     error::{Error, Result},
-    resource::CoverageState,
 };
 use std::path::Path;
 
 pub fn config_id(target: &Path) -> Result<String> {
     let clean = crate::policy::paths::lexical(target)?;
-    crate::resource::id("config", &clean)
+    crate::domain::resource::id("config", &clean)
 }
 
 pub fn classify_source_name(name: &str) -> std::result::Result<ConfigModePolicy, String> {

@@ -149,7 +149,7 @@ fn repository_report_keeps_pinned_sources_when_the_model_profile_is_unavailable(
     );
     assert_eq!(data["canExecute"], false);
     assert_eq!(data["model"]["status"], "local-only");
-    let config = crate::native_skills_files::private(&ctx.config)?;
+    let config = crate::capability::scoped_files::private(&ctx.config)?;
     let profile = config.path.join("recommend-model.json");
     std::fs::write(&profile, b"broken")?;
     assert_eq!(
@@ -221,7 +221,7 @@ fn repository_report_refuses_missing_revisions_and_uninspectable_documents() -> 
 
 #[test]
 fn github_report_attaches_marketplace_distribution_for_plugin_repositories() {
-    use crate::claude_install_source::{MARKET, PLUGIN};
+    use crate::agent::claude_install_source::{MARKET, PLUGIN};
     let commit = "b".repeat(40);
     let readme =
         b"claude plugin marketplace add example/fixture\nclaude plugin install plugin@market\n";
@@ -750,7 +750,7 @@ fn codex_market_evidence_binds_the_documented_market_ref_and_the_complete_route(
 
 #[test]
 fn claude_offer_requires_same_commit_documents_and_exact_native_user_scope() -> TestResult {
-    use crate::claude_install_source::{MARKET, PLUGIN};
+    use crate::agent::claude_install_source::{MARKET, PLUGIN};
     use crate::policy::source_git::ObjectId;
     let commit = ObjectId::parse(&"b".repeat(40))?;
     let docs = |install: &str| RepositoryEvidence {
@@ -796,7 +796,7 @@ fn claude_offer_requires_same_commit_documents_and_exact_native_user_scope() -> 
 
 #[test]
 fn repository_review_preserves_a_complete_claude_offer_and_drops_partial_evidence() -> TestResult {
-    use crate::claude_install_source::{MARKET, PLUGIN};
+    use crate::agent::claude_install_source::{MARKET, PLUGIN};
     use clap::Parser as _;
     let root = tempfile::tempdir_in("/private/tmp")?;
     let cli = crate::cli::Cli::try_parse_from([

@@ -118,7 +118,7 @@ fn uv_plan_drift_owner_change_and_unknown_namespace_never_commit() -> TestResult
         }
         assert!(execute(&ctx, planned, false, true).is_err(), "{change}");
         if ctx.state.join("receipts.json").exists() {
-            let receipts = crate::target::receipts(&ctx)?;
+            let receipts = crate::catalog::target::receipts(&ctx)?;
             assert!(!receipts.installations.contains_key(&package.id));
         }
         assert!(!ctx.state.join("active.json").exists(), "{change}");
@@ -194,7 +194,7 @@ fn uv_resolve_and_final_publication_recheck_declaration_owner_history() -> TestR
             packages: vec![owner.clone()],
         })?,
     )?;
-    let resolved = crate::target::resolve(&ctx, &owner.id)?;
+    let resolved = crate::catalog::target::resolve(&ctx, &owner.id)?;
     assert_eq!(resolved.id, "owner:alice");
     let planned = plan(&ctx, &resolved, Action::Adopt, None, false)?;
     let journal = new_journal_with_id(&ctx, planned, "OP-CAS".into())?;
@@ -212,7 +212,7 @@ fn uv_resolve_and_final_publication_recheck_declaration_owner_history() -> TestR
     assert!(
         store
             .commit_checked(&journal, journal.plan.before.clone(), || {
-                crate::uv_ownership::check(&ctx, &journal.plan, None)
+                crate::software::uv_ownership::check(&ctx, &journal.plan, None)
             })
             .is_err()
     );
@@ -229,7 +229,7 @@ fn uv_resolve_and_final_publication_recheck_declaration_owner_history() -> TestR
     assert!(
         store
             .commit_checked(&journal, journal.plan.before.clone(), || {
-                crate::uv_ownership::check(&ctx, &journal.plan, None)
+                crate::software::uv_ownership::check(&ctx, &journal.plan, None)
             })
             .is_err()
     );
@@ -241,8 +241,8 @@ fn uv_resolve_and_final_publication_recheck_declaration_owner_history() -> TestR
             packages: vec![owner.clone(), late],
         })?,
     )?;
-    assert!(crate::target::resolve(&ctx, &owner.id).is_err());
-    assert!(crate::target::resolve(&ctx, &package.id).is_err());
+    assert!(crate::catalog::target::resolve(&ctx, &owner.id).is_err());
+    assert!(crate::catalog::target::resolve(&ctx, &package.id).is_err());
     Ok(())
 }
 

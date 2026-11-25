@@ -1,6 +1,6 @@
 use crate::{
+    domain::resource::{Data, Resource},
     error::{Error, Result},
-    resource::{Data, Resource},
 };
 
 pub fn parse_change_id(value: &str) -> std::result::Result<String, String> {

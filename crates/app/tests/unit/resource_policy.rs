@@ -1,7 +1,7 @@
 #![cfg(test)]
 use super::*;
 use crate::{
-    resource::{self, Content, Data, Management, Origin, Resource, Revision, State},
+    domain::resource::{self, Content, Data, Management, Origin, Resource, Revision, State},
     test_support::TestResult,
 };
 use std::path::{Path, PathBuf};

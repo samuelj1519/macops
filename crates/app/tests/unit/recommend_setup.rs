@@ -1,6 +1,6 @@
 use super::*;
 use crate::{
-    cli::Cli, context::Context, native_skills_files::write_cas, store::Store,
+    cli::Cli, context::Context, operations::store::Store, skills::native_skills_files::write_cas,
     test_support::TestResult,
 };
 use clap::Parser;
@@ -1507,7 +1507,7 @@ fn maintenance_context(ctx: &RecommendSetupContext) -> Result<Context> {
     Context::from_cli(&cli, &mut vec![])
 }
 
-fn fixture_maintenance_journal(ctx: &Context) -> Result<crate::store::Journal> {
+fn fixture_maintenance_journal(ctx: &Context) -> Result<crate::operations::store::Journal> {
     let mut journal = crate::test_support::journal()?;
     journal.home.clone_from(&ctx.home);
     journal.scope.clone_from(&ctx.scope);
@@ -1562,9 +1562,10 @@ fn model_settings_can_save_when_maintenance_starts_at_each_wizard_boundary() -> 
         assert_eq!(data["mode"], "remote");
         assert_eq!(sent.get(), 1);
         assert_eq!(keys.added.borrow().len(), 1);
-        let after = crate::store::active(&maintenance)?.ok_or("original maintenance")?;
+        let after =
+            crate::operations::store::active(&maintenance)?.ok_or("original maintenance")?;
         assert_eq!(after.id, "OP-1");
-        assert_eq!(after.phase, crate::store::Phase::Running);
+        assert_eq!(after.phase, crate::operations::store::Phase::Running);
         assert!(read(&ctx.config)?.is_some());
     }
     Ok(())

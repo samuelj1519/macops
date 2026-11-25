@@ -82,7 +82,7 @@ fn agent_details_announce_the_managed_session_without_claiming_it_is_loaded() {
         skills_native: false,
     }));
     assert!(browser.agent_action('e').is_none());
-    let session = crate::codex_install::session::Details {
+    let session = crate::agent::codex_install::session::Details {
         plugin: "item@market".into(),
         preference: "停用",
         observed_model: Some("fixture-model".into()),

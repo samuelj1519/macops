@@ -1,8 +1,8 @@
 use crate::{
+    agent::native_plugins::{Instance, RECIPE_FILE, Recipe, Registry},
     cli::Cli,
     context::Context,
     error::Result,
-    native_plugins::{Instance, RECIPE_FILE, Recipe, Registry},
     test_support::TestResult,
 };
 use clap::Parser;

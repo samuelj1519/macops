@@ -135,7 +135,7 @@ fn object_with_input(git: &Git, arguments: &[&str], input: &[u8]) -> Result<Obje
 
 #[test]
 fn frozen_full_mirror_proves_actual_git_manifest_and_binary_file_bytes() -> TestResult {
-    use crate::codex_install_source::{Offer, sha, verified_mirror_contents};
+    use crate::agent::codex_install_source::{Offer, sha, verified_mirror_contents};
     let temp = tempfile::tempdir_in("/private/tmp")?;
     let git = Git::create(&temp.path().join("source"))?;
     let manifest = br#"{"name":"demo","version":"1.0.0"}"#;
@@ -198,7 +198,7 @@ fn frozen_full_mirror_proves_actual_git_manifest_and_binary_file_bytes() -> Test
     let files = verified_mirror_contents(&git, &verified, &offer)?;
     assert_eq!(files.len(), 4);
     assert!(files.contains(&("test-data".into(), true, sha(body))));
-    let (_, staged) = crate::codex_install_source::acquire_using(
+    let (_, staged) = crate::agent::codex_install_source::acquire_using(
         &offer,
         &temp.path().join("independent-mirror"),
         |destination, repository, expected, branch| {

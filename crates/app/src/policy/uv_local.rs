@@ -32,7 +32,7 @@ pub fn normalize_name(value: &str) -> Result<String> {
 
 pub fn tool_id(root: &Path, name: &str) -> Result<String> {
     crate::policy::paths::lexical(root)?;
-    crate::resource::id("application", &("uv", root, normalize_name(name)?))
+    crate::domain::resource::id("application", &("uv", root, normalize_name(name)?))
 }
 
 pub fn descriptor(provider: &Provider) -> Option<(&str, &UvToolBinding)> {

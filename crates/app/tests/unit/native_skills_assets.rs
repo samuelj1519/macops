@@ -13,7 +13,7 @@ fn fixture() -> std::result::Result<
         tempfile::TempDir,
         Context,
         Recipe,
-        crate::source_payload::Prepared,
+        crate::source::source_payload::Prepared,
     ),
     Box<dyn std::error::Error>,
 > {
@@ -50,7 +50,7 @@ fn fixture() -> std::result::Result<
             },
         )],
     )?;
-    let source = crate::source_payload::Prepared {
+    let source = crate::source::source_payload::Prepared {
         repository: Repository::parse(&recipe.source.repository)?,
         source_path: RelativePath::parse(".")?,
         skill_tree: ObjectId::parse(&"b".repeat(40))?,
@@ -104,8 +104,13 @@ fn writing_owned_artifact_is_private_immutable_and_reusable_with_native_local_so
     let second = derived_artifact(&ctx, &recipe, &source, &source.skill_tree)?;
     assert_eq!(second.local, prepared.local);
     assert_eq!(second.local_digest, prepared.local_digest);
-    let parent = files::private(&ctx.home.join(".agents/skills"))?;
-    crate::source_payload::materialize(&parent, &recipe.install_name, &source.payload, 0o755)?;
+    let parent = scoped_files::private(&ctx.home.join(".agents/skills"))?;
+    crate::source::source_payload::materialize(
+        &parent,
+        &recipe.install_name,
+        &source.payload,
+        0o755,
+    )?;
     installed_derived(&ctx, &recipe, payload)?;
     fs::write(
         ctx.home
