@@ -89,7 +89,8 @@ pub enum Command {
     },
     #[command(
         about = "技能：技能与插件的安装、升级与检查",
-        after_help = "按任务使用  mo skill market 浏览市场\n  mo skill plugins --help 核对本地插件绑定与版本\n  mo skill sync --all --dry-run 预演技能与档案同步\n  mo skill policy --help 查看策略和恢复入口"
+        before_help = "按任务使用\n  mo skill --details                       查看技能、来源与接管状态\n  mo recommend owner/repo                 查看 GitHub 安装方式\n  mo skill install --help                  用本机配方安装\n  mo skill adopt --help                    接管已有安装\n  mo skill refresh --help                  刷新来源索引\n  mo skill outdated                        查看可用更新\n  mo skill upgrade --help                  选择并预演升级\n  mo skill uninstall --help                卸载已接管技能",
+        after_help = "其他维护入口\n  mo skill market                          浏览插件市场\n  mo skill plugins --help                  核对客户端插件\n  mo skill sync --all --dry-run             预演技能与档案同步\n  mo skill policy --help                   查看策略和恢复入口"
     )]
     Skill {
         #[arg(
@@ -273,20 +274,24 @@ pub enum Migrate {
 
 #[derive(Debug, Args)]
 pub struct SkillSelection {
+    #[arg(help = "成员名称、唯一 ID 或已登记的 source:OWNER/REPO 分组；也可用 --only 选多个")]
     pub name: Option<String>,
-    #[arg(long)]
+    #[arg(long, help = "指定来源提交的完整 SHA")]
     pub revision: Option<String>,
-    #[arg(long = "only")]
+    #[arg(long = "only", help = "指定一个成员或来源分组，可重复")]
     pub only: Vec<String>,
-    #[arg(long)]
+    #[arg(long, help = "选择全部符合维护条件的成员")]
     pub all: bool,
-    #[arg(long)]
+    #[arg(long, help = "旧策略同步的变更 ID；原生技能维护不接受")]
     pub change_id: Option<String>,
 }
 
 #[derive(Debug, Subcommand)]
 pub enum SkillCmd {
-    #[command(about = "按固定配方安装技能")]
+    #[command(
+        about = "按固定配方安装技能",
+        before_help = "示例\n  mo recommend owner/repo                          查看 GitHub 仓库的安装方式\n  mo skill install --recipe /path/recipe.json --dry-run  预演本机配方\n  mo skill install --recipe /path/recipe.json      按配方安装"
+    )]
     Install {
         #[arg(
             long,
@@ -295,8 +300,12 @@ pub enum SkillCmd {
         )]
         recipe: PathBuf,
     },
-    #[command(about = "按固定配方将已有技能纳入管理")]
+    #[command(
+        about = "按固定配方将已有技能纳入管理",
+        before_help = "示例\n  mo skill --details                                   查找待接管的技能\n  mo skill adopt NAME --recipe /path/recipe.json --dry-run  预演接管\n  mo skill adopt NAME --recipe /path/recipe.json        登记已有安装"
+    )]
     Adopt {
+        #[arg(help = "已有原生安装的名称或唯一安装 ID")]
         id: String,
         #[arg(
             long,
@@ -305,15 +314,29 @@ pub enum SkillCmd {
         )]
         recipe: PathBuf,
     },
-    #[command(name = "uninstall", alias = "remove", about = "卸载已纳入管理的技能")]
+    #[command(
+        name = "uninstall",
+        alias = "remove",
+        about = "卸载已纳入管理的技能",
+        before_help = "示例\n  mo skill uninstall NAME --dry-run  预演卸载\n  mo skill uninstall NAME            卸载已接管的技能"
+    )]
     Remove {
+        #[arg(help = "已接管成员的名称或唯一 ID")]
         id: String,
     },
+    #[command(
+        about = "升级已接管的技能",
+        before_help = "示例\n  mo skill upgrade NAME --dry-run                    预演一个成员的升级\n  mo skill upgrade source:owner/repo --dry-run       预演已登记来源的升级\n  mo skill upgrade --only NAME --only OTHER --dry-run  预演多个成员\n  mo skill upgrade NAME                              执行升级\n\n先用 mo skill refresh NAME 刷新跟踪版本，再用 mo skill outdated NAME 查看结果。"
+    )]
     Upgrade(SkillSelection),
-    #[command(about = "检查本地技能与插件证据")]
+    #[command(
+        about = "检查本地技能与插件证据",
+        before_help = "示例\n  mo skill doctor NAME  查看单个技能的检查结果\n  mo skill doctor       检查本机技能与插件"
+    )]
     Doctor {
+        #[arg(help = "要检查的技能名称")]
         name: Option<String>,
-        #[arg(long)]
+        #[arg(long, help = "筛选名称，可重复")]
         only: Vec<String>,
     },
     #[command(
@@ -339,12 +362,19 @@ pub enum SkillCmd {
     },
     #[command(hide = true, about = "同步技能链接与声明")]
     Sync(SkillSelection),
-    #[command(hide = true, about = "刷新技能来源索引，不升级")]
+    #[command(
+        about = "刷新技能来源索引，不升级",
+        before_help = "示例\n  mo skill refresh NAME --dry-run               预演刷新范围\n  mo skill refresh source:owner/repo            刷新已登记来源下的成员"
+    )]
     Refresh(SkillSelection),
-    #[command(hide = true, about = "根据已有索引显示可更新技能")]
+    #[command(
+        about = "根据已有索引显示可更新技能",
+        before_help = "示例\n  mo skill outdated           查看现有索引\n  mo skill outdated NAME      查看单个成员\n  mo skill outdated --json    用结构化输出查看原因"
+    )]
     Outdated {
+        #[arg(help = "成员名称、唯一 ID 或来源分组")]
         name: Option<String>,
-        #[arg(long)]
+        #[arg(long, help = "筛选成员或来源分组，可重复")]
         only: Vec<String>,
     },
     #[command(hide = true, about = "技能资源的统一快照")]

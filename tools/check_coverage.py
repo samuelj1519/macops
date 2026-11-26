@@ -125,15 +125,30 @@ def validate(root, report, policy):
     return {"overall": total, "pure": pure_results, "failures": failures, "production_modules": len(classes), "measured_modules": len(measured)}
 
 
+def compare_baseline(result, baseline):
+    if baseline["failures"] != [] or set(baseline["overall"]) != set(METRICS):
+        fail("invalid baseline coverage result")
+    for metric in METRICS:
+        previous = baseline["overall"][metric]
+        if type(previous) not in (int, float) or not 0 <= previous <= 100:
+            fail(f"invalid baseline {metric} coverage")
+        current = result["overall"][metric]
+        if current < previous:
+            result["failures"].append(f"overall {metric}: {current:.4f}% < baseline {previous:.4f}%")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("report", type=Path)
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1])
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--baseline", type=Path)
     args = parser.parse_args()
     try:
         root = args.root.resolve()
         result = validate(root, json.loads(args.report.read_text()), json.loads((root / "quality-policy.json").read_text()))
+        if args.baseline:
+            compare_baseline(result, json.loads(args.baseline.read_text()))
         if args.output:
             args.output.parent.mkdir(parents=True, exist_ok=True)
             args.output.write_text(json.dumps(result, indent=2) + "\n")

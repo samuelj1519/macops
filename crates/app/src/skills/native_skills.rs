@@ -30,7 +30,7 @@ use std::{
 fn required() -> Error {
     Error::attention(
         "native_skills_recipe_required",
-        "先使用 skills adopt ID --recipe FILE 固定配方与 runner；普通 Native 维护不会回退到自建 publisher",
+        "已发现的原生技能需要先登记本机配方。运行 mo skill adopt --help 查看接管方式。",
     )
 }
 fn invalid() -> Error {
@@ -1646,11 +1646,14 @@ fn selected_recipes(ctx: &Context, selection: &crate::cli::SkillSelection) -> Re
             group.aliases.insert(alias.clone());
         }
     }
-    let selected = resolve(
-        &request,
-        &members,
-        &groups.into_values().collect::<Vec<_>>(),
-    )?;
+    let groups: Vec<_> = groups.into_values().collect();
+    let selected = resolve(&request, &members, &groups).map_err(|error| {
+        if error.code == "source_selection_ambiguous_or_missing" {
+            missing_source_recipe(&request, &members, &groups, &rows).unwrap_or(error)
+        } else {
+            error
+        }
+    })?;
     let by_id = book
         .recipes
         .into_iter()
@@ -1668,6 +1671,55 @@ fn selected_recipes(ctx: &Context, selection: &crate::cli::SkillSelection) -> Re
         .into_iter()
         .map(|id| by_id.get(&id).cloned().ok_or_else(invalid))
         .collect()
+}
+
+fn missing_source_recipe(
+    request: &crate::source::rules::source_select::Request,
+    members: &[crate::source::rules::source_select::Member],
+    groups: &[crate::capability::rules::delivery::SourceGroup],
+    rows: &BTreeMap<String, Value>,
+) -> Option<Error> {
+    let crate::capability::rules::delivery::Selection::Explicit(keys) = &request.selection else {
+        return None;
+    };
+    let [key] = keys.as_slice() else {
+        return None;
+    };
+    let source = key
+        .strip_prefix("source:")
+        .or_else(|| key.strip_prefix("skill:"))
+        .unwrap_or(key);
+    let repo = crate::policy::public_source::repository_subject(source)?;
+    if members.iter().any(|member| {
+        member.repository.key().eq_ignore_ascii_case(repo)
+            || &member.id == key
+            || &member.canonical_name == key
+            || member.aliases.contains(key)
+    }) || groups
+        .iter()
+        .any(|group| &group.id == key || group.aliases.contains(key))
+        || !rows.values().any(|row| {
+            row["sourceType"] == "github"
+                && row["source"].as_str().is_some_and(|source| {
+                    crate::policy::public_source::repository_subject(source)
+                        .is_some_and(|name| name.eq_ignore_ascii_case(repo))
+                })
+        })
+    {
+        return None;
+    }
+    Some(
+        Error::attention(
+            "native_skills_recipe_required",
+            format!("已发现 {repo} 的 Skills CLI 安装记录，缺少 macops 维护配方。"),
+        )
+        .with_guidance(
+            "无法用 mo 维护这个来源。",
+            format!(
+                "沿用原安装的客户端与作用域，运行 npx skills add {repo}。想用配方接管时查看 mo skill adopt --help。"
+            ),
+        ),
+    )
 }
 
 pub(crate) fn matches_recommendation(journal: &Journal, recipe: &Recipe) -> Result<bool> {

@@ -61,6 +61,115 @@ fn plain(f: &Fixture, args: &[&str]) -> std::io::Result<std::process::Output> {
 }
 
 #[test]
+fn skill_help_prioritizes_examples_and_explains_selection() -> TestResult {
+    let f = Fixture::new()?;
+    for (command, example, parameter) in [
+        ("install", "mo recommend owner/repo", "--recipe"),
+        ("adopt", "mo skill adopt NAME --recipe", "唯一安装 ID"),
+        (
+            "refresh",
+            "mo skill refresh source:owner/repo",
+            "--revision",
+        ),
+        ("outdated", "mo skill outdated NAME", "--only"),
+        (
+            "upgrade",
+            "mo skill upgrade source:owner/repo --dry-run",
+            "--all",
+        ),
+        ("uninstall", "mo skill uninstall NAME --dry-run", "唯一 ID"),
+        ("doctor", "mo skill doctor NAME", "--only"),
+    ] {
+        let out = plain(&f, &["skill", command, "--help"])?;
+        assert_code(&out, 0);
+        let text = String::from_utf8(out.stdout)?;
+        let before_options = text.split_once("Options:").ok_or("options")?.0;
+        assert!(before_options.contains(example), "{text}");
+        assert!(text.contains(parameter), "{text}");
+    }
+    let out = plain(&f, &["skill", "--help"])?;
+    assert_code(&out, 0);
+    let text = String::from_utf8(out.stdout)?;
+    assert!(text.contains("mo skill refresh --help") && text.contains("mo skill outdated"));
+    assert!(!f.file("state").exists());
+    Ok(())
+}
+
+#[test]
+fn skill_install_positional_repository_redirects_to_recommend_without_writes() -> TestResult {
+    let f = Fixture::new()?;
+    for repo in [
+        "owner/repo",
+        "https://github.com/owner/repo",
+        "github.com/owner/repo",
+    ] {
+        let args = ["skill", "install", repo];
+        let out = plain(&f, &args)?;
+        assert_code(&out, 2);
+        let stderr = String::from_utf8(out.stderr)?;
+        assert!(stderr.contains("mo recommend owner/repo"), "{stderr}");
+        let (out, json) = f.run(&args)?;
+        assert_code(&out, 2);
+        assert_eq!(json["error"]["code"], "usage");
+    }
+    let out = plain(&f, &["skill", "install"])?;
+    assert_code(&out, 2);
+    assert!(String::from_utf8(out.stderr)?.contains("mo skill install --help"));
+    for args in [
+        ["app", "install", "owner/repo", "--unrelated"],
+        ["skill", "install", "--invalid", "owner/repo"],
+    ] {
+        let out = plain(&f, &args)?;
+        assert_code(&out, 2);
+        assert!(!String::from_utf8(out.stderr)?.contains("mo recommend owner/repo"));
+    }
+    assert!(!f.file("state").exists());
+    Ok(())
+}
+
+#[test]
+fn skill_upgrade_distinguishes_installed_source_without_a_recipe_from_missing_source() -> TestResult
+{
+    let f = Fixture::new()?;
+    native_skill_fixture(&f, &["example", "extra"])?;
+    for selector in ["owner/repo", "source:owner/repo", "skill:owner/repo"] {
+        let args = ["skill", "upgrade", selector, "--dry-run"];
+        let out = plain(&f, &args)?;
+        assert_code(&out, 3);
+        let text = String::from_utf8(out.stderr)?;
+        assert!(
+            text.contains("缺少 macops 维护配方") && text.contains("npx skills add owner/repo"),
+            "{text}"
+        );
+        let (out, result) = f.run(&args)?;
+        assert_code(&out, 3);
+        assert_eq!(result["error"]["code"], "native_skills_recipe_required");
+    }
+    for args in [
+        &["skill", "upgrade", "other/repo", "--dry-run"][..],
+        &["skill", "upgrade", "nothing", "--dry-run"][..],
+        &[
+            "skill",
+            "upgrade",
+            "--only",
+            "owner/repo",
+            "--only",
+            "other/repo",
+            "--dry-run",
+        ][..],
+    ] {
+        let (out, result) = f.run(args)?;
+        assert_code(&out, 3);
+        assert_eq!(
+            result["error"]["code"],
+            "source_selection_ambiguous_or_missing"
+        );
+    }
+    assert!(!f.file("state").exists());
+    Ok(())
+}
+
+#[test]
 fn skill_install_recipe_errors_distinguish_github_from_a_local_file() -> TestResult {
     let f = Fixture::new()?;
     for source in [

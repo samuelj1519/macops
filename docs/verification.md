@@ -1,16 +1,23 @@
 # 开发验证
 
-使用 `rust-toolchain.toml` 固定的 Rust 和 Cargo.lock。工作区继承 lint，禁止 unsafe。准备锁定依赖与本地 advisory 数据后运行：
+使用 `rust-toolchain.toml` 固定的 Rust 和 `Cargo.lock`。准备锁定依赖和本地 advisory 数据后，可以按阶段运行检查。
 
 ```sh
-bash tools/check.sh
+bash tools/check.sh quick    # 格式和严格 Clippy
+bash tools/check.sh tests    # 全目标和独立文档测试
+bash tools/check.sh quality  # 源码、工具、依赖和覆盖率
+bash tools/check.sh full     # 完整检查和 Release 构建
 ```
 
-完整检查包含格式、严格 Clippy、所有 target 测试、独立 doc tests、覆盖率校验器的负向测试、拼写、TOML、依赖及许可证、覆盖率和 Release 构建。CI 在 Apple Silicon macOS 上运行。提交使用仓库的 `.githooks/pre-commit`。需要时设置 `git config core.hooksPath .githooks`。
+任务分支的 `.githooks/pre-commit` 检查暂存差异的空白，并对当前工作区执行 `quick`。需要时用 `git config core.hooksPath .githooks` 启用钩子。提交前检查和合入验证使用不同输入，合入验证以明确指定的提交为准。
 
-本地检查、提交钩子和 CI 使用 `tools/run_ci_tests.sh` 并行运行两组 Cargo 测试。库、二进制、示例和基准目标的测试进程内使用 1 个线程，集成测试进程内使用 4 个线程。单元测试串行执行，避免派生子进程继承其他测试持有的文件锁。两组都结束后才判断结果。
+从干净的任务分支运行 `bash tools/integrate.sh HEAD`。脚本在独立源码和构建目录中采集当前 `main` 的覆盖率，并对候选执行一次完整检查。覆盖率逐项达到基线后，脚本再次核对原分支、主干提交和工作区状态，再切换到 `main` 并快进合入。覆盖率采集会清理旧 profile。推送通过普通 Git 命令完成。
 
-公开源码检查读取 Git 跟踪的文件，检查常见凭据模式、本机账号路径、个人邮件地址和敏感文件类型。结果只显示文件、行号及类别。版本标签在 CI 检查通过后打包 Apple Silicon 产物，内含 MIT 许可证和 SHA-256 校验值。
+全目标测试和覆盖率各使用 `tools/run_ci_tests.sh` 并行运行两组 Cargo 测试。库、二进制、示例和基准目标使用 1 个线程，集成测试使用 4 个线程。单元测试串行执行，避免派生子进程继承其他测试持有的文件锁。两组都结束后才汇报结果。
+
+公开源码检查读取 Git 跟踪的文件，检查常见凭据模式、本机账号路径、个人邮件地址和敏感文件类型。结果只显示文件、行号及类别。
+
+CI 在 Apple Silicon macOS 上运行。版本标签复用同仓库、同 SHA 的 `main` 推送 CI，要求 `checks` 和 `quality` 均已成功。发布任务核对标签提交能从 `origin/main` 到达，再打包 Apple Silicon 二进制、MIT 许可证和 SHA-256 校验值。发布后用 `python3 -B tools/release.py verify v0.4.1 --repo OWNER/REPO` 下载验收。将示例标签和仓库名换成实际值。
 
 TLA+ 验证器可用 `TLA2TOOLS_JAR` 指定本地 JAR，默认读当前目录的 `tla2tools.jar`。带 `--jar` 的验证器也接受显式路径。
 

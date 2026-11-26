@@ -1568,7 +1568,11 @@ pub fn main_entry() -> ExitCode {
                         ErrorKind::ArgumentConflict => "有两个选项不能一起用。",
                         _ => "这条命令有个地方需要改。",
                     };
-                    eprintln!("{problem}运行 mo --help 看命令怎么写。");
+                    if let Some(hint) = skill_install_usage(&e) {
+                        eprintln!("{hint}");
+                    } else {
+                        eprintln!("{problem}运行 mo --help 看命令怎么写。");
+                    }
                 }
                 let _ = e.print();
             }
@@ -1576,6 +1580,35 @@ pub fn main_entry() -> ExitCode {
         }
     };
     dispatch(&cli)
+}
+
+fn skill_install_usage(error: &clap::Error) -> Option<String> {
+    use clap::error::{ContextKind, ContextValue, ErrorKind};
+    let usage = error.get(ContextKind::Usage)?.to_string();
+    let usage = usage.strip_prefix("Usage:").unwrap_or(&usage);
+    if !usage
+        .split_ascii_whitespace()
+        .take(3)
+        .eq(["mo", "skill", "install"])
+    {
+        return None;
+    }
+    match error.kind() {
+        ErrorKind::UnknownArgument => {
+            let ContextValue::String(value) = error.get(ContextKind::InvalidArg)? else {
+                return None;
+            };
+            let github = value.strip_prefix("github.com/").unwrap_or(value);
+            let repo = policy::public_source::repository_subject(github)?;
+            Some(format!(
+                "GitHub 仓库请先用 mo recommend {repo} 查看安装方式。已有本机配方时，用 mo skill install --recipe /绝对路径/recipe.json。"
+            ))
+        }
+        ErrorKind::MissingRequiredArgument => {
+            Some("请用 --recipe 指定本机配方的绝对路径。示例见 mo skill install --help。".into())
+        }
+        _ => None,
+    }
 }
 
 fn dispatch(cli: &cli::Cli) -> ExitCode {
