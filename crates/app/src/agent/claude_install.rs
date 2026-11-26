@@ -1280,6 +1280,18 @@ pub(crate) fn registered_checkout_repository(
     native_id: &str,
     checkout: &Path,
 ) -> Result<Option<crate::policy::source_git::Repository>> {
+    Ok(
+        registered_checkout_source(ctx, profile, native_id, checkout)?
+            .map(|(repository, _)| repository),
+    )
+}
+
+pub(crate) fn registered_checkout_source(
+    ctx: &Context,
+    profile: &Path,
+    native_id: &str,
+    checkout: &Path,
+) -> Result<Option<(crate::policy::source_git::Repository, String)>> {
     if !checkout
         .parent()
         .is_some_and(|root| root.parent() == Some(ctx.state.as_path()) && label(root).is_some())
@@ -1321,8 +1333,10 @@ pub(crate) fn registered_checkout_repository(
             {
                 return Err(invalid());
             }
-            return crate::policy::source_git::Repository::parse(&installed.offer.repository)
-                .map(Some);
+            return Ok(Some((
+                crate::policy::source_git::Repository::parse(&installed.offer.repository)?,
+                installed.offer.commit.clone(),
+            )));
         }
     }
     Ok(None)

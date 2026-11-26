@@ -21,6 +21,8 @@ pub(crate) struct InstallTarget {
     pub name: String,
     pub client: String,
     pub directory: crate::policy::governance::DirectoryBinding,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<PathBuf>,
 }
 
 fn target_changed() -> Error {
@@ -39,11 +41,15 @@ impl InstallTarget {
             return Err(target_changed());
         };
         let directory = paths::Directory::open(config_dir)?;
+        let registered = registered_target(ctx, config_dir)?;
         if directory.path != *config_dir
             || (directory.path.parent() != Some(ctx.home.as_path())
                 && !(profile.management == Management::Adopted
                     && directory.path.starts_with(&ctx.state)
-                    && managed_root(&directory.path)))
+                    && managed_root(&directory.path))
+                && !registered
+                    .as_ref()
+                    .is_some_and(|target| target.client == *client && target.open().is_ok()))
         {
             return Err(target_changed());
         }
@@ -51,6 +57,7 @@ impl InstallTarget {
             name: profile.name.clone(),
             client: client.clone(),
             directory: crate::capability::capability_store::binding(&directory, config_dir)?,
+            command: registered.and_then(|target| target.command),
         };
         target.open()?;
         Ok(target)
@@ -77,17 +84,146 @@ fn registered(directory: &std::fs::File) -> Result<Registry> {
     Ok(crate::operations::store::Store::read(directory, PROFILE_REGISTRY)?.unwrap_or_default())
 }
 
+fn registered_target(ctx: &Context, path: &Path) -> Result<Option<InstallTarget>> {
+    if !ctx.state.exists() {
+        return Ok(None);
+    }
+    Ok(registered(paths::Directory::open(&ctx.state)?.file())?.remove(path))
+}
+
+pub(crate) fn add(
+    ctx: &Context,
+    name: &str,
+    config: &Path,
+    client: Option<&str>,
+    dry: bool,
+    yes: bool,
+) -> Result<serde_json::Value> {
+    let invalid = || {
+        Error::attention(
+        "agent_registration_invalid", "请提供一个已有的 Agent 命令和独立的配置目录。",
+    ).with_guidance(
+        "未登记 Agent。",
+        "使用 mo agent add 命令名 --config /绝对路径；自定义命令可加 --type claude、codex 或 cursor。",
+    )
+    };
+    if name == "all" || !policy::component(name) || name.starts_with('.') {
+        return Err(invalid());
+    }
+    let client = client
+        .or_else(|| {
+            ["claude", "codex", "cursor"].into_iter().find(|client| {
+                name == *client
+                    || name
+                        .strip_prefix(client)
+                        .is_some_and(|tail| tail.starts_with('-'))
+            })
+        })
+        .ok_or_else(invalid)?;
+    let command = crate::operations::command::executable(name)?;
+    let directory = paths::Directory::open(config)?;
+    if directory.path != config || ctx.home.starts_with(config) || managed_root(config) {
+        return Err(invalid());
+    }
+    crate::source::rules::source_baseline::disjoint(
+        config,
+        &[
+            ctx.config.clone(),
+            ctx.data.clone(),
+            ctx.state.clone(),
+            ctx.cache.clone(),
+            ctx.settings.clone(),
+            ctx.catalog.clone(),
+        ],
+    )?;
+    let profile = match (client, name) {
+        ("claude", "claude") | ("codex", "codex") | ("cursor", "cursor" | "cursor-agent") => {
+            "default"
+        }
+        _ => name
+            .strip_prefix(client)
+            .and_then(|suffix| suffix.strip_prefix('-'))
+            .unwrap_or(name),
+    };
+    let target = InstallTarget {
+        name: format!("{client}:{profile}"),
+        client: client.into(),
+        directory: crate::capability::capability_store::binding(&directory, config)?,
+        command: Some(command),
+    };
+    target.open()?;
+    check_registration_scope(ctx, &target)?;
+    let same = registered_target(ctx, config)?.as_ref() == Some(&target);
+    if !dry && !same {
+        crate::operations::confirm(
+            &format!("登记 Agent {name}\n配置目录 {}", config.display()),
+            yes,
+        )?;
+        enroll(ctx, &target)?;
+    }
+    Ok(serde_json::json!({
+        "agentRegistration":true, "name":name, "config":config,
+        "status":if dry {"preview"} else if same {"already-registered"} else {"registered"},
+        "persistentWrites":!dry && !same,
+    }))
+}
+
+fn check_registration_scope(ctx: &Context, target: &InstallTarget) -> Result<()> {
+    for other in profile_roots(ctx)? {
+        let Data::Agent {
+            config_dir, client, ..
+        } = other.data
+        else {
+            continue;
+        };
+        let physical = paths::read_path(&config_dir)?;
+        let selected = &target.directory.canonical;
+        let overlaps = if physical == *selected {
+            client != target.client
+        } else {
+            physical.starts_with(selected)
+                || selected.starts_with(&physical)
+                || other.name == target.name
+        };
+        if overlaps {
+            return Err(Error::attention(
+                "agent_configuration_overlap",
+                "配置目录和已有 Agent 重叠，或命令名已经占用。请核对 mo agent 中的配置。",
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn enroll(ctx: &Context, target: &InstallTarget) -> Result<()> {
     let store = crate::operations::store::Store::lock(ctx)?;
     store.check_pending()?;
     let directory = target.open()?;
+    if target.command.is_some() {
+        check_registration_scope(ctx, target)?;
+    }
     let mut profiles = registered(&store.root)?;
+    if profiles
+        .values()
+        .any(|old| old.name == target.name && old.directory.canonical != directory.path)
+    {
+        return Err(Error::attention(
+            "agent_name_conflict",
+            "这个 Agent 名称已经登记到另一个目录。",
+        ));
+    }
     if let Some(old) = profiles.get(&directory.path) {
-        return if old == target {
-            Ok(())
-        } else {
-            Err(target_changed())
-        };
+        if old == target {
+            return Ok(());
+        }
+        if old.name != target.name
+            || old.client != target.client
+            || old.directory != target.directory
+            || old.command.is_some()
+            || target.command.is_none()
+        {
+            return Err(target_changed());
+        }
     }
     profiles.insert(directory.path.clone(), target.clone());
     store.verify_namespace()?;
@@ -139,6 +275,11 @@ pub(crate) fn profile_roots_matching(
     include: impl Fn(&str, &str) -> bool,
 ) -> Result<Vec<Resource>> {
     let mut profiles = vec![];
+    let enrolled = if ctx.state.exists() {
+        registered(paths::Directory::open(&ctx.state)?.file())?
+    } else {
+        Registry::new()
+    };
     for ProfileRoot {
         client,
         name,
@@ -157,6 +298,9 @@ pub(crate) fn profile_roots_matching(
         {
             continue;
         }
+        let command = enrolled
+            .get(&path)
+            .and_then(|target| target.command.clone());
         profiles.push(Resource {
             id: resource::id("agent", &(&client, &path))?,
             name: format!("{client}:{prof}"),
@@ -171,7 +315,7 @@ pub(crate) fn profile_roots_matching(
                 runtime: RuntimeBinding {
                     selector: "unresolved".into(),
                     context: ctx.home.clone(),
-                    binary: None,
+                    binary: command,
                     install_ref: None,
                     evidence: None,
                 },
@@ -263,7 +407,7 @@ struct ProfileRoot {
 impl ProfileRoot {
     fn registered(path: PathBuf, target: InstallTarget) -> Option<Self> {
         let profile = target.name.strip_prefix(&format!("{}:", target.client))?;
-        if !matches!(target.client.as_str(), "claude" | "codex")
+        if !matches!(target.client.as_str(), "claude" | "codex" | "cursor")
             || !target.open().is_ok_and(|directory| directory.path == path)
         {
             return None;
@@ -616,6 +760,14 @@ fn client_title(client: &str) -> &str {
     }
 }
 
+pub(crate) fn command_name(client: &str, profile: &str) -> String {
+    match (client, profile) {
+        ("cursor", "default") => "cursor-agent".into(),
+        (_, "default") => client.into(),
+        _ => format!("{client}-{profile}"),
+    }
+}
+
 fn profile(
     ctx: &Context,
     root: &ProfileRoot,
@@ -647,13 +799,29 @@ fn profile(
         Model::default()
     };
     let id = resource::id("agent", &(client, path))?;
+    let mut runtime = runtime(ctx, client, profile, path, project, applications)?;
+    let registered = registered_target(ctx, path)?.and_then(|target| target.command);
+    let display = registered
+        .as_ref()
+        .and_then(|command| command.file_name()?.to_str())
+        .map_or_else(|| command_name(client, profile), str::to_owned);
+    if let Some(command) = registered {
+        runtime.selector = "registered-command".into();
+        runtime.binary = Some(command);
+    }
+    let mut aliases = vec![display];
+    for alias in [
+        format!("{client}-{profile}"),
+        format!("agent:{client}:{profile}"),
+    ] {
+        if !aliases.contains(&alias) {
+            aliases.push(alias);
+        }
+    }
     Ok(Resource {
         id,
         name: format!("{client}:{profile}"),
-        aliases: vec![
-            format!("{client}-{profile}"),
-            format!("agent:{client}:{profile}"),
-        ],
+        aliases,
         management: root.management.clone(),
         status,
         data: Data::Agent {
@@ -661,7 +829,7 @@ fn profile(
             profile: profile.into(),
             config_dir: path.to_path_buf(),
             model,
-            runtime: runtime(ctx, client, profile, path, project, applications)?,
+            runtime,
         },
     })
 }

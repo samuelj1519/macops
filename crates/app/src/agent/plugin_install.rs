@@ -25,7 +25,7 @@ pub(crate) enum Offer {
 }
 
 impl Offer {
-    fn plugin_info(&self) -> Result<(String, &str, String, &str)> {
+    pub(crate) fn plugin_info(&self) -> Result<(String, &str, String, &str)> {
         match self {
             Self::Codex(offer, _) => Ok((
                 offer.native_id(),
@@ -39,6 +39,13 @@ impl Offer {
                 offer.url()?,
                 &offer.commit,
             )),
+        }
+    }
+
+    pub(crate) fn client(&self) -> &'static str {
+        match self {
+            Self::Codex(..) => "codex",
+            Self::Claude(..) => "claude",
         }
     }
 
@@ -380,7 +387,7 @@ fn show_profile_install_event(event: Event<'_>) {
     }
 }
 
-fn install_at_profile(
+pub(crate) fn install_at_profile(
     ctx: &Context,
     choice: &Offer,
     activation: InitialActivation,

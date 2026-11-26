@@ -787,6 +787,41 @@ fn agent_summary(command: &AgentCmd, data: &Value) -> Option<String> {
 }
 
 pub(crate) fn command_human(command: &Command, data: &Value) -> String {
+    if data["agentRegistration"] == true {
+        let status = match data["status"].as_str() {
+            Some("preview") => "登记预演",
+            Some("already-registered") => "已登记",
+            _ => "登记完成",
+        };
+        return format!(
+            "{status} · {}\n配置目录　{}\n",
+            sanitize(field(data, "name"), false),
+            sanitize(field(data, "config"), false)
+        );
+    }
+    if data["agentBatch"] == true
+        && let Some(rows) = data["results"].as_array()
+    {
+        let text = crate::skills::portfolio::batch_text(rows);
+        let achieved = rows
+            .iter()
+            .filter(|row| matches!(row["status"].as_str(), Some("changed" | "current")))
+            .count();
+        let unchanged = rows.iter().filter(|row| row["status"] == "current").count();
+        let uninstalled = rows
+            .iter()
+            .filter(|row| row["status"] == "not-installed")
+            .count();
+        return if data["mode"] == "dry-run" {
+            format!("预演 · {}\n{text}\n", field(data, "verb"))
+        } else {
+            format!(
+                "{text}\n{achieved}/{} 个适用 Agent 已达到目标 · 本次修改 {} · 已达目标 {unchanged} · 未安装 {uninstalled}\n",
+                rows.len() - uninstalled,
+                achieved - unchanged
+            )
+        };
+    }
     if let Some(text) = skill_journey(data) {
         return text;
     }

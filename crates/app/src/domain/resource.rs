@@ -23,6 +23,15 @@ pub enum Management {
     Adopted,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CapabilityAction {
+    Install,
+    Upgrade,
+    Uninstall,
+    Enable,
+    Disable,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct Resource {
     pub id: String,

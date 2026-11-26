@@ -544,6 +544,7 @@ fn resource_item(resource: crate::domain::resource::Resource, show_scope: bool) 
         } => {
             let label = crate::agent::resource_agents::profile_label(&name, &config_dir);
             let summary = if label == name {
+                name = resource.aliases.first().cloned().unwrap_or(name);
                 format!("{client} · {profile}")
             } else {
                 name = label;

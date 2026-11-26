@@ -231,6 +231,7 @@ fn source_groups_and_recipe_changes_cannot_silently_rebind_the_installed_contrac
         all: false,
         revision: None,
         change_id: None,
+        agents: crate::cli::SkillAgents::default(),
     };
     assert_eq!(selected_recipes(&ctx, &request)?.len(), 1);
     let all = crate::cli::SkillSelection {
@@ -245,6 +246,7 @@ fn source_groups_and_recipe_changes_cannot_silently_rebind_the_installed_contrac
         only: vec!["bundle".into(), "alpha".into()],
         revision: None,
         change_id: None,
+        agents: crate::cli::SkillAgents::default(),
     };
     assert!(selected_recipes(&ctx, &overlap).is_err());
     let mut book = load_book(&ctx)?.1;

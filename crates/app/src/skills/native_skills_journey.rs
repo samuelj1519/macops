@@ -10,7 +10,20 @@ use crate::{
 };
 use serde_json::{Value, json};
 
+pub(in crate::skills) struct InstallPlan {
+    source: String,
+    existing: Vec<String>,
+    existing_proofs: Vec<disk::Object>,
+    available: Vec<Recipe>,
+    all_verified: bool,
+    fence: InputFence,
+}
+
 pub(super) fn install(ctx: &Context, source: &str, dry: bool, yes: bool) -> Result<Value> {
+    plan_install(ctx, source)?.run(ctx, dry, yes, false)
+}
+
+pub(super) fn plan_install(ctx: &Context, source: &str) -> Result<InstallPlan> {
     native_config_scope(ctx)?;
     let request = public_skill::Request::parse(source)?;
     let mut recipes =
@@ -21,11 +34,26 @@ pub(super) fn install(ctx: &Context, source: &str, dry: bool, yes: bool) -> Resu
     let rows = policy::registry(raw.as_deref())?;
     let (_, book) = load_book(ctx)?;
     let mut existing = vec![];
+    let mut existing_proofs = vec![];
+    let mut all_verified = true;
     let mut available = Vec::with_capacity(recipes.len());
     for recipe in recipes.drain(..) {
-        if rows.contains_key(&recipe.install_name)
-            || disk::capture(&disk::payload(ctx, &recipe.install_name)?)?.present()
-        {
+        let before = disk::capture(&disk::payload(ctx, &recipe.install_name)?)?;
+        if rows.contains_key(&recipe.install_name) || before.present() {
+            let verified = before.present()
+                && rows.get(&recipe.install_name).is_some_and(|row| {
+                    public_skill::from_record(ctx, &recipe.install_name, row, recipe.runner.clone())
+                        .is_ok_and(|installed| {
+                            installed.source.repository == recipe.source.repository
+                                && installed.source.skill_directory == recipe.source.skill_directory
+                                && (recipe.source.tracking_ref.is_some()
+                                    || installed.source.commit == recipe.source.commit)
+                        })
+                });
+            all_verified &= verified;
+            if verified {
+                existing_proofs.push(before);
+            }
             existing.push(recipe.install_name);
             continue;
         }
@@ -37,78 +65,115 @@ pub(super) fn install(ctx: &Context, source: &str, dry: bool, yes: bool) -> Resu
             if let Some(reinstall) = preserve_installation(recipe, registered) {
                 available.push(reinstall);
             } else {
+                all_verified = false;
                 existing.push(registered.install_name.clone());
             }
             continue;
         }
         available.push(recipe);
     }
-    if available.is_empty() && !dry {
-        return Err(Error::attention(
-            "skills_already_present",
-            "这批技能在本机已有文件或安装记录。",
-        )
-        .with_guidance(
-            "没有新安装。",
-            format!(
-                "运行 mo skill upgrade {} 查看更新。",
-                request.repository.key()
-            ),
-        ));
+    Ok(InstallPlan {
+        source: request.repository.key().into(),
+        existing,
+        existing_proofs,
+        available,
+        all_verified,
+        fence: InputFence {
+            files: vec![witness],
+        },
+    })
+}
+
+impl InstallPlan {
+    pub(super) fn verify_batch(&self) -> Result<()> {
+        if !self.all_verified {
+            return Err(Error::attention(
+                "skill_install_conflict",
+                "已有同名技能，无法确认它来自所选来源和版本。请用 mo skill --details 核对安装位置。",
+            ));
+        }
+        self.fence.verify()?;
+        for proof in &self.existing_proofs {
+            proof.verify()?;
+        }
+        Ok(())
     }
-    let preview = json!({"mode":"dry-run","skillAction":"install","source":request.repository.key(),
+
+    pub(super) fn run(self, ctx: &Context, dry: bool, yes: bool, batch: bool) -> Result<Value> {
+        if batch {
+            self.verify_batch()?;
+        }
+        let Self {
+            source,
+            existing,
+            existing_proofs: _,
+            available,
+            all_verified,
+            fence,
+        } = self;
+        if available.is_empty() && !dry {
+            if batch && all_verified {
+                return Ok(json!({"status":"current"}));
+            }
+            return Err(Error::attention(
+                "skills_already_present",
+                "这批技能在本机已有文件或安装记录。",
+            )
+            .with_guidance(
+                "没有新安装。",
+                format!("运行 mo skill upgrade {source} 查看更新。"),
+            ));
+        }
+        let preview = json!({"mode":"dry-run","skillAction":"install","source":source,
         "available":available.iter().map(|item|&item.install_name).collect::<Vec<_>>(),
         "alreadyPresent":existing,"directory":ctx.home.join(".agents/skills"),
         "scope":"user-shared","persistentWrites":false});
-    if dry {
-        return Ok(preview);
-    }
-    let selected = if yes || available.len() == 1 {
-        (0..available.len()).collect()
-    } else {
-        eprintln!("选择要安装的技能（{} 项）", available.len());
-        let labels = available
+        if dry {
+            return Ok(preview);
+        }
+        let selected = if yes || available.len() == 1 {
+            (0..available.len()).collect()
+        } else {
+            eprintln!("选择要安装的技能（{} 项）", available.len());
+            let labels = available
+                .iter()
+                .map(|item| item.install_name.clone())
+                .collect::<Vec<_>>();
+            crate::terminal::picker::select(&labels, 0, true, "", |_| None)?
+        };
+        let mut selected: Vec<_> = selected
+            .into_iter()
+            .filter_map(|index| available.get(index).cloned())
+            .collect();
+        if selected.is_empty() {
+            return Err(Error::attention("cancelled", "已取消安装"));
+        }
+        crate::terminal::progress::during("核对安装工具", || seal_runners(&mut selected))?;
+        let names = selected
             .iter()
-            .map(|item| item.install_name.clone())
-            .collect::<Vec<_>>();
-        crate::terminal::picker::select(&labels, 0, true, "", |_| None)?
-    };
-    let mut selected: Vec<_> = selected
-        .into_iter()
-        .filter_map(|index| available.get(index).cloned())
-        .collect();
-    if selected.is_empty() {
-        return Err(Error::attention("cancelled", "已取消安装"));
-    }
-    crate::terminal::progress::during("核对安装工具", || seal_runners(&mut selected))?;
-    let names = selected
-        .iter()
-        .map(|item| item.install_name.as_str())
-        .collect::<Vec<_>>()
-        .join("、");
-    let skip = if existing.is_empty() {
-        String::new()
-    } else {
-        format!("\n已有技能：{}", existing.join("、"))
-    };
-    crate::operations::confirm(
-        &format!(
-            "安装并接管 {}\n技能：{names}\n位置：{}\n这些技能可由支持共享目录的 Agent 读取。{skip}",
-            request.repository.key(),
-            ctx.home.join(".agents/skills").display()
-        ),
-        yes,
-    )?;
-    let fence = InputFence {
-        files: vec![witness],
-    };
-    if crate::operations::recover_before_write(ctx, None)?.is_none() {
+            .map(|item| item.install_name.as_str())
+            .collect::<Vec<_>>()
+            .join("、");
+        let skip = if existing.is_empty() {
+            String::new()
+        } else {
+            format!("\n已有技能：{}", existing.join("、"))
+        };
+        crate::operations::confirm(
+            &format!(
+                "安装并接管 {}\n技能：{names}\n位置：{}\n这些技能可由支持共享目录的 Agent 读取。{skip}",
+                source,
+                ctx.home.join(".agents/skills").display()
+            ),
+            yes,
+        )?;
+        crate::operations::recover_before_write(ctx, None)?;
         fence.verify()?;
+        let mut done = run_members(ctx, selected, Action::Install, &InputFence::default())?;
+        done["skillAction"] = json!("install");
+        done["source"] = json!(source);
+        Ok(done)
     }
-    let mut done = run_members(ctx, selected, Action::Install, &InputFence::default())?;
-    done["skillAction"] = json!("install");
-    done["source"] = json!(request.repository.key());
-    Ok(done)
 }
 
 fn preserve_installation(recipe: Recipe, registered: &Recipe) -> Option<Recipe> {
@@ -175,7 +240,7 @@ fn batch(results: &[Value], incomplete: bool, remaining: impl Iterator<Item = Re
 pub(super) struct InstalledSelection {
     pub unowned: Vec<Recipe>,
     pub managed: Vec<Recipe>,
-    fence: InputFence,
+    pub(super) fence: InputFence,
 }
 
 pub(super) fn installed_selection(

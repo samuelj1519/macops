@@ -29,6 +29,10 @@ pub(crate) use setup::run as run_setup;
 use sha2::{Digest, Sha256};
 use std::path::Path;
 
+pub(crate) fn public_repository(ctx: &Context, repository: &str) -> Result<Value> {
+    upstream::show_repository(ctx, repository, false, false)
+}
+
 pub(crate) fn run(
     cli: &crate::cli::Cli,
     ctx: &Context,
@@ -552,6 +556,15 @@ fn install_choice(ctx: &Context, choice: InstallChoice) -> Result<Value> {
 }
 
 fn public_skill_action(ctx: &Context, source: &str, action: RepositoryAction) -> Result<Value> {
+    let operation = match action {
+        RepositoryAction::Install => crate::domain::resource::CapabilityAction::Install,
+        RepositoryAction::Adopt | RepositoryAction::Upgrade => {
+            crate::domain::resource::CapabilityAction::Upgrade
+        }
+    };
+    if let Some(report) = crate::skills::portfolio::recommend(ctx, source, operation)? {
+        return Ok(report);
+    }
     let show = |title: &str, report: &Value| {
         if let Some(summary) = crate::output::skill_journey(report) {
             panel(title, summary.trim_end());
@@ -735,7 +748,7 @@ impl InstallChoice {
                 format!("安装技能 · {source} · 用户共享目录")
             }
             Self::PublicSkills(_, Ok(RepositoryAction::Adopt)) => {
-                "接管已有技能 · 用户共享目录".into()
+                "检查并更新已有技能 · 用户共享目录".into()
             }
             Self::PublicSkills(source, Ok(RepositoryAction::Upgrade)) => {
                 format!("检查并更新技能 · {source} · 用户共享目录")

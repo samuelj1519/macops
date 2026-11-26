@@ -716,6 +716,7 @@ fn link_request(all: bool, change: Option<&str>) -> crate::cli::SkillSelection {
         all,
         revision: None,
         change_id: change.map(str::to_owned),
+        agents: crate::cli::SkillAgents::default(),
     }
 }
 #[test]

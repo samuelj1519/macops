@@ -47,6 +47,180 @@ fn native_skill_fixture(f: &Fixture, names: &[&str]) -> TestResult {
     Ok(())
 }
 
+#[test]
+fn capability_agent_batch_changes_one_shared_installation_and_converges_on_retry() -> TestResult {
+    let f = Fixture::new()?;
+    native_skill_fixture(&f, &["demo"])?;
+    public_skill_runner(&f)?;
+    fs::create_dir(f.home.join(".codex"))?;
+    fs::create_dir(f.home.join(".cursor"))?;
+    let (out, preview) = f.run(&[
+        "skill",
+        "upgrade",
+        "owner/repo",
+        "--agent",
+        "codex",
+        "--dry-run",
+    ])?;
+    assert_code(&out, 0);
+    assert_eq!(preview["data"]["results"][0]["status"], "blocked");
+    assert!(!f.file("state").exists());
+
+    let revision = "b".repeat(40);
+    let args = [
+        "skill",
+        "upgrade",
+        "owner/repo",
+        "--agent",
+        "codex",
+        "--agent",
+        "cursor-agent",
+        "--shared",
+        "--revision",
+        revision.as_str(),
+        "--yes",
+    ];
+    let (out, changed) = f.run(&args)?;
+    assert_code(&out, 0);
+    assert_eq!(changed["data"]["results"][0]["status"], "changed");
+    assert_eq!(changed["data"]["results"][1]["status"], "changed");
+    assert_eq!(
+        fs::read_to_string(f.home.join("native-calls.jsonl"))?
+            .lines()
+            .count(),
+        1
+    );
+
+    let active = f.file("state/active.json");
+    let mut recovering = f.read_json("state/active.json")?;
+    recovering["phase"] = json!("unknown");
+    write_json(&active, &recovering)?;
+    let (out, current) = f.run(&args)?;
+    assert_code(&out, 0);
+    assert_eq!(current["data"]["results"][0]["status"], "current");
+    assert_eq!(current["data"]["results"][1]["status"], "current");
+    assert_eq!(
+        fs::read_to_string(f.home.join("native-calls.jsonl"))?
+            .lines()
+            .count(),
+        1
+    );
+    Ok(())
+}
+
+#[test]
+fn capability_agent_picker_explains_shared_scope_before_cancel() -> TestResult {
+    let f = Fixture::new()?;
+    native_skill_fixture(&f, &["demo"])?;
+    public_skill_runner(&f)?;
+    fs::create_dir(f.home.join(".codex"))?;
+    fs::create_dir(f.home.join(".cursor"))?;
+    let lock = f.home.join(".agents/.skill-lock.json");
+    let before = fs::read(&lock)?;
+    chezmoi_native::run_browser_pty(
+        &f,
+        &["skill", "upgrade", "owner/repo"],
+        "skill-agent-picker-cancel",
+        &f.home,
+        "100",
+        "3",
+    )?;
+    assert_eq!(fs::read(lock)?, before);
+    assert!(!f.file("state").exists());
+    Ok(())
+}
+
+#[test]
+fn custom_agent_registration_is_idempotent_and_selectable_by_command_name() -> TestResult {
+    let f = Fixture::new()?;
+    f.script("studio", "exit 97")?;
+    let config = f.file("studio-config");
+    fs::create_dir(&config)?;
+    let path = config.to_str().ok_or("fixture path")?;
+    let args = [
+        "agent", "add", "studio", "--type", "claude", "--config", path,
+    ];
+    let (out, plan) = f.run(&[&args[..], &["--dry-run"]].concat())?;
+    assert_code(&out, 0);
+    assert_eq!(plan["data"]["status"], "preview");
+    assert!(!f.file("state").exists());
+    let command = [&args[..], &["--yes"]].concat();
+    for status in ["registered", "already-registered"] {
+        let (out, result) = f.run(&command)?;
+        assert_code(&out, 0);
+        assert_eq!(result["data"]["status"], status);
+    }
+    let (_, inventory) = f.run(&["agent"])?;
+    let resources = inventory["data"]["resources"]
+        .as_array()
+        .ok_or("Agent inventory")?;
+    let registered = resources
+        .iter()
+        .find(|row| row["config_dir"] == path)
+        .ok_or("registered Agent")?;
+    assert_eq!(registered["aliases"][0], "studio");
+    let (out, list) = f.run(&["skill", "enable", "demo", "--agent", "studio", "--dry-run"])?;
+    assert_code(&out, 0);
+    assert_eq!(list["data"]["results"][0]["agent"], "studio");
+    assert_eq!(list["data"]["results"][0]["directory"], path);
+
+    f.script("nested", "exit 97")?;
+    let nested = f.home.join(".claude/nested");
+    fs::create_dir_all(&nested)?;
+    let before = fs::read(f.file("state/agent-profiles.json"))?;
+    let (out, blocked) = f.run(&[
+        "agent",
+        "add",
+        "nested",
+        "--type",
+        "claude",
+        "--config",
+        nested.to_str().ok_or("nested")?,
+        "--yes",
+    ])?;
+    assert_code(&out, 3);
+    assert_eq!(blocked["error"]["code"], "agent_configuration_overlap");
+    assert_eq!(fs::read(f.file("state/agent-profiles.json"))?, before);
+    Ok(())
+}
+
+#[test]
+fn native_agent_enable_rechecks_the_installed_payload_even_if_already_enabled() -> TestResult {
+    let f = Fixture::new()?;
+    let root = f.home.join(".claude-mi");
+    let payload = root.join("plugins/cache/fixture-market/widget/1.0.0");
+    let manifest = payload.join(".claude-plugin/plugin.json");
+    fs::create_dir_all(manifest.parent().ok_or("plugin path")?)?;
+    write_json(&manifest, &json!({"name":"widget","version":"1.0.0"}))?;
+    write_json(
+        &root.join("plugins/installed_plugins.json"),
+        &json!({
+            "version":2,"plugins":{"widget@fixture-market":[{"scope":"user","version":"1.0.0","installPath":payload}]}
+        }),
+    )?;
+    write_json(
+        &root.join("settings.json"),
+        &json!({"enabledPlugins":{"widget@fixture-market":true}}),
+    )?;
+    let args = [
+        "skill",
+        "enable",
+        "widget@fixture-market",
+        "--agent",
+        "claude-mi",
+        "--yes",
+    ];
+    let (out, report) = f.run(&args)?;
+    assert_code(&out, 0);
+    assert_eq!(report["data"]["results"][0]["status"], "current");
+    fs::remove_file(manifest)?;
+    let (out, report) = f.run(&args)?;
+    assert_code(&out, 3);
+    assert_eq!(report["data"]["results"][0]["status"], "blocked");
+    assert!(!f.file("state").exists());
+    Ok(())
+}
+
 fn plain(f: &Fixture, args: &[&str]) -> std::io::Result<std::process::Output> {
     let fixture = f.command();
     std::process::Command::new(fixture.get_program())

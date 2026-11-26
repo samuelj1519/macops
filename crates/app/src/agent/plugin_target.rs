@@ -930,7 +930,9 @@ pub(crate) fn previous(
                 ));
             }
         }
-        return Ok(Some(result(&journal, &saved.profile)));
+        let mut verified = result(&journal, &saved.profile);
+        verified["status"] = json!("current");
+        return Ok(Some(verified));
     }
     Ok(None)
 }

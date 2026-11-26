@@ -1864,6 +1864,7 @@ fn explicit_recipe(
                 Some(SkillCmd::Install {
                     source: None,
                     recipe: Some(recipe),
+                    ..
                 }),
         } => {
             let (recipe, fence) = read_recipe(recipe)?;
@@ -1920,6 +1921,130 @@ pub(crate) fn install_repository(ctx: &Context, source: &str) -> Result<Value> {
 }
 
 pub(crate) use journey::{RepositoryAction, repository_action, upgrade_repository};
+
+pub(super) enum SharedPlan {
+    Install(journey::InstallPlan),
+    Maintain(SharedMaintenance),
+}
+
+pub(super) struct SharedMaintenance {
+    source: String,
+    fence: InputFence,
+    members: Vec<(Recipe, Recipe)>,
+    action: Action,
+}
+
+pub(super) fn plan_shared(
+    ctx: &Context,
+    source: &str,
+    operation: crate::domain::resource::CapabilityAction,
+    revision: Option<&str>,
+) -> Result<SharedPlan> {
+    use crate::domain::resource::CapabilityAction as Operation;
+    native_config_scope(ctx)?;
+    let source = source.strip_prefix("source:").unwrap_or(source);
+    if operation == Operation::Install {
+        let plan = journey::plan_install(ctx, source)?;
+        plan.verify_batch()?;
+        return Ok(SharedPlan::Install(plan));
+    }
+    let (source, requested) = if source.contains('@') {
+        if revision.is_some() || operation != Operation::Upgrade {
+            return Err(invalid());
+        }
+        let reference = crate::skills::public_skill::Request::parse(source)?;
+        let commit = reference.resolve()?;
+        (
+            reference.repository.key().to_owned(),
+            Some(commit.as_str().to_owned()),
+        )
+    } else {
+        (source.to_owned(), revision.map(str::to_owned))
+    };
+    let installed = journey::installed_selection(ctx, &source)?.ok_or_else(required)?;
+    let action = match operation {
+        Operation::Upgrade => Action::Upgrade,
+        Operation::Uninstall => Action::Uninstall,
+        _ => return Err(required()),
+    };
+    let mut members = vec![];
+    for old in installed.managed.into_iter().chain(installed.unowned) {
+        let snapshot = checked_snapshot(ctx, &old)?;
+        validate_action(ctx, &old, action, &snapshot)?;
+        let mut next = if action == Action::Upgrade {
+            resolve_upgrade(ctx, old.clone(), requested.as_deref())?
+        } else {
+            old.clone()
+        };
+        if policy::generated(&next) && requested.is_some() {
+            next.source.tracking_ref = None;
+        }
+        members.push((old, next));
+    }
+    installed.fence.verify()?;
+    Ok(SharedPlan::Maintain(SharedMaintenance {
+        source,
+        fence: installed.fence,
+        members,
+        action,
+    }))
+}
+
+impl SharedPlan {
+    pub(super) fn run(self, ctx: &Context) -> Result<Value> {
+        match self {
+            Self::Install(plan) => plan.run(ctx, false, true, true),
+            Self::Maintain(plan) => plan.run(ctx),
+        }
+    }
+}
+
+impl SharedMaintenance {
+    fn run(self, ctx: &Context) -> Result<Value> {
+        self.fence.verify()?;
+        if let Some(value) = journey::try_adopt(ctx, &self.source, false, true, false)?
+            && value["incomplete"] == true
+        {
+            return Ok(value);
+        }
+        self.fence.verify()?;
+        let current = journey::installed_selection(ctx, &self.source)?.ok_or_else(invalid)?;
+        if !current.unowned.is_empty() || current.managed.len() != self.members.len() {
+            return Err(invalid());
+        }
+        for (old, _) in &self.members {
+            let actual = current
+                .managed
+                .iter()
+                .find(|row| row.install_name == old.install_name)
+                .ok_or_else(invalid)?;
+            let mut expected = old.clone();
+            if expected.runner.sha256.is_none() {
+                expected.runner.sha256.clone_from(&actual.runner.sha256);
+            }
+            disk::same(actual, &expected)?;
+        }
+        let mut writes = false;
+        for (old, mut next) in self.members {
+            let actual = current
+                .managed
+                .iter()
+                .find(|row| row.install_name == old.install_name)
+                .ok_or_else(invalid)?;
+            next.runner.sha256.clone_from(&actual.runner.sha256);
+            if self.action == Action::Upgrade && next == *actual {
+                verify_managed_skill(ctx, actual)?;
+                continue;
+            }
+            let report = execute(ctx, next, self.action, false, true, InputFence::default())?;
+            if report["journal"]["phase"] != "succeeded" {
+                return Ok(report);
+            }
+            writes = true;
+        }
+        Ok(json!({"status":if writes {"changed"} else {"current"}}))
+    }
+}
 
 pub(crate) fn adopt_repository(ctx: &Context, source: &str) -> Result<Value> {
     let request = crate::skills::public_skill::Request::parse(source)?;
@@ -2155,7 +2280,7 @@ pub fn run(ctx: &Context, command: &Command, dry: bool, yes: bool) -> Result<Opt
             project: _,
             details: _,
             only: _,
-            command: Some(SkillCmd::Remove { id }),
+            command: Some(SkillCmd::Remove { id, .. }),
         } => execute(
             ctx,
             select(ctx, id)?,
@@ -2219,6 +2344,7 @@ pub fn app_scoped(
             only: vec![],
             all: false,
             change_id: None,
+            agents: crate::cli::SkillAgents::default(),
         };
         return Ok(Some(upgrade(ctx, &selection, dry, yes)?));
     }
@@ -2664,6 +2790,7 @@ fn outdated(ctx: &Context, name: Option<&str>, only: &[String]) -> Result<Value>
                 all: false,
                 revision: None,
                 change_id: None,
+                agents: crate::cli::SkillAgents::default(),
             },
         )?
     };

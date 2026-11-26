@@ -165,7 +165,7 @@ pub enum Command {
     },
     #[command(
         about = "查看、升级和启动 Agent",
-        before_help = "按任务使用\n  mo agent                              查看本机 Agent 配置\n  mo agent tools                        核对各 CLI 的版本\n  mo agent install codex                安装 CLI\n  mo agent upgrade codex --dry-run     看升级影响\n  mo agent launch PROFILE               启动指定配置\n  mo agent uninstall PROFILE --dry-run 先看将归档哪个单独配置\n  mo agent credential list             查看凭据状态"
+        before_help = "按任务使用\n  mo agent                              查看本机 Agent 配置\n  mo agent tools                        核对各 CLI 的版本\n  mo agent add NAME --config PATH       登记自定义 Agent\n  mo agent install codex                安装 CLI\n  mo agent upgrade codex --dry-run     看升级影响\n  mo agent launch PROFILE               启动指定配置\n  mo agent uninstall PROFILE --dry-run 先看将归档哪个单独配置\n  mo agent credential list             查看凭据状态"
     )]
     Agent {
         #[arg(
@@ -383,13 +383,27 @@ pub struct SkillSelection {
     pub all: bool,
     #[arg(long, help = "仅用于旧策略同步。值来自原操作记录。")]
     pub change_id: Option<String>,
+    #[command(flatten)]
+    pub agents: SkillAgents,
+}
+
+#[derive(Clone, Debug, Default, Args)]
+pub struct SkillAgents {
+    #[arg(
+        long = "agent",
+        value_name = "NAME",
+        help = "选择一个 Agent；可重复，all 选择全部适用的 Agent"
+    )]
+    pub names: Vec<String>,
+    #[arg(long, help = "同意修改共享技能目录，所有读取该目录的 Agent 都会受影响")]
+    pub shared: bool,
 }
 
 #[derive(Debug, Subcommand)]
 pub enum SkillCmd {
     #[command(
         about = "从 GitHub 安装技能并接管后续更新",
-        before_help = "示例\n  mo skill install owner/repo --dry-run          先查看有哪些技能和安装位置\n  mo skill install owner/repo                   选择技能并安装\n  mo skill install owner/repo@v1.2.0            使用指定版本\n  mo recommend owner/repo                      查看插件或其他安装方式"
+        before_help = "示例\n  mo skill install owner/repo --dry-run          先查看有哪些技能和安装位置\n  mo skill install owner/repo                   选择技能并安装\n  mo skill install owner/repo@v1.2.0            使用指定版本\n  mo skill install owner/repo --agent claude-mi --agent claude-glm\n  mo recommend owner/repo                      查看插件或其他安装方式"
     )]
     Install {
         #[arg(
@@ -405,8 +419,11 @@ pub enum SkillCmd {
             help = "高级用法：读取已有的本机配方文件（绝对路径）"
         )]
         recipe: Option<PathBuf>,
+        #[command(flatten)]
+        agents: SkillAgents,
     },
     #[command(
+        hide = true,
         about = "接管本机已有的 GitHub 技能，保留原安装",
         before_help = "示例\n  mo skill --details                          查找已有技能和来源\n  mo skill adopt NAME --dry-run                查看可以接管的位置\n  mo skill adopt owner/repo                   接管一个来源里的已有技能"
     )]
@@ -429,10 +446,24 @@ pub enum SkillCmd {
     Remove {
         #[arg(help = "已接管成员的名称或唯一 ID")]
         id: String,
+        #[command(flatten)]
+        agents: SkillAgents,
+    },
+    #[command(about = "在选定的 Agent 中启用已安装插件")]
+    Enable {
+        id: String,
+        #[command(flatten)]
+        agents: SkillAgents,
+    },
+    #[command(about = "在选定的 Agent 中停用已安装插件")]
+    Disable {
+        id: String,
+        #[command(flatten)]
+        agents: SkillAgents,
     },
     #[command(
         about = "按技能名或 GitHub 仓库更新本机技能",
-        before_help = "示例\n  mo skill upgrade NAME --dry-run                    预演一个成员的升级\n  mo skill upgrade source:owner/repo --dry-run       预演已登记来源的升级\n  mo skill upgrade --only NAME --only OTHER --dry-run  预演多个成员\n  mo skill upgrade NAME                              更新已接管的技能\n  mo skill upgrade owner/repo@v1.2.0                  更新到指定版本\n\n兼容的已有安装可在此接管。跟踪固定版本时，用 @ 指定要更新到的版本。"
+        before_help = "示例\n  mo skill upgrade NAME --dry-run                    预演一个成员的升级\n  mo skill upgrade source:owner/repo --dry-run       预演已登记来源的升级\n  mo skill upgrade --only NAME --only OTHER --dry-run  预演多个成员\n  mo skill upgrade NAME                              更新已接管的技能\n  mo skill upgrade owner/repo@v1.2.0                  更新到指定版本\n\n  mo skill upgrade owner/repo --agent all --dry-run    查看各 Agent 的安装和目标版本\n\n固定版本用 @ 指定。脚本写入共享目录时加 --shared。"
     )]
     Upgrade(SkillSelection),
     #[command(
@@ -519,6 +550,15 @@ pub enum Policy {
 
 #[derive(Debug, Subcommand)]
 pub enum AgentCmd {
+    #[command(about = "登记已有 Agent 的命令和配置目录")]
+    Add {
+        #[arg(value_name = "COMMAND")]
+        name: String,
+        #[arg(long, value_name = "ABSOLUTE_PATH")]
+        config: PathBuf,
+        #[arg(long = "type", value_parser = ["claude", "codex", "cursor"], help = "指定无法从命令名识别的客户端类型")]
+        client: Option<String>,
+    },
     #[command(
         about = "安装或更新一个 Agent CLI（mimo、codex、claude、cursor、kimi、dsh、codegraph）"
     )]

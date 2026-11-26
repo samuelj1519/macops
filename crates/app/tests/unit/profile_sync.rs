@@ -12,6 +12,7 @@ fn request(profile: &str) -> crate::cli::SkillSelection {
         all: false,
         revision: None,
         change_id: None,
+        agents: crate::cli::SkillAgents::default(),
     }
 }
 fn fixture()

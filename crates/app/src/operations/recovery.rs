@@ -37,6 +37,8 @@ fn recover_owned(
         crate::agent::claude_install::recover_publication(ctx, store, journal, resolve_failed)?
     } else if crate::agent::native_plugin_tx::is_plugin(journal) {
         crate::agent::native_plugin_tx::recover(ctx, store, journal, resolve_failed, yes)?
+    } else if crate::agent::plugin_lifecycle::owns(journal) {
+        crate::agent::plugin_lifecycle::recover(store, journal, resolve_failed, yes)?
     } else if matches!(
         journal.plan.action,
         Action::Apply | Action::Restore | Action::Reconcile

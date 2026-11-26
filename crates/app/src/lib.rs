@@ -113,7 +113,7 @@ fn run(cli: &cli::Cli, warnings: &mut Vec<String>) -> error::Result<CommandOutpu
         && writes_managed_state(&cli.command)
         && let Some(recovered) = recover_for_command(cli, &ctx)?
     {
-        if repeats_recovered(&ctx, &cli.command, &recovered)? {
+        if !skills::portfolio::routed(cli) && repeats_recovered(&ctx, &cli.command, &recovered)? {
             return Ok(CommandOutput::Data(recovered.result));
         }
         if !cli.json {
@@ -242,6 +242,8 @@ fn writes_managed_state(command: &cli::Command) -> bool {
                 SkillCmd::Install { .. }
                     | SkillCmd::Upgrade(_)
                     | SkillCmd::Remove { .. }
+                    | SkillCmd::Enable { .. }
+                    | SkillCmd::Disable { .. }
                     | SkillCmd::Adopt { .. }
                     | SkillCmd::Refresh(_)
                     | SkillCmd::Sync(_)
@@ -256,6 +258,7 @@ fn writes_managed_state(command: &cli::Command) -> bool {
         } | Command::Agent {
             command: Some(
                 AgentCmd::Install { .. }
+                    | AgentCmd::Add { .. }
                     | AgentCmd::Upgrade { tool: Some(_), .. }
                     | AgentCmd::Resume { .. }
             ),
@@ -401,7 +404,7 @@ fn repeats_resource(
             ..
         } => (Action::Apply, target.as_str(), None, false),
         Command::Skill {
-            command: Some(SkillCmd::Remove { id }),
+            command: Some(SkillCmd::Remove { id, .. }),
             ..
         } => (Action::Uninstall, id.as_str(), None, false),
         Command::Cleanup { id } => (Action::Cleanup, id.as_str(), None, false),
@@ -638,6 +641,9 @@ fn run_pipeline(cli: &cli::Cli, ctx: &context::Context) -> error::Result<Option<
     {
         return Ok(Some(value));
     }
+    if let Some(value) = skills::portfolio::run(cli, ctx)? {
+        return Ok(Some(value));
+    }
     if let Some(value) = native_skills::run(ctx, &cli.command, cli.dry_run, cli.yes)? {
         return Ok(Some(value));
     }
@@ -760,6 +766,14 @@ fn run_agent_entry(
     command: &cli::AgentCmd,
 ) -> error::Result<Option<Value>> {
     match command {
+        cli::AgentCmd::Add {
+            name,
+            config,
+            client,
+        } => {
+            agent::resource_agents::add(ctx, name, config, client.as_deref(), cli.dry_run, cli.yes)
+                .map(Some)
+        }
         cli::AgentCmd::Resume { operation_id } => {
             let journal = operations::validated_recovery_journal(ctx, operation_id)?;
             if codex_install::is_install(&journal) {
@@ -928,6 +942,11 @@ fn native_callbacks(journal: &domain::Journal) -> error::Result<(NativeGuard, Na
         Ok((
             native_plugin_tx::worker_guard,
             native_plugin_tx::worker_after,
+        ))
+    } else if agent::plugin_lifecycle::owns(journal) {
+        Ok((
+            agent::plugin_lifecycle::worker_guard,
+            agent::plugin_lifecycle::worker_after,
         ))
     } else if journal.plan.brew.is_some() {
         Ok((brew::worker_guard, brew::worker_after))

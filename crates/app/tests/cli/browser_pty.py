@@ -66,7 +66,16 @@ def type_key(key):
 
 
 try:
-    if scenario in ("skill-adopt-style", "skill-adopt-no-color"):
+    if scenario == "skill-agent-picker-cancel":
+        expect("codex")
+        expect("cursor-agent")
+        expect("选择 Agent")
+        offset = type_key(b" \r")
+        expect("共享目录会影响", offset)
+        expect("确认执行", offset)
+        offset = type_key(b"\r")
+        expect("已取消", offset)
+    elif scenario in ("skill-adopt-style", "skill-adopt-no-color"):
         expect("◒")
         expect("◇")
         expect("╭─")
@@ -705,7 +714,7 @@ try:
             offset = type_key(b"s")
             expect("synthetic-source-content", offset)
         type_key(b"q")
-    if scenario not in ("market-json", "migration-blocked") and not scenario.startswith(("setup-", "recommend-", "native-progress", "skill-adopt-")):
+    if scenario not in ("market-json", "migration-blocked") and not scenario.startswith(("setup-", "recommend-", "native-progress", "skill-adopt-", "skill-agent-")):
         expect("\x1b[?1049l")
     deadline = time.monotonic() + 8
     while process.poll() is None and time.monotonic() < deadline:

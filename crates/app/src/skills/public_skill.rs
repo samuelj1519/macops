@@ -53,6 +53,40 @@ impl Request {
         })
     }
 
+    pub(super) fn claude_offer_at(
+        &self,
+        commit: &ObjectId,
+    ) -> Result<Option<crate::agent::claude_install_source::Offer>> {
+        with_git(&self.repository, |git| {
+            let root = git.fetch_commit(&self.repository, commit)?;
+            let Some(dir) = subtree(git, &root, ".claude-plugin")? else {
+                return Ok(None);
+            };
+            let files = git.tree(&dir)?;
+            let blob = |name: &str| {
+                files
+                    .iter()
+                    .find(|file| {
+                        file.name.as_str() == name && matches!(file.kind, TreeKind::File { .. })
+                    })
+                    .map(|file| git.blob(&file.object))
+                    .transpose()
+            };
+            let (Some(marketplace), Some(plugin)) =
+                (blob("marketplace.json")?, blob("plugin.json")?)
+            else {
+                return Ok(None);
+            };
+            crate::agent::claude_install_source::Offer::identify(
+                self.repository.key(),
+                commit,
+                &marketplace,
+                &plugin,
+            )
+            .map(Some)
+        })
+    }
+
     pub fn discover(&self, ctx: &Context) -> Result<Vec<Recipe>> {
         let runner = runner(ctx)?;
         with_git(&self.repository, |git| {

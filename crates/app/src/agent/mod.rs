@@ -13,6 +13,7 @@ pub(crate) mod native_plugin_tx;
 pub(crate) mod native_plugins;
 pub(crate) mod native_plugins_files;
 pub(crate) mod plugin_install;
+pub(crate) mod plugin_lifecycle;
 pub(crate) mod plugin_marketplaces;
 pub(crate) mod plugin_target;
 pub(crate) mod profile_install;
