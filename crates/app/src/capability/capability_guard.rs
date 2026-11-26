@@ -47,16 +47,24 @@ pub fn entry(state: &State) -> Result<Option<DirectoryEntry>> {
     })
 }
 pub fn listing(root: &Directory) -> Result<BTreeMap<String, DirectoryEntry>> {
+    listing_matching(root, |_| true)
+}
+
+pub(crate) fn listing_matching(
+    root: &Directory,
+    include: impl Fn(&[u8]) -> bool,
+) -> Result<BTreeMap<String, DirectoryEntry>> {
     let mut entries = BTreeMap::new();
     for (count, item) in root.names()?.enumerate() {
         if count > 5000 {
             return Err(changed());
         }
         let item = item.map_err(|e| std::io::Error::from_raw_os_error(e.raw_os_error()))?;
-        if matches!(item.file_name().to_bytes(), b"." | b"..") {
+        let bytes = item.file_name().to_bytes();
+        if matches!(bytes, b"." | b"..") || !include(bytes) {
             continue;
         }
-        let name = std::ffi::OsString::from_vec(item.file_name().to_bytes().to_vec());
+        let name = std::ffi::OsString::from_vec(bytes.to_vec());
         let text = name.to_str().ok_or_else(changed)?.to_owned();
         let meta = root.metadata(&name)?.ok_or_else(changed)?;
         entries.insert(

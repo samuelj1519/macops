@@ -21,7 +21,12 @@ pub fn read_path(path: &Path) -> Result<PathBuf> {
                     for rest in &components[i + 1..] {
                         target.push(rest.as_os_str());
                     }
-                    pending = lexical(&normalize_link(&target)?)?;
+                    pending = normalize_link(&target).map_err(|mut error| {
+                        if error.code == "excluded_path" {
+                            error.message = format!("{} 的{}", current.display(), error.message);
+                        }
+                        error
+                    })?;
                     changed = true;
                     break;
                 }

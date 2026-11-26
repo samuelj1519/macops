@@ -11,6 +11,7 @@ use crate::{
     platform::fs::{Directory, EntryKind},
     policy::source_tree::{Slot, Tree},
     skills::rules::native_skills::{self as policy, Recipe},
+    source::source_tree::TreeStamp,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -32,15 +33,26 @@ pub enum Object {
         slot: Slot,
         tree: Tree,
     },
+    ProtectedDirectory {
+        path: PathBuf,
+        slot: Slot,
+        stamp: TreeStamp,
+    },
 }
 impl Object {
     pub fn path(&self) -> &Path {
         match self {
-            Self::Entry { path, .. } | Self::Directory { path, .. } => path,
+            Self::Entry { path, .. }
+            | Self::Directory { path, .. }
+            | Self::ProtectedDirectory { path, .. } => path,
         }
     }
     pub fn verify(&self) -> Result<()> {
-        if capture(self.path())? != *self {
+        let current = match self {
+            Self::ProtectedDirectory { path, .. } => capture_protected(path)?,
+            _ => capture(self.path())?,
+        };
+        if current != *self {
             return Err(invalid());
         }
         Ok(())
@@ -56,6 +68,37 @@ impl Object {
     }
 }
 pub fn capture(path: &Path) -> Result<Object> {
+    capture_with(path, |slot| {
+        let tree = crate::source::source_tree::observe(&slot)?.ok_or_else(invalid)?;
+        Ok(Object::Directory {
+            path: path.into(),
+            slot,
+            tree,
+        })
+    })
+    .map_err(|error| with_path(error, path))
+}
+
+fn capture_protected(path: &Path) -> Result<Object> {
+    capture_with(path, |slot| {
+        let stamp = crate::source::source_tree::observe_protected(&slot)?.ok_or_else(invalid)?;
+        Ok(Object::ProtectedDirectory {
+            path: path.into(),
+            slot,
+            stamp,
+        })
+    })
+    .map_err(|error| with_path(error, path))
+}
+
+fn with_path(mut error: Error, path: &Path) -> Error {
+    if error.code == "source_tree_changed" {
+        error.message = format!("无法确认技能目录 {} 的内容和权限", path.display());
+    }
+    error
+}
+
+fn capture_with(path: &Path, observe: impl FnOnce(Slot) -> Result<Object>) -> Result<Object> {
     let namespace = files::namespace(path)?;
     if let Some(parent) = files::parent(&namespace)? {
         let name = path.file_name().ok_or_else(invalid)?;
@@ -67,12 +110,7 @@ pub fn capture(path: &Path) -> Result<Object> {
                 parent: files::binding(&parent, &parent.path)?,
                 name: name.to_str().ok_or_else(invalid)?.into(),
             };
-            let tree = crate::source::source_tree::observe(&slot)?.ok_or_else(invalid)?;
-            return Ok(Object::Directory {
-                path: path.into(),
-                slot,
-                tree,
-            });
+            return observe(slot);
         }
     }
     let state = files::observe(&namespace, 16 * 1024 * 1024)?.0;
@@ -266,10 +304,11 @@ fn children(path: &Path, selected: &str) -> Result<BTreeSet<String>> {
 fn client_paths(ctx: &Context, name: &str) -> Result<BTreeSet<PathBuf>> {
     let mut paths = BTreeSet::new();
     let home = Directory::open(&ctx.home)?;
-    for leaf in crate::capability::capability_guard::listing(&home)?.keys() {
-        if leaf.starts_with(".claude-") {
-            paths.insert(ctx.home.join(leaf).join("skills").join(name));
-        }
+    let profiles = crate::capability::capability_guard::listing_matching(&home, |leaf| {
+        leaf.starts_with(b".claude-")
+    })?;
+    for leaf in profiles.into_keys() {
+        paths.insert(ctx.home.join(leaf).join("skills").join(name));
     }
     for leaf in [
         ".claude",
@@ -352,14 +391,10 @@ pub fn snapshot(ctx: &Context, recipe: &Recipe) -> Result<Snapshot> {
     let mut entries = 0usize;
     let mut bytes = 0u64;
     for path in paths {
-        let object = capture(&path)?;
-        if let Object::Directory { tree, .. } = &object {
-            entries += tree.entries.len();
-            for entry in tree.entries.values() {
-                if let crate::policy::source_tree::Content::File { size, .. } = entry.content {
-                    bytes = bytes.checked_add(size).ok_or_else(invalid)?;
-                }
-            }
+        let object = capture_protected(&path)?;
+        if let Object::ProtectedDirectory { stamp, .. } = &object {
+            entries += stamp.entries;
+            bytes = bytes.checked_add(stamp.bytes).ok_or_else(invalid)?;
         }
         if entries > 50000 || bytes > 128 * 1024 * 1024 {
             return Err(invalid());

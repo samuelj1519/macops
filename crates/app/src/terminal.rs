@@ -1,6 +1,7 @@
 pub(crate) mod install;
 pub(crate) mod picker;
 pub(crate) mod plan;
+pub(crate) mod presentation;
 pub(crate) mod progress;
 
 use crate::{
@@ -85,22 +86,22 @@ fn screen() -> Result<(Terminal<CrosstermBackend<Stdout>>, Restore)> {
 }
 
 pub(crate) fn feedback(kind: crate::output::TerminalLine, text: &str) {
-    use std::io::IsTerminal as _;
-    let color = std::io::stderr().is_terminal()
-        && std::env::var_os("NO_COLOR").is_none()
-        && std::env::var_os("TERM").is_some_and(|term| term != "dumb");
-    eprintln!("{}", crate::output::terminal_line(kind, text, color));
+    eprintln!(
+        "{}",
+        crate::output::terminal_line(kind, text, presentation::color())
+    );
 }
 
 pub(crate) fn confirm(message: &str) -> Result<()> {
     use std::io::IsTerminal as _;
     if std::io::stdin().is_terminal() {
-        eprintln!("◇  确认操作\n{}", crate::output::sanitize(message, true));
+        presentation::panel("确认操作", message);
     }
     let selected = picker::select(
         &["取消".into(), "确认执行".into()],
         0,
         false,
+        "",
         |typed| (typed == "yes").then_some(vec![1]),
     )?;
     if selected == [1] {

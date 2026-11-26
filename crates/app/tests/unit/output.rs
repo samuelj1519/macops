@@ -1,6 +1,21 @@
 #![cfg(test)]
 use super::*;
 use serde_json::json;
+
+#[test]
+fn upgrade_summary_names_the_failed_and_unattempted_skills() {
+    let output = skill_journey(&json!({
+        "skillAction": "upgrade",
+        "incomplete": true,
+        "results": [{"name":"alpha","recipe":"internal-alpha","error":{"message":"更新前发现目录已改变"}}],
+        "unattempted": ["internal-beta"],
+        "unattemptedNames": ["beta"]
+    })).unwrap_or_default();
+    assert!(output.contains("alpha · 更新前发现目录已改变"));
+    assert!(output.contains("尚未开始　beta"));
+    assert!(!output.contains("internal-"));
+}
+
 #[test]
 fn operation_followups_and_native_observations_use_their_user_facing_status() {
     for required in [true, false] {

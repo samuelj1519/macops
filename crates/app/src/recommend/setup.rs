@@ -731,7 +731,7 @@ fn interactive_answer(prompt: &str) -> Result<String> {
     };
     eprintln!("{message}");
     let selected =
-        crate::terminal::picker::select(&["取消".into(), action.into()], 0, false, |typed| {
+        crate::terminal::picker::select(&["取消".into(), action.into()], 0, false, "", |typed| {
             matches!(typed, "y" | "yes").then_some(vec![1])
         })?;
     Ok(if selected == [1] { "y" } else { "" }.into())

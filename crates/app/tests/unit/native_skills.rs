@@ -54,6 +54,62 @@ fn adopt(ctx: &Context, recipe: &Recipe) -> Result<Value> {
         InputFence::default(),
     )
 }
+
+#[test]
+fn repository_menu_routes_existing_rows_and_leaves_uninstalled_members_out_of_upgrades()
+-> TestResult {
+    let (_temp, ctx, recipe) = fixture()?;
+    let book = policy::merge(policy::book(None)?, &recipe)?;
+    let mut removed = recipe.clone();
+    removed.id = "removed".into();
+    removed.install_name = "removed".into();
+    removed.source.skill_directory = "skills/removed".into();
+    removed.source.member_name = "removed".into();
+    let book = policy::merge(book, &removed)?;
+    scoped_files::private(&ctx.config)?;
+    fs::write(book_path(&ctx), disk::encode(&book)?)?;
+    let public = "owner/repo@v1.12.0";
+    assert!(matches!(
+        repository_action(&ctx, "other/repo@v1.12.0")?,
+        RepositoryAction::Install
+    ));
+    assert!(matches!(
+        repository_action(&ctx, public)?,
+        RepositoryAction::Adopt
+    ));
+    assert!(!ctx.state.exists());
+    adopt(&ctx, &recipe)?;
+    assert!(matches!(
+        repository_action(&ctx, public)?,
+        RepositoryAction::Upgrade
+    ));
+    let installed = journey::installed_selection(&ctx, "owner/repo")?.ok_or("source")?;
+    assert_eq!(
+        installed
+            .managed
+            .iter()
+            .map(|r| r.id.as_str())
+            .collect::<Vec<_>>(),
+        ["alpha"]
+    );
+    assert_eq!(recommended_recipes(&ctx, "owner/repo")?[0].id, "removed");
+    let lock_before = fs::read(disk::lock_path(&ctx))?;
+    let skill = disk::payload(&ctx, "alpha")?.join("SKILL.md");
+    let skill_before = fs::read(&skill)?;
+    let pinned = format!("owner/repo@{}", "c".repeat(40));
+    let error = journey::upgrade_repository_using(&ctx, &pinned, |prompt| {
+        assert!(prompt.contains(&pinned));
+        assert!(prompt.contains("技能　alpha"));
+        assert!(!prompt.contains("removed"));
+        Err(Error::attention("cancelled", "fixture cancel"))
+    })
+    .err()
+    .ok_or("confirmation was required")?;
+    assert_eq!(error.code, "cancelled");
+    assert_eq!(fs::read(disk::lock_path(&ctx))?, lock_before);
+    assert_eq!(fs::read(&skill)?, skill_before);
+    Ok(())
+}
 #[test]
 fn adopted_recipe_views_share_one_owner_and_stale_common_receipt_cannot_claim_verified_delivery()
 -> TestResult {

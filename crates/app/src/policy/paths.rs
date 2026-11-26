@@ -29,7 +29,10 @@ pub fn lexical(path: &Path) -> Result<PathBuf> {
         }
     }
     if excluded_user_directory(&out) {
-        return Err(Error::new("excluded_path", "路径属于排除区域"));
+        return Err(Error::new(
+            "excluded_path",
+            format!("mo 无法访问受保护的路径 {}", out.display()),
+        ));
     }
     Ok(out)
 }
@@ -45,7 +48,10 @@ pub fn normalize_link(path: &Path) -> Result<PathBuf> {
             _ => out.push(c.as_os_str()),
         }
         if excluded_user_directory(&out) {
-            return Err(Error::new("excluded_path", "链接进入排除区域"));
+            return Err(Error::new(
+                "excluded_path",
+                format!("链接指向受保护的目录 {}", out.display()),
+            ));
         }
     }
     lexical(&out)

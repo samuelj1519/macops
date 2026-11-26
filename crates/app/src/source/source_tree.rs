@@ -28,6 +28,41 @@ fn uid(dir: &Directory, name: &str) -> Result<u32> {
     Ok(stat.st_uid)
 }
 pub fn observe(slot: &Slot) -> Result<Option<Tree>> {
+    observe_tree(slot, &mut None)
+}
+
+type Links = BTreeMap<String, (crate::domain::FileId, u32, Vec<u8>)>;
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct TreeStamp {
+    pub digest: String,
+    pub entries: usize,
+    pub bytes: u64,
+}
+
+pub(crate) fn observe_protected(slot: &Slot) -> Result<Option<TreeStamp>> {
+    let mut links = Some(Links::new());
+    let Some(tree) = observe_tree(slot, &mut links)? else {
+        return Ok(None);
+    };
+    let links = links.ok_or_else(changed)?;
+    let bytes = tree
+        .entries
+        .values()
+        .filter_map(|entry| match entry.content {
+            Content::File { size, .. } => Some(size),
+            Content::Directory => None,
+        })
+        .sum();
+    Ok(Some(TreeStamp {
+        digest: crate::domain::fingerprint(&(&tree, &links))?,
+        entries: tree.entries.len() + links.len(),
+        bytes,
+    }))
+}
+
+fn observe_tree(slot: &Slot, links: &mut Option<Links>) -> Result<Option<Tree>> {
     let parent = parent(slot)?;
     let name = OsStr::new(&slot.name);
     let Some(before) = parent.metadata(name)? else {
@@ -57,6 +92,7 @@ pub fn observe(slot: &Slot) -> Result<Option<Tree>> {
         tree.identity.device,
         &mut remaining,
         &mut tree.entries,
+        links,
     )?;
     parent.verify_child(name, &root)?;
     root.verify()?;
@@ -75,6 +111,7 @@ fn walk(
     device: u64,
     remaining: &mut u64,
     entries: &mut BTreeMap<String, Entry>,
+    links: &mut Option<Links>,
 ) -> Result<()> {
     if depth > 32 {
         return Err(changed());
@@ -82,7 +119,9 @@ fn walk(
     let listing = capability_guard::listing(dir)?;
     for (name, before) in &listing {
         Component::parse(name)?;
-        if entries.len() >= 10000 || before.identity.device != device {
+        if entries.len() + links.as_ref().map_or(0, Links::len) >= 10000
+            || before.identity.device != device
+        {
             return Err(changed());
         }
         let owner = uid(dir, name)?;
@@ -109,7 +148,15 @@ fn walk(
                         content: Content::Directory,
                     },
                 );
-                walk(&child, &relative, depth + 1, device, remaining, entries)?;
+                walk(
+                    &child,
+                    &relative,
+                    depth + 1,
+                    device,
+                    remaining,
+                    entries,
+                    links,
+                )?;
                 dir.verify_child(OsStr::new(name), &child)?;
                 if uid(dir, name)? != owner {
                     return Err(changed());
@@ -134,6 +181,15 @@ fn walk(
                     sha256: capability_store::hash(&bytes),
                     size: bytes.len() as u64,
                 }
+            }
+            "symlink" if let Some(links) = links => {
+                let target = rustix::fs::readlinkat(dir.file(), OsStr::new(name), Vec::new())
+                    .map_err(std::io::Error::from)?;
+                links.insert(
+                    relative,
+                    (before.identity.clone(), before.mode, target.into_bytes()),
+                );
+                continue;
             }
             _ => return Err(changed()),
         };

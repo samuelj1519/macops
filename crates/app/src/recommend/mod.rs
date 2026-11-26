@@ -16,9 +16,11 @@ use crate::{
     error::{Error, Result},
     platform::fs::Directory,
     policy::public_source::{domain_link, repository_subject},
+    skills::native_skills::{self, RepositoryAction},
     terminal::{
         install::report_install,
         plan::{plan_scope, source_label},
+        presentation::panel,
     },
 };
 use candidate::{self as policy, Candidate, Scope};
@@ -49,7 +51,12 @@ pub(crate) fn run(
         None
     };
     let data = if let Some(repository) = repository {
-        upstream::show_repository(ctx, repository, cli.dry_run, interactive)?
+        let scan = || upstream::show_repository(ctx, repository, cli.dry_run, interactive);
+        if interactive {
+            crate::terminal::progress::during("核对仓库的安装方式", scan)?
+        } else {
+            scan()?
+        }
     } else {
         show(
             ctx,
@@ -285,16 +292,20 @@ fn choose(ctx: &Context, data: Value, verbose: bool) -> Result<Value> {
             verbose,
         );
     }
-    terminal(TerminalLine::Section, "本机状态");
-    eprint!("{}", local.status());
-    eprintln!();
-    terminal(TerminalLine::Section, "安装方案");
-    for line in recommendation_sections(&data, &installs).lines() {
-        eprintln!("  {line}");
+    panel("本机状态", local.status().trim_end());
+    let notes = if verbose {
+        recommendation_sections(&data, &installs)
+    } else {
+        installation_notes(&data, &installs)
+    };
+    if notes.is_empty() {
+        terminal(TerminalLine::Section, "安装方案");
+    } else {
+        panel("安装方案", notes.trim_end());
     }
-    eprintln!();
-    terminal(TerminalLine::Section, "维护入口");
-    eprint!("{}", local.maintenance(installs.len() + 1));
+    if !local.views.is_empty() {
+        panel("维护入口", local.maintenance(installs.len() + 1).trim_end());
+    }
     if verbose {
         show_model_details(&data);
         plugin_install::show_codex_market(&data["codexMarketplace"]);
@@ -317,7 +328,6 @@ fn choose(ctx: &Context, data: Value, verbose: bool) -> Result<Value> {
     } else {
         "选择安装候选或维护入口"
     };
-    eprintln!("{prompt}（Enter 返回）");
     let labels = installs
         .iter()
         .map(InstallChoice::label)
@@ -328,14 +338,19 @@ fn choose(ctx: &Context, data: Value, verbose: bool) -> Result<Value> {
                 "查看技能与插件".into()
             }
         }))
+        .enumerate()
+        .map(|(index, label)| format!("{} {label}", index + 1))
         .collect::<Vec<_>>();
-    let Some(index) = choose_label(labels)? else {
+    let Some(index) = choose_label(labels, prompt)? else {
         return Ok(json!({"mode":"cancelled"}));
     };
-    if let Some(offer) = installs.get(index) {
+    let install_count = installs.len();
+    if index < install_count
+        && let Some(offer) = installs.into_iter().nth(index)
+    {
         return install_choice(ctx, offer);
     }
-    if let Some((kind, view)) = local.views.into_iter().nth(index - installs.len()) {
+    if let Some((kind, view)) = local.views.into_iter().nth(index - install_count) {
         crate::browser::browse_related(ctx, kind, view)?;
     }
     Ok(data)
@@ -354,15 +369,30 @@ fn recommendation_sections(data: &Value, choices: &[InstallChoice]) -> String {
             let _ = writeln!(text, "  {} {}", index + 1, choice.label());
         }
     }
+    text.push_str(&installation_notes(data, choices));
+    text
+}
+
+fn installation_notes(data: &Value, choices: &[InstallChoice]) -> String {
+    use std::fmt::Write as _;
+    let mut text = String::new();
     let has_claude = choices.iter().any(|choice| {
         matches!(
             choice,
             InstallChoice::Plugin(plugin_install::Offer::Claude(..))
         )
     });
+    let has_shared = choices
+        .iter()
+        .any(|choice| matches!(choice, InstallChoice::PublicSkills(_, Ok(_))));
     let manual = manual_commands(data, has_claude);
     if !manual.is_empty() {
-        let _ = writeln!(text, "手动安装{manual}");
+        let heading = if has_shared {
+            "项目或其他客户端"
+        } else {
+            "手动安装"
+        };
+        let _ = writeln!(text, "{heading}{manual}");
     }
     if let Some(documents) = data["documents"].as_array().filter(|rows| !rows.is_empty()) {
         text.push_str("来源文档\n");
@@ -495,8 +525,8 @@ fn no_install_plan(data: &Value) -> String {
     text
 }
 
-fn install_choice(ctx: &Context, choice: &InstallChoice) -> Result<Value> {
-    let version = if let InstallChoice::Application(package) = choice
+fn install_choice(ctx: &Context, choice: InstallChoice) -> Result<Value> {
+    let version = if let InstallChoice::Application(package) = &choice
         && !matches!(package.provider, Provider::BrewFormula { .. })
         && (package.exact_version_required || matches!(package.provider, Provider::Mise { .. }))
     {
@@ -512,18 +542,59 @@ fn install_choice(ctx: &Context, choice: &InstallChoice) -> Result<Value> {
         None
     };
     match choice {
-        InstallChoice::Application(package) => install_selected(ctx, package, version.as_deref()),
-        InstallChoice::Skill(recipe) => Ok(report_install(
-            crate::skills::native_skills::install_recommended(ctx, (**recipe).clone())?,
-        )),
-        InstallChoice::PublicSkills(source) => {
-            let report = crate::skills::native_skills::install_repository(ctx, source)?;
-            if let Some(summary) = crate::output::skill_journey(&report) {
-                eprint!("{summary}");
-            }
+        InstallChoice::Application(package) => install_selected(ctx, &package, version.as_deref()),
+        InstallChoice::Skill(recipe) => Ok(report_install(native_skills::install_recommended(
+            ctx, *recipe,
+        )?)),
+        InstallChoice::PublicSkills(source, action) => public_skill_action(ctx, &source, action?),
+        InstallChoice::Plugin(offer) => plugin_install::run(ctx, &offer),
+    }
+}
+
+fn public_skill_action(ctx: &Context, source: &str, action: RepositoryAction) -> Result<Value> {
+    let show = |title: &str, report: &Value| {
+        if let Some(summary) = crate::output::skill_journey(report) {
+            panel(title, summary.trim_end());
+        }
+    };
+    let upgrade = || {
+        let report = native_skills::upgrade_repository(ctx, source)?;
+        show("更新结果", &report);
+        Ok::<_, Error>(report)
+    };
+    match action {
+        RepositoryAction::Install => {
+            let report = native_skills::install_repository(ctx, source)?;
+            show("安装结果", &report);
             Ok(report)
         }
-        InstallChoice::Plugin(offer) => plugin_install::run(ctx, offer),
+        RepositoryAction::Adopt => {
+            let report = native_skills::adopt_repository(ctx, source)?;
+            after_skill_adoption(report, |report| show("接管结果", report), upgrade)
+        }
+        RepositoryAction::Upgrade => upgrade(),
+    }
+}
+
+fn after_skill_adoption(
+    mut report: Value,
+    show: impl FnOnce(&Value),
+    upgrade: impl FnOnce() -> Result<Value>,
+) -> Result<Value> {
+    let complete = report["incomplete"] == false || report["status"] == "already-managed";
+    if complete {
+        report["target"] = Value::Null;
+    }
+    show(&report);
+    if !complete {
+        return Ok(report);
+    }
+    match upgrade() {
+        Err(error) if error.code == "cancelled" => {
+            terminal(TerminalLine::Note, "已保留当前版本。");
+            Ok(report)
+        }
+        result => result,
     }
 }
 
@@ -567,10 +638,10 @@ fn recommendation_keychain_hint(status: Option<&str>) -> Option<&'static str> {
     }
 }
 
-fn choose_label(mut labels: Vec<String>) -> Result<Option<usize>> {
+fn choose_label(mut labels: Vec<String>, prompt: &str) -> Result<Option<usize>> {
     let back = labels.len();
     labels.push("返回".into());
-    let chosen = crate::terminal::picker::select(&labels, back, false, |typed| {
+    let chosen = crate::terminal::picker::select(&labels, back, false, prompt, |typed| {
         typed
             .parse::<usize>()
             .ok()
@@ -581,7 +652,10 @@ fn choose_label(mut labels: Vec<String>) -> Result<Option<usize>> {
 }
 
 fn choice_index(count: usize) -> Result<Option<usize>> {
-    choose_label((1..=count).map(|index| format!("仓库 {index}")).collect())
+    choose_label(
+        (1..=count).map(|index| format!("仓库 {index}")).collect(),
+        "",
+    )
 }
 
 fn search_repository(ctx: &Context, data: &Value) -> Result<Option<String>> {
@@ -638,7 +712,7 @@ fn search_repository_using(
 enum InstallChoice {
     Application(Box<Package>),
     Skill(Box<crate::skills::rules::native_skills::Recipe>),
-    PublicSkills(String),
+    PublicSkills(String, Result<RepositoryAction>),
     Plugin(plugin_install::Offer),
 }
 
@@ -657,7 +731,16 @@ impl InstallChoice {
                 recipe.install_name, recipe.source.repository, recipe.source.commit
             ),
             Self::Plugin(offer) => offer.label(),
-            Self::PublicSkills(source) => format!("安装技能 · {source} · 用户共享目录"),
+            Self::PublicSkills(source, Ok(RepositoryAction::Install)) => {
+                format!("安装技能 · {source} · 用户共享目录")
+            }
+            Self::PublicSkills(_, Ok(RepositoryAction::Adopt)) => {
+                "接管已有技能 · 用户共享目录".into()
+            }
+            Self::PublicSkills(source, Ok(RepositoryAction::Upgrade)) => {
+                format!("检查并更新技能 · {source} · 用户共享目录")
+            }
+            Self::PublicSkills(_, Err(_)) => "查看共享技能的处理办法".into(),
         }
     }
 }
@@ -693,13 +776,17 @@ fn install_choices(
         }
     }
 
-    if !choices
-        .iter()
-        .any(|choice| matches!(choice, InstallChoice::Skill(_)))
-        && crate::skills::native_skills::has_supported_runner(ctx)
+    if native_skills::has_supported_runner(ctx)
         && let Some(source) = documented_skill_source(data)
     {
-        choices.push(InstallChoice::PublicSkills(source));
+        let action = native_skills::repository_action(ctx, &source);
+        if !matches!(action, Ok(RepositoryAction::Install))
+            || !choices
+                .iter()
+                .any(|choice| matches!(choice, InstallChoice::Skill(_)))
+        {
+            choices.push(InstallChoice::PublicSkills(source, action));
+        }
     }
     choices.extend(plugin_offers().into_iter().map(InstallChoice::Plugin));
     Ok(choices)

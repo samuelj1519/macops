@@ -804,7 +804,7 @@ fn plan_with_origin(
     origin: RecipeOrigin,
 ) -> Result<(Frozen, Plan)> {
     input_fence.verify()?;
-    let snapshot = disk::snapshot(ctx, &recipe)?;
+    let snapshot = checked_snapshot(ctx, &recipe)?;
     validate_action(ctx, &recipe, action, &snapshot)?;
     let current = package(ctx, &recipe, snapshot.rows.get(&recipe.install_name), None)?;
     let (receipts_before, previous_keys, receipts_witness) = owners(ctx, &current.id, action)?;
@@ -1045,7 +1045,9 @@ fn commit(
         }
         record.publish(&witness.path, bytes, || {
             store.verify_namespace()?;
-            frozen.snapshot.protected(ctx, &frozen.recipe)?;
+            if journal.plan.action == Action::Adopt {
+                frozen.snapshot.before(ctx, &frozen.recipe)?;
+            }
             if let Some(steps) = &progress.customization {
                 steps.validate(
                     progress.native_after.as_ref().ok_or_else(invalid)?,
@@ -1219,16 +1221,8 @@ fn prepare_execution(
     Ok((frozen, journal))
 }
 
-fn execute_with_origin(
-    ctx: &Context,
-    recipe: Recipe,
-    action: Action,
-    dry: bool,
-    yes: bool,
-    input_fence: InputFence,
-    origin: RecipeOrigin,
-) -> Result<Value> {
-    policy::validate(&recipe)?;
+fn checked_snapshot(ctx: &Context, recipe: &Recipe) -> Result<Snapshot> {
+    policy::validate(recipe)?;
     let target = disk::payload(ctx, &recipe.install_name)?;
     let package_root = recipe
         .runner
@@ -1257,14 +1251,25 @@ fn execute_with_origin(
         &paths,
     )?;
     disk::local_scope(ctx, &recipe.install_name, &paths)?;
+    disk::snapshot(ctx, recipe)
+}
+
+fn execute_with_origin(
+    ctx: &Context,
+    recipe: Recipe,
+    action: Action,
+    dry: bool,
+    yes: bool,
+    input_fence: InputFence,
+    origin: RecipeOrigin,
+) -> Result<Value> {
+    let snapshot = checked_snapshot(ctx, &recipe)?;
     if dry {
         let (_, book) = load_book(ctx)?;
-        let snapshot = disk::snapshot(ctx, &recipe)?;
         return Ok(
             json!({"backend":"rust","mode":"dry-run","recipe":recipe,"selectedPresent":snapshot.selected.present(),"configuredRecipes":book.recipes.len(),"resolution":"not-executed","persistentWrites":false,"networkInvoked":false}),
         );
     }
-    let snapshot = disk::snapshot(ctx, &recipe)?;
     validate_action(ctx, &recipe, action, &snapshot)?;
     if matches!(action, Action::Adopt | Action::Uninstall) {
         crate::operations::confirm(&format!("{action:?} {}", recipe.install_name), yes)?;
@@ -1914,6 +1919,13 @@ pub(crate) fn install_repository(ctx: &Context, source: &str) -> Result<Value> {
     journey::install(ctx, source, false, false)
 }
 
+pub(crate) use journey::{RepositoryAction, repository_action, upgrade_repository};
+
+pub(crate) fn adopt_repository(ctx: &Context, source: &str) -> Result<Value> {
+    let request = crate::skills::public_skill::Request::parse(source)?;
+    journey::adopt(ctx, request.repository.key(), false, false)
+}
+
 fn native_config_scope(ctx: &Context) -> Result<()> {
     if ctx.chezmoi.source.is_some()
         || ctx.chezmoi.destination.is_some()
@@ -1971,13 +1983,25 @@ fn upgrade(
     {
         return Ok(report);
     }
-    let mut recipes = selected_recipes(ctx, &selection)?.into_iter();
+    let recipes = selected_recipes(ctx, &selection)?;
+    run_upgrades(ctx, recipes, selection.revision.as_deref(), dry, yes)
+}
+
+fn run_upgrades(
+    ctx: &Context,
+    recipes: Vec<Recipe>,
+    revision: Option<&str>,
+    dry: bool,
+    yes: bool,
+) -> Result<Value> {
+    let mut recipes = recipes.into_iter();
     let single = recipes.len() == 1;
     let mut results = vec![];
     let mut incomplete = false;
     for recipe in recipes.by_ref() {
         let id = recipe.id.clone();
-        match upgrade_recipe(ctx, recipe, selection.revision.as_deref(), dry, yes) {
+        let name = recipe.install_name.clone();
+        match upgrade_recipe(ctx, recipe, revision, dry, yes) {
             Ok(result) => {
                 incomplete = !dry
                     && result["journal"]["phase"] != "succeeded"
@@ -1989,7 +2013,7 @@ fn upgrade(
             }
             Err(error) if single => return Err(error),
             Err(error) => {
-                results.push(json!({"recipe":id,"status":"unknown","error":error}));
+                results.push(json!({"recipe":id,"name":name,"status":"unknown","error":error}));
                 incomplete = true;
             }
         }
@@ -2001,9 +2025,12 @@ fn upgrade(
         && results
             .iter()
             .any(|result| result["journal"]["phase"] == "succeeded");
-    let unattempted: Vec<_> = recipes.map(|recipe| recipe.id).collect();
+    let (unattempted, unattempted_names): (Vec<_>, Vec<_>) = recipes
+        .map(|recipe| (recipe.id, recipe.install_name))
+        .unzip();
     Ok(
-        json!({"backend":"rust","results":results,"incomplete":incomplete,"partial":partial,"unattempted":unattempted}),
+        json!({"backend":"rust","results":results,"incomplete":incomplete,"partial":partial,
+        "unattempted":unattempted,"unattemptedNames":unattempted_names}),
     )
 }
 

@@ -1,4 +1,7 @@
-use super::{InputFence, Recipe, disk, execute, load_book, native_config_scope, policy};
+use super::{
+    InputFence, Recipe, checked_snapshot, disk, execute, load_book, native_config_scope, policy,
+    run_upgrades, validate_action, verify_managed_skill,
+};
 use crate::{
     context::Context,
     domain::Action,
@@ -10,7 +13,10 @@ use serde_json::{Value, json};
 pub(super) fn install(ctx: &Context, source: &str, dry: bool, yes: bool) -> Result<Value> {
     native_config_scope(ctx)?;
     let request = public_skill::Request::parse(source)?;
-    let mut recipes = request.discover(ctx)?;
+    let mut recipes =
+        crate::terminal::progress::during("查找仓库中可安装的技能", || {
+            request.discover(ctx)
+        })?;
     let (witness, raw) = disk::witness(&disk::lock_path(ctx))?;
     let rows = policy::registry(raw.as_deref())?;
     let (_, book) = load_book(ctx)?;
@@ -65,7 +71,7 @@ pub(super) fn install(ctx: &Context, source: &str, dry: bool, yes: bool) -> Resu
             .iter()
             .map(|item| item.install_name.clone())
             .collect::<Vec<_>>();
-        crate::terminal::picker::select(&labels, 0, true, |_| None)?
+        crate::terminal::picker::select(&labels, 0, true, "", |_| None)?
     };
     let mut selected: Vec<_> = selected
         .into_iter()
@@ -74,7 +80,7 @@ pub(super) fn install(ctx: &Context, source: &str, dry: bool, yes: bool) -> Resu
     if selected.is_empty() {
         return Err(Error::attention("cancelled", "已取消安装"));
     }
-    seal_runners(&mut selected)?;
+    crate::terminal::progress::during("核对安装工具", || seal_runners(&mut selected))?;
     let names = selected
         .iter()
         .map(|item| item.install_name.as_str())
@@ -166,7 +172,16 @@ fn batch(results: &[Value], incomplete: bool, remaining: impl Iterator<Item = Re
         "unattempted":remaining.map(|item|item.install_name).collect::<Vec<_>>()})
 }
 
-fn installed_selection(ctx: &Context, target: &str) -> Result<Option<(Vec<Recipe>, InputFence)>> {
+pub(super) struct InstalledSelection {
+    pub unowned: Vec<Recipe>,
+    pub managed: Vec<Recipe>,
+    fence: InputFence,
+}
+
+pub(super) fn installed_selection(
+    ctx: &Context,
+    target: &str,
+) -> Result<Option<InstalledSelection>> {
     let (witness, raw) = disk::witness(&disk::lock_path(ctx))?;
     let rows = policy::registry(raw.as_deref())?;
     let query = target
@@ -204,7 +219,8 @@ fn installed_selection(ctx: &Context, target: &str) -> Result<Option<(Vec<Recipe
         return Ok(None);
     }
     let (_, book) = load_book(ctx)?;
-    let mut recipes = vec![];
+    let mut unowned = vec![];
+    let mut managed = vec![];
     let mut runner = None;
     for (name, row) in matched {
         if let Some(entry) = book
@@ -225,7 +241,9 @@ fn installed_selection(ctx: &Context, target: &str) -> Result<Option<(Vec<Recipe
                 &disk::payload(ctx, name)?,
             )?)?;
             if super::owners(ctx, &installed, Action::Adopt)?.1.is_empty() {
-                recipes.push(entry.clone());
+                unowned.push(entry.clone());
+            } else {
+                managed.push(entry.clone());
             }
             continue;
         }
@@ -233,14 +251,15 @@ fn installed_selection(ctx: &Context, target: &str) -> Result<Option<(Vec<Recipe
             runner = Some(public_skill::runner(ctx)?);
         }
         let runner = runner.clone().ok_or_else(super::invalid)?;
-        recipes.push(public_skill::from_record(ctx, name, row, runner)?);
+        unowned.push(public_skill::from_record(ctx, name, row, runner)?);
     }
-    Ok(Some((
-        recipes,
-        InputFence {
+    Ok(Some(InstalledSelection {
+        unowned,
+        managed,
+        fence: InputFence {
             files: vec![witness],
         },
-    )))
+    }))
 }
 
 pub(super) fn adopt(ctx: &Context, target: &str, dry: bool, yes: bool) -> Result<Value> {
@@ -253,6 +272,79 @@ pub(super) fn adopt(ctx: &Context, target: &str, dry: bool, yes: bool) -> Result
     })
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum RepositoryAction {
+    Install,
+    Adopt,
+    Upgrade,
+}
+
+pub(crate) fn repository_action(ctx: &Context, source: &str) -> Result<RepositoryAction> {
+    let request = public_skill::Request::parse(source)?;
+    Ok(match installed_selection(ctx, request.repository.key())? {
+        None => RepositoryAction::Install,
+        Some(selection) if selection.unowned.is_empty() => RepositoryAction::Upgrade,
+        Some(_) => RepositoryAction::Adopt,
+    })
+}
+
+pub(crate) fn upgrade_repository(ctx: &Context, source: &str) -> Result<Value> {
+    upgrade_repository_using(ctx, source, |message| {
+        crate::operations::confirm(message, false)
+    })
+}
+
+pub(super) fn upgrade_repository_using(
+    ctx: &Context,
+    source: &str,
+    confirm: impl FnOnce(&str) -> Result<()>,
+) -> Result<Value> {
+    native_config_scope(ctx)?;
+    let request = public_skill::Request::parse(source)?;
+    let (commit, recipes, fence) =
+        crate::terminal::progress::during("核对目标版本和本机技能", || {
+            let selection = installed_selection(ctx, request.repository.key())?
+                .filter(|selection| selection.unowned.is_empty())
+                .ok_or_else(|| {
+                    Error::attention("plan_stale", "本机安装记录已改变。").with_guidance(
+                        "尚未开始更新。",
+                        format!("运行 mo recommend {} 重新选择。", request.repository.key()),
+                    )
+                })?;
+            let commit = request.resolve()?;
+            let mut changes = vec![];
+            for recipe in selection.managed {
+                verify_managed_skill(ctx, &recipe)?;
+                if !policy::generated(&recipe)
+                    || recipe.source.commit != commit.as_str()
+                    || recipe.source.tracking_ref.is_some()
+                {
+                    let snapshot = checked_snapshot(ctx, &recipe).map_err(scope_guidance)?;
+                    validate_action(ctx, &recipe, Action::Upgrade, &snapshot)?;
+                    changes.push(recipe);
+                }
+            }
+            Ok((commit, changes, selection.fence))
+        })?;
+    if recipes.is_empty() {
+        return Ok(json!({"skillAction":"upgrade","status":"up-to-date","source":source}));
+    }
+    let names = recipes
+        .iter()
+        .map(|recipe| recipe.install_name.as_str())
+        .collect::<Vec<_>>();
+    confirm(&format!(
+        "更新技能 · {source}\n技能　{}\n位置　{}",
+        names.join("、"),
+        ctx.home.join(".agents/skills").display()
+    ))?;
+    crate::operations::recover_before_write(ctx, None)?;
+    fence.verify()?;
+    let mut result = run_upgrades(ctx, recipes, Some(commit.as_str()), false, true)?;
+    result["skillAction"] = json!("upgrade");
+    Ok(result)
+}
+
 pub(super) fn try_adopt(
     ctx: &Context,
     target: &str,
@@ -260,7 +352,12 @@ pub(super) fn try_adopt(
     yes: bool,
     from_upgrade: bool,
 ) -> Result<Option<Value>> {
-    let Some((mut recipes, fence)) = installed_selection(ctx, target)? else {
+    let Some(InstalledSelection {
+        unowned: mut recipes,
+        fence,
+        ..
+    }) = installed_selection(ctx, target)?
+    else {
         return Ok(None);
     };
     if recipes.is_empty() {
@@ -276,13 +373,26 @@ pub(super) fn try_adopt(
         .first()
         .filter(|recipe| recipe.source.tracking_ref.is_none())
         .map(|recipe| recipe.source.repository.clone());
+    let preflight = || {
+        fence.verify()?;
+        for recipe in &recipes {
+            let snapshot = checked_snapshot(ctx, recipe).map_err(scope_guidance)?;
+            validate_action(ctx, recipe, Action::Adopt, &snapshot)?;
+        }
+        Ok(())
+    };
+    if dry {
+        preflight()?;
+    } else {
+        crate::terminal::progress::during("核对现有技能和安装位置", preflight)?;
+    }
     if dry {
         return Ok(Some(
             json!({"mode":"dry-run","skillAction":"adopt","skills":names,
             "directory":ctx.home.join(".agents/skills"),"persistentWrites":false}),
         ));
     }
-    seal_runners(&mut recipes)?;
+    crate::terminal::progress::during("核对安装工具", || seal_runners(&mut recipes))?;
     let note = if from_upgrade && pinned_repository.is_some() {
         "\n保留当前固定版本。接管后可以指定新版本。"
     } else if from_upgrade {
@@ -298,11 +408,29 @@ pub(super) fn try_adopt(
         ),
         yes,
     )?;
-    let mut report = run_members(ctx, recipes, Action::Adopt, &fence)?;
+    crate::operations::recover_before_write(ctx, None)?;
+    let mut report =
+        crate::terminal::progress::during_batch("保存技能的管理记录", || {
+            run_members(ctx, recipes, Action::Adopt, &fence)
+        })?;
     report["skillAction"] = json!("adopt");
     report["target"] = json!(target);
     if let Some(repository) = pinned_repository {
-        report["next"] = json!(format!("mo skill upgrade {repository}@版本"));
+        report["next"] = json!(format!("mo recommend {repository}"));
     }
     Ok(Some(report))
+}
+
+fn scope_guidance(error: Error) -> Error {
+    match error.code.as_str() {
+        "excluded_path" | "write_symlink_forbidden" => error.with_guidance(
+            "技能操作尚未开始。",
+            "先在 Agent 的设置中把技能目录设到可管理的位置，再重试。如果这个目录必须保留原样，请继续使用原安装工具。",
+        ),
+        "source_tree_changed" => error.with_guidance(
+            "技能操作尚未开始。",
+            "检查上面这个目录的权限和链接。也可以继续用原安装工具维护该技能。",
+        ),
+        _ => error,
+    }
 }

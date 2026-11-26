@@ -237,7 +237,7 @@ fn target_numbers(labels: &[String]) -> Result<Vec<usize>> {
             eprintln!("请输入列表里的编号。「新建单独配置」需要单独选择。");
         }
     }
-    let selected = crate::terminal::picker::select(labels, labels.len() - 1, true, |typed| {
+    let selected = crate::terminal::picker::select(labels, labels.len() - 1, true, "", |typed| {
         parse_target_numbers(typed, labels.len() - 1)
     })?;
     if selected.contains(&(labels.len() - 1)) {
@@ -520,7 +520,7 @@ fn confirm_initial_activation() -> Result<InitialActivation> {
         });
     }
     let labels = ["取消", "安装并启用", "安装后保持停用"].map(str::to_owned);
-    let selected = crate::terminal::picker::select(&labels, 0, false, |value| match value {
+    let selected = crate::terminal::picker::select(&labels, 0, false, "", |value| match value {
         "yes" => Some(vec![1]),
         "disabled" => Some(vec![2]),
         _ => None,

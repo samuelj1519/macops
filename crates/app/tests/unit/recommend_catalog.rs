@@ -314,6 +314,31 @@ fn repository_model_failure_or_empty_response_has_a_next_step() {
 }
 
 #[test]
+fn shared_skill_adoption_shows_its_result_before_update_and_stops_on_incomplete() -> TestResult {
+    use std::cell::Cell;
+
+    for incomplete in [false, true] {
+        let shown = Cell::new(false);
+        let checked_update = Cell::new(false);
+        let report = after_skill_adoption(
+            json!({"skillAction":"adopt","incomplete":incomplete,"target":"owner/repo"}),
+            |report| {
+                assert_eq!(report["incomplete"], incomplete);
+                shown.set(true);
+            },
+            || {
+                assert!(shown.get());
+                checked_update.set(true);
+                Err(Error::attention("cancelled", "fixture cancel"))
+            },
+        )?;
+        assert_eq!(checked_update.get(), !incomplete);
+        assert_eq!(report["skillAction"], "adopt");
+    }
+    Ok(())
+}
+
+#[test]
 fn verified_agent_offers_appear_as_recommendation_choices_in_order() -> TestResult {
     use clap::Parser as _;
 

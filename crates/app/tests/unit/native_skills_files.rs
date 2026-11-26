@@ -7,6 +7,26 @@ use std::{
 };
 
 #[test]
+fn protected_sibling_records_nested_links_without_accessing_their_targets() -> TestResult {
+    let temp = tempfile::tempdir_in("/private/tmp")?;
+    let skill = temp.path().join("sibling");
+    fs::create_dir(&skill)?;
+    let link = skill.join("localized.md");
+    let protected = Path::new("/Users").join("macops-fixture/job");
+    symlink(protected.join("original"), &link)?;
+    let witness = capture_protected(&skill)?;
+    witness.verify()?;
+    assert!(
+        capture(&skill).is_err(),
+        "a write target still excludes nested links"
+    );
+    fs::remove_file(&link)?;
+    symlink(protected.join("changed"), &link)?;
+    assert!(witness.verify().is_err());
+    Ok(())
+}
+
+#[test]
 fn private_commit_recovers_only_its_own_configuration_file_and_retains_mode() -> TestResult {
     let temp = tempfile::Builder::new().tempdir_in("/private/tmp")?;
     let managed = temp.path().join("managed");

@@ -1,3 +1,5 @@
+use super::presentation::{self, Tone, fit, paint};
+use crate::error::Result;
 use std::{
     cell::RefCell,
     io::{IsTerminal, Write},
@@ -7,27 +9,70 @@ use std::{
 };
 
 thread_local! {
-    static INSTALL_PROGRESS: RefCell<Option<Sender<&'static str>>> = const { RefCell::new(None) };
+    static INSTALL_PROGRESS: RefCell<Option<Sender<ProgressEvent>>> = const { RefCell::new(None) };
+}
+
+enum ProgressEvent {
+    Stage(&'static str),
+    Finished(bool),
 }
 
 pub(super) fn install_stage(text: &'static str) -> bool {
     INSTALL_PROGRESS.with_borrow(|sender| {
         sender
             .as_ref()
-            .is_some_and(|sender| sender.send(text).is_ok())
+            .is_some_and(|sender| sender.send(ProgressEvent::Stage(text)).is_ok())
     })
 }
 
-pub(crate) fn with_install_progress<T>(work: impl FnOnce() -> T) -> T {
+pub(crate) fn during<T>(label: &'static str, work: impl FnOnce() -> Result<T>) -> Result<T> {
+    during_checked(label, work, Result::is_ok)
+}
+
+pub(crate) fn during_batch(
+    label: &'static str,
+    work: impl FnOnce() -> Result<serde_json::Value>,
+) -> Result<serde_json::Value> {
+    during_checked(label, work, |result| {
+        result
+            .as_ref()
+            .is_ok_and(|value| value["incomplete"] == false)
+    })
+}
+
+fn during_checked<T>(
+    label: &'static str,
+    work: impl FnOnce() -> T,
+    succeeded: impl FnOnce(&T) -> bool,
+) -> T {
+    with_progress(
+        || {
+            install_stage(label);
+            work()
+        },
+        succeeded,
+    )
+}
+
+pub(crate) fn with_install_progress(
+    work: impl FnOnce() -> Result<serde_json::Value>,
+) -> Result<serde_json::Value> {
+    with_progress(work, |result| {
+        result
+            .as_ref()
+            .is_ok_and(|value| value.get("journal").unwrap_or(value)["phase"] == "succeeded")
+    })
+}
+
+fn with_progress<T>(work: impl FnOnce() -> T, succeeded: impl FnOnce(&T) -> bool) -> T {
     struct Reset;
     impl Drop for Reset {
         fn drop(&mut self) {
             INSTALL_PROGRESS.with_borrow_mut(Option::take);
         }
     }
-    if !std::io::stderr().is_terminal()
-        || std::env::var_os("TERM").is_none_or(|term| term == "dumb")
-        || std::env::args_os().any(|arg| arg == "--json" || arg == "--verbose")
+    if !presentation::interactive()
+        || std::env::args_os().any(|arg| arg == "--json" || arg == "--verbose" || arg == "-v")
         || INSTALL_PROGRESS.with_borrow(Option::is_some)
     {
         return work();
@@ -37,29 +82,54 @@ pub(crate) fn with_install_progress<T>(work: impl FnOnce() -> T) -> T {
         scope.spawn(move || draw_install_progress(&stages));
         INSTALL_PROGRESS.set(Some(sender));
         let _reset = Reset;
-        work()
+        let result = work();
+        INSTALL_PROGRESS.with_borrow(|sender| {
+            if let Some(sender) = sender {
+                let _ = sender.send(ProgressEvent::Finished(succeeded(&result)));
+            }
+        });
+        result
     })
 }
 
-fn draw_install_progress(stages: &mpsc::Receiver<&'static str>) {
-    let Ok(mut label) = stages.recv() else { return };
-    let frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+fn draw_install_progress(stages: &mpsc::Receiver<ProgressEvent>) {
+    let Ok(ProgressEvent::Stage(mut label)) = stages.recv() else {
+        return;
+    };
+    let color = presentation::color();
+    let frames = ["◒", "◐", "◓", "◑"];
     let mut frame = 0;
     loop {
-        eprint!("\r\x1b[2K  {}  {label}", frames[frame]);
-        match stages.recv_timeout(Duration::from_millis(120)) {
-            Ok(next) => {
-                eprint!("\r\x1b[2K  ·  {label}\n");
+        let shown = fit(label, presentation::columns().saturating_sub(6));
+        render_progress(frames[frame], Tone::Active, &shown, color, "");
+        match stages.recv_timeout(Duration::from_millis(100)) {
+            Ok(ProgressEvent::Stage(next)) => {
+                render_progress("◇", Tone::Success, &shown, color, "\n");
                 label = next;
                 frame = 0;
             }
             Err(RecvTimeoutError::Timeout) => frame = (frame + 1) % frames.len(),
+            Ok(ProgressEvent::Finished(success)) => {
+                let (symbol, tone) = if success {
+                    ("◇", Tone::Success)
+                } else {
+                    ("!", Tone::Warning)
+                };
+                render_progress(symbol, tone, &shown, color, "\n");
+                return;
+            }
             Err(RecvTimeoutError::Disconnected) => {
-                eprint!("\r\x1b[2K  ·  {label}\n");
+                render_progress("!", Tone::Warning, &shown, color, "\n");
                 return;
             }
         }
     }
+}
+
+fn render_progress(symbol: &str, tone: Tone, label: &str, color: bool, end: &str) {
+    let rail = paint("│", Tone::Muted, color);
+    let symbol = paint(symbol, tone, color);
+    eprint!("\r\x1b[2K{rail} {symbol}  {label}{end}");
 }
 
 pub(crate) struct LiveProgress {

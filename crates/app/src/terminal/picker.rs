@@ -1,3 +1,4 @@
+use super::presentation::{self, Tone, fit, paint};
 use crate::error::{Error, Result};
 use crossterm::{
     cursor::MoveUp,
@@ -21,6 +22,7 @@ pub(crate) fn select(
     labels: &[String],
     initial: usize,
     multiple: bool,
+    prompt: &str,
     shortcut: impl Fn(&str) -> Option<Vec<usize>>,
 ) -> Result<Vec<usize>> {
     if !std::io::stdin().is_terminal() {
@@ -49,19 +51,19 @@ pub(crate) fn select(
     }
     let _restore = RawInput(restore);
     let mut output = std::io::stderr();
+    let view = View {
+        rows: size,
+        columns: usize::from(width.saturating_sub(1)),
+        multiple,
+        prompt,
+        color: presentation::color(),
+    };
     let result = loop {
         if redraw {
             if showing {
                 clear(&mut output, size)?;
             }
-            draw(
-                &mut output,
-                labels,
-                &marked,
-                active,
-                (size, width),
-                multiple,
-            )?;
+            draw(&mut output, labels, &marked, active, &view)?;
             showing = true;
             redraw = false;
         }
@@ -146,37 +148,99 @@ fn clear(output: &mut impl std::io::Write, size: usize) -> std::io::Result<()> {
     )
 }
 
+struct View<'a> {
+    rows: usize,
+    columns: usize,
+    multiple: bool,
+    prompt: &'a str,
+    color: bool,
+}
+
 fn draw(
     output: &mut impl std::io::Write,
     labels: &[String],
     marked: &[usize],
     active: usize,
-    (size, width): (usize, u16),
-    multiple: bool,
+    view: &View<'_>,
 ) -> std::io::Result<()> {
+    let View {
+        rows: size,
+        columns: width,
+        multiple,
+        prompt,
+        color,
+    } = *view;
     let start = active.saturating_sub(size / 2).min(labels.len() - size);
-    let limit = usize::from(width.saturating_sub(7) / 2).max(6);
+    let rail = paint("│", Tone::Muted, color);
     for (index, label) in labels.iter().enumerate().skip(start).take(size) {
-        let cursor = if active == index { '›' } else { ' ' };
-        let check = if multiple {
-            if marked.contains(&index) {
-                "● "
-            } else {
-                "○ "
-            }
+        let cursor = if active == index {
+            paint("›", Tone::Active, color)
         } else {
-            ""
+            " ".into()
         };
-        let label = crate::output::sanitize(label, false);
-        let text: String = label.chars().take(limit).collect();
-        let end = if text.len() < label.len() { "…" } else { "" };
-        write!(output, "  {cursor} {check}{text}{end}\r\n")?;
+        let (glyph, tone) = match (multiple, marked.contains(&index), active == index) {
+            (true, true, _) => ("●", Tone::Success),
+            (false, _, true) => ("●", Tone::Active),
+            (_, _, true) => ("○", Tone::Active),
+            _ => ("○", Tone::Muted),
+        };
+        let check = paint(glyph, tone, color);
+        let label = fit(
+            &crate::output::sanitize(label, false),
+            width.saturating_sub(6),
+        );
+        let text = paint(&label, Tone::Active, color && active == index);
+        write!(output, "{rail} {cursor} {check} {text}\r\n")?;
     }
     let hint = if multiple {
-        "↑/↓ 移动 · 空格多选 · Enter 确定 · Esc 返回"
+        if marked.is_empty() {
+            "↑/↓ 移动 · 空格多选 · Enter 选当前 · Esc 返回".into()
+        } else {
+            format!(
+                "↑/↓ 移动 · 空格多选 · Enter 确定 {} 项 · Esc 返回",
+                marked.len()
+            )
+        }
     } else {
-        "↑/↓ 选择 · Enter 确定 · Esc 返回"
+        "↑/↓ 选择 · Enter 确定 · Esc 返回".into()
     };
-    write!(output, "  {hint}\r\n")?;
+    let hint = if prompt.is_empty() {
+        hint
+    } else {
+        format!("{prompt} · {hint}")
+    };
+    let hint = fit(&hint, width.saturating_sub(2));
+    write!(
+        output,
+        "{} {}\r\n",
+        paint("╰", Tone::Muted, color),
+        paint(&hint, Tone::Muted, color)
+    )?;
     output.flush()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::TestResult;
+
+    #[test]
+    fn multi_picker_distinguishes_focus_and_marked_rows_independently() -> TestResult {
+        let labels = ["选中".into(), "聚焦".into(), "未选".into()];
+        let mut bytes = vec![];
+        let view = View {
+            rows: 3,
+            columns: 70,
+            multiple: true,
+            prompt: "选择技能",
+            color: true,
+        };
+        draw(&mut bytes, &labels, &[0], 1, &view)?;
+        let output = String::from_utf8(bytes)?;
+        assert!(output.contains("\x1b[1;32m●\x1b[0m 选中"));
+        assert!(output.contains("\x1b[1;36m›\x1b[0m \x1b[1;36m○"));
+        assert!(output.contains("\x1b[2m○\x1b[0m 未选"));
+        assert!(output.contains("确定 1 项"));
+        Ok(())
+    }
 }

@@ -228,6 +228,100 @@ fn skill_adoption_by_repository_uses_local_evidence_without_running_the_installe
     Ok(())
 }
 
+#[test]
+fn a_link_in_another_skill_does_not_block_adoption_or_update() -> TestResult {
+    let f = Fixture::new()?;
+    native_skill_fixture(&f, &["demo", "translation"])?;
+    public_skill_runner(&f)?;
+    let lock = f.home.join(".agents/.skill-lock.json");
+    let mut rows: serde_json::Value = serde_json::from_slice(&fs::read(&lock)?)?;
+    rows["skills"]["translation"]["source"] = json!("another/kit");
+    rows["skills"]["translation"]["sourceUrl"] = json!("https://github.com/another/kit");
+    write_json(&lock, &rows)?;
+    let original = fs::read(&lock)?;
+    let link = f.home.join(".agents/skills/translation/SKILL.localized.md");
+    let destination = PathBuf::from("/Users").join("macops-fixture/job/localization.md");
+    symlink(&destination, &link)?;
+
+    let (out, preview) = f.run(&["skill", "upgrade", "owner/repo", "--dry-run"])?;
+    assert_code(&out, 0);
+    assert_eq!(preview["data"]["skills"], json!(["demo"]));
+    assert_eq!(out.stderr, [] as [u8; 0]);
+    assert!(!f.file("state").exists());
+
+    let (out, result) = f.run(&["skill", "upgrade", "owner/repo", "--yes"])?;
+    assert_code(&out, 0);
+    assert_eq!(result["data"]["results"][0]["nativeInvoked"], false);
+    assert_eq!(fs::read(&lock)?, original);
+    assert!(!f.home.join("native-calls.jsonl").exists());
+
+    let (out, upgraded) = f.run(&[
+        "skill",
+        "upgrade",
+        "owner/repo",
+        "--revision",
+        &"b".repeat(40),
+        "--yes",
+    ])?;
+    assert_code(&out, 0);
+    assert_eq!(
+        upgraded["data"]["results"][0]["journal"]["phase"],
+        "succeeded"
+    );
+    let after: serde_json::Value = serde_json::from_slice(&fs::read(lock)?)?;
+    assert_eq!(
+        after["skills"]["translation"],
+        rows["skills"]["translation"]
+    );
+    assert_eq!(fs::read_link(link)?, destination);
+    Ok(())
+}
+
+#[test]
+fn skill_preflight_explains_an_excluded_agent_directory_before_confirmation() -> TestResult {
+    let f = Fixture::new()?;
+    native_skill_fixture(&f, &["demo"])?;
+    public_skill_runner(&f)?;
+    let profile = f.home.join(".claude-blocked");
+    let destination = PathBuf::from("/Users").join("macops-fixture/job");
+    symlink(&destination, &profile)?;
+
+    for args in [
+        &["skill", "upgrade", "owner/repo", "--dry-run"][..],
+        &["skill", "upgrade", "owner/repo"][..],
+    ] {
+        let out = plain(&f, args)?;
+        assert_code(&out, 1);
+        let text = String::from_utf8(out.stderr)?;
+        assert!(text.contains("技能操作尚未开始"));
+        assert!(text.contains(".claude-blocked"));
+        assert!(text.contains(destination.to_str().ok_or("fixture path")?));
+        assert!(text.contains("正确用法"));
+        assert!(!text.contains("确认操作"));
+    }
+    assert!(!f.file("state").exists());
+    Ok(())
+}
+
+#[test]
+fn skill_action_panels_and_picker_work_with_and_without_color() -> TestResult {
+    let f = Fixture::new()?;
+    native_skill_fixture(&f, &["demo"])?;
+    public_skill_runner(&f)?;
+    for scenario in ["skill-adopt-style", "skill-adopt-no-color"] {
+        chezmoi_native::run_browser_pty(
+            &f,
+            &["skill", "upgrade", "owner/repo"],
+            scenario,
+            &f.home,
+            "68",
+            "3",
+        )?;
+        assert!(!f.file("state").exists());
+    }
+    Ok(())
+}
+
 fn public_skill_runner(f: &Fixture) -> Result<PathBuf, Box<dyn std::error::Error>> {
     use std::os::unix::fs::PermissionsExt as _;
     let cache = f.home.join(".npm/_npx/fixture/node_modules");

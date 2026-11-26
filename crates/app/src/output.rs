@@ -710,7 +710,7 @@ fn skill_summary(command: &SkillCmd, data: &Value) -> Option<String> {
                 for source in repositories {
                     let _ = writeln!(
                         text,
-                        "更新　mo skill upgrade {}@版本",
+                        "查看其他版本　mo recommend {}",
                         sanitize(source, false)
                     );
                 }
@@ -857,11 +857,15 @@ pub(crate) fn skill_journey(data: &Value) -> Option<String> {
     let (title, done) = match data["skillAction"].as_str()? {
         "install" => ("安装技能", "已安装并接管"),
         "adopt" => ("接管技能", "已接管，保留现有技能文件"),
+        "upgrade" => ("更新技能", "已更新"),
         _ => return None,
     };
     let mut text = String::new();
     if data["status"] == "already-managed" {
         return Some("这些技能已经接管。可以直接升级。\n".into());
+    }
+    if data["status"] == "up-to-date" {
+        return Some("这些技能已是所选版本。\n".into());
     }
     if data["mode"] == "dry-run" {
         let _ = writeln!(text, "{title} · 预览");
@@ -906,7 +910,9 @@ pub(crate) fn skill_journey(data: &Value) -> Option<String> {
         }
     }
     if data["incomplete"] == true {
-        if let Some(items) = data["unattempted"]
+        if let Some(items) = data
+            .get("unattemptedNames")
+            .unwrap_or(&data["unattempted"])
             .as_array()
             .filter(|items| !items.is_empty())
         {

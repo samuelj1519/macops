@@ -20,12 +20,17 @@ original = termios.tcgetattr(writer)
 capture = bytearray()
 
 
+environment = dict(os.environ, TERM="xterm-256color")
+if scenario == "skill-adopt-style":
+    environment.pop("NO_COLOR", None)
+elif scenario == "skill-adopt-no-color":
+    environment["NO_COLOR"] = "1"
 process = subprocess.Popen(
     command,
     stdin=writer,
     stdout=writer,
     stderr=writer,
-    env=dict(os.environ, TERM="xterm-256color"),
+    env=environment,
 )
 
 
@@ -61,7 +66,26 @@ def type_key(key):
 
 
 try:
-    if scenario == "native-progress":
+    if scenario in ("skill-adopt-style", "skill-adopt-no-color"):
+        expect("◒")
+        expect("◇")
+        expect("╭─")
+        expect("确认操作")
+        expect("╰─")
+        expect("● 取消")
+        expect("○ 确认执行")
+        if scenario == "skill-adopt-style":
+            expect("\x1b[1;36m●")
+            expect("\x1b[1;32m◇")
+        else:
+            assert not re.search(rb"\x1b\[[0-9;]*m", capture)
+        offset = type_key(b"\x1b[B")
+        expect("● 确认执行", offset)
+        offset = type_key(b"\x1b[A")
+        expect("● 取消", offset)
+        offset = type_key(b"\r")
+        expect("已取消", offset)
+    elif scenario == "native-progress":
         expect("fixture stdout progress")
         expect("fixture stderr progress")
         assert process.poll() is None
@@ -681,7 +705,7 @@ try:
             offset = type_key(b"s")
             expect("synthetic-source-content", offset)
         type_key(b"q")
-    if scenario not in ("market-json", "migration-blocked") and not scenario.startswith(("setup-", "recommend-", "native-progress")):
+    if scenario not in ("market-json", "migration-blocked") and not scenario.startswith(("setup-", "recommend-", "native-progress", "skill-adopt-")):
         expect("\x1b[?1049l")
     deadline = time.monotonic() + 8
     while process.poll() is None and time.monotonic() < deadline:
