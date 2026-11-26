@@ -66,7 +66,10 @@ fn evidence(
 ) -> crate::error::Result<NpmEvidence> {
     Ok(NpmEvidence {
         kind: NpmQueryKind::LocalV1,
-        namespace: crate::policy::targets::npm_id(&query.namespace.canonical_prefix, &query.name)?,
+        namespace: crate::policy::catalog::targets::npm_id(
+            &query.namespace.canonical_prefix,
+            &query.name,
+        )?,
         canonical_prefix: query.namespace.canonical_prefix.clone(),
         prefix_identity,
         fingerprint: "a".repeat(64),
@@ -115,7 +118,7 @@ fn npm_manifest_has_strict_bounded_identity_and_never_exposes_raw_errors() -> Te
 #[test]
 fn local_query_binding_rejects_mismatched_identity_even_with_recomputed_hash() -> TestResult {
     let initial = typed_install()?;
-    crate::policy::state::validate_journal(&initial)?;
+    crate::policy::operation::state::validate_journal(&initial)?;
     for field in [
         "prefix",
         "name",
@@ -179,7 +182,7 @@ fn local_query_binding_rejects_mismatched_identity_even_with_recomputed_hash() -
         bad.plan.recipe_sha256 = fingerprint(&bad.plan.package)?;
         bad.plan_sha256 = fingerprint(&bad.plan)?;
         assert!(
-            crate::policy::state::validate_journal(&bad).is_err(),
+            crate::policy::operation::state::validate_journal(&bad).is_err(),
             "{field}"
         );
     }
@@ -470,8 +473,13 @@ fn unrepresentable_prefixes_are_rejected_in_binding_and_commit() -> TestResult {
     };
     assert!(committed_install_query(&initial, &receipt).is_err());
     assert!(
-        crate::policy::state::commit_receipt(&mut receipts, &initial, receipt.observation, 1)
-            .is_err()
+        crate::policy::operation::state::commit_receipt(
+            &mut receipts,
+            &initial,
+            receipt.observation,
+            1
+        )
+        .is_err()
     );
     assert!(receipts.installations.is_empty());
     let mut receipt = Receipt {
@@ -495,7 +503,10 @@ fn unrepresentable_prefixes_are_rejected_in_binding_and_commit() -> TestResult {
     receipts
         .installations
         .insert(initial.plan.package.id.clone(), receipt);
-    assert!(crate::policy::state::commit_receipt(&mut receipts, &initial, observation, 2).is_err());
+    assert!(
+        crate::policy::operation::state::commit_receipt(&mut receipts, &initial, observation, 2)
+            .is_err()
+    );
     Ok(())
 }
 
@@ -554,7 +565,7 @@ fn native_observer_identity_and_alias_path_are_cross_checked() -> TestResult {
         name: query.name.clone(),
     };
     plan.package.id =
-        crate::policy::targets::npm_id(&query.namespace.canonical_prefix, &query.name)?;
+        crate::policy::catalog::targets::npm_id(&query.namespace.canonical_prefix, &query.name)?;
     plan.action = Action::Adopt;
     plan.command = None;
     plan.before = Observation::NativePackage {
@@ -1064,7 +1075,7 @@ fn npm_authorized_journal_and_config_bindings_reject_tampering() -> TestResult {
     wrong_home.home = "/other/home".into();
     wrong_home.scope.home = "/other/home".into();
     wrong_home.scope_sha256 = fingerprint(&wrong_home.scope)?;
-    assert!(crate::policy::state::validate_journal(&wrong_home).is_err());
+    assert!(crate::policy::operation::state::validate_journal(&wrong_home).is_err());
 
     let mut short_auth_cmd = j.plan.clone();
     if let Some(c) = &mut short_auth_cmd.command {
@@ -1231,7 +1242,7 @@ fn npm_recipe_binding_intent_requires_a_verified_local_adoption() -> TestResult 
         if change == "digest" {
             bad.plan.recipe_sha256 = fingerprint(&bad.plan.package)?;
             bad.plan_sha256 = fingerprint(&bad.plan)?;
-            let error = crate::policy::state::validate_journal(&bad)
+            let error = crate::policy::operation::state::validate_journal(&bad)
                 .err()
                 .ok_or("journal accepted invalid binding proof")?;
             assert_eq!(error.code, "invalid_npm_plan");

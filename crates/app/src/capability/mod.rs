@@ -7,4 +7,5 @@ pub(crate) mod capability_tx;
 pub(crate) mod invocation_inventory;
 pub(crate) mod link_inventory;
 pub(crate) mod resource_capabilities;
+pub(crate) mod rules;
 pub(crate) mod scoped_files;

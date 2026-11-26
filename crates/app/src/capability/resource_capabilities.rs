@@ -6,7 +6,7 @@ use crate::{
     },
     error::{Error, Result},
     platform::fs as paths,
-    policy::resources as policy,
+    policy::catalog::resources as policy,
 };
 use std::{collections::BTreeMap, path::Path};
 
@@ -240,11 +240,11 @@ fn apply_receipts(
             id.clone()
         };
         let current = crate::catalog::inventory::observe(ctx, &receipt.package);
-        let base = crate::policy::targets::baseline(&receipt.observation, current);
+        let base = crate::policy::catalog::targets::baseline(&receipt.observation, current);
         if base.comparison == crate::domain::resource::Comparison::Unknown
             && let Some(fs) = reports.iter_mut().find(|r| r.source == "skill-deployments")
         {
-            crate::policy::chezmoi::issue(
+            crate::config::rules::chezmoi::issue(
                 fs,
                 CoverageState::Invalid,
                 "adopted_capability_unobserved".into(),
@@ -358,7 +358,7 @@ fn lock(
             ),
         )?;
         let key = if project.is_none() {
-            crate::policy::native_skills::installation_id(&paths::read_path(&target)?)?
+            crate::skills::rules::native_skills::installation_id(&paths::read_path(&target)?)?
         } else {
             legacy_key.clone()
         };
@@ -768,7 +768,10 @@ fn codex(
                         }
                     }
                 }
-                let key = crate::policy::capability_local::codex_capability_id(&profile.id, &name)?;
+                let key = crate::capability::rules::capability_local::codex_capability_id(
+                    &profile.id,
+                    &name,
+                )?;
                 resources.insert(
                     key.clone(),
                     Resource {

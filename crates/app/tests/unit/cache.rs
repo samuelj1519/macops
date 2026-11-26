@@ -82,7 +82,7 @@ fn cleanup_fixture()
         schema_version: 1,
         packages: vec![],
     };
-    crate::policy::catalogue::add_managers(&ctx.cache, &mut catalog);
+    crate::policy::catalog::catalogue::add_managers(&ctx.cache, &mut catalog);
     let package = catalog.select("macops:cache")?.clone();
     Ok((tmp, ctx, package))
 }
@@ -114,10 +114,10 @@ fn cache_cleanup_clears_its_references_and_deletes_only_present_owned_content() 
         fs::write(index.join("keep.txt"), b"opaque index neighbor")?;
         fs::write(ctx.cache.join("keep.txt"), b"opaque cache neighbor")?;
         let mut book = registry.book(&namespace.path, &namespace.identity, &namespace.key);
-        assert!(crate::policy::cache::register_current(
+        assert!(crate::policy::catalog::cache::register_current(
             &mut book, &owned, true
         ));
-        assert!(!crate::policy::cache::register_current(
+        assert!(!crate::policy::catalog::cache::register_current(
             &mut book,
             &borrowed_hash,
             false
@@ -175,7 +175,7 @@ fn copied_cache_directory_has_no_cleanup_authority_even_with_the_original_marker
     assert!(created);
     let name = format!("{owned}.json");
     let mut book = registry.book(&namespace.path, &namespace.identity, &namespace.key);
-    assert!(crate::policy::cache::register_current(
+    assert!(crate::policy::catalog::cache::register_current(
         &mut book, &owned, true
     ));
     registry.scopes.insert(namespace.key, book);

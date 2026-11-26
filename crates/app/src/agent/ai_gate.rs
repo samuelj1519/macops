@@ -1,11 +1,11 @@
 use crate::{
     agent::ai_payload::Evidence,
+    agent::ai_policy as policy,
     context::Context,
     domain::{CommandSpec, Scope},
     error::{Error, Result},
     platform::fs::{self as paths, Directory},
     platform::process,
-    policy::ai as policy,
 };
 use std::{
     ffi::OsStr,
@@ -48,7 +48,10 @@ pub fn version(ctx: &Context, program: &Path, tool: &str) -> Result<String> {
 }
 
 pub fn managed_version(ctx: &Context, mise: &Path, tool: &str, target: &str) -> Result<String> {
-    let spec = format!("{}@{target}", crate::policy::config_tx::ai_mise_spec(tool)?);
+    let spec = format!(
+        "{}@{target}",
+        crate::config::rules::config_tx::ai_mise_spec(tool)?
+    );
     let (root, binary) = installed(ctx, mise, &spec, policy::binary(tool)?)?;
     let mut evidence = Evidence::default();
     evidence.tree(&root)?;
@@ -139,7 +142,10 @@ fn dependency(package: &Path, install: &Path, name: &str) -> Result<PathBuf> {
 }
 
 pub fn payload(ctx: &Context, mise: &Path, tool: &str, target: &str) -> Result<Evidence> {
-    let spec = format!("{}@{target}", crate::policy::config_tx::ai_mise_spec(tool)?);
+    let spec = format!(
+        "{}@{target}",
+        crate::config::rules::config_tx::ai_mise_spec(tool)?
+    );
     let (root, binary) = installed(ctx, mise, &spec, policy::binary(tool)?)?;
     let mut evidence = Evidence::default();
     evidence.tree(&root)?;

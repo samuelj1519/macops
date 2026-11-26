@@ -198,7 +198,7 @@ fn ownership_projection_keeps_unidentifiable_nodes_and_checks_empty_ast_containe
 }
 #[test]
 fn pruning_rejects_invalid_responsibility_and_preserves_parent_comments() -> TestResult {
-    use crate::policy::{profile_fields::ParentRecord, profile_registry::Parent};
+    use crate::policy::profile::{profile_fields::ParentRecord, profile_registry::Parent};
     let missing = ParentRecord::capture(ParentState::Missing);
     let parents = BTreeMap::from([
         (Parent::Skills, missing.clone()),
@@ -254,7 +254,7 @@ fn reviewer_empty_config_array_inner_comments_survive_conversion() {
 }
 #[test]
 fn reviewer_empty_config_array_inner_comments_survive_pruning() -> TestResult {
-    use crate::policy::{profile_fields::ParentRecord, profile_registry::Parent};
+    use crate::policy::profile::{profile_fields::ParentRecord, profile_registry::Parent};
     let raw = b"model='x'\n[skills]\nconfig = [\n  # user's inner empty-array note\n]\n[other]\ntoken='private'\n";
     let missing = ParentRecord::capture(ParentState::Missing);
     let parents = BTreeMap::from([

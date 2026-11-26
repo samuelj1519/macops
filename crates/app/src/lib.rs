@@ -899,7 +899,7 @@ type NativeAfter = fn(
 ) -> error::Result<()>;
 
 fn native_callbacks(journal: &domain::Journal) -> error::Result<(NativeGuard, NativeAfter)> {
-    if policy::chezmoi_native::is_native(&journal.plan) {
+    if config::rules::chezmoi_native::is_native(&journal.plan) {
         Ok((chezmoi_native::worker_guard, chezmoi_native::worker_after))
     } else if codex_install::is_install(journal) {
         Ok((codex_install::worker_guard, codex_install::worker_after))
@@ -1090,7 +1090,7 @@ fn upgrade_all(
         .filter(|package| {
             matches!(package.kind, Kind::App | Kind::Cli | Kind::Runtime)
                 && (matches!(package.provider, Provider::BrewFormula { .. })
-                    || policy::commands::available_query(&ctx.home, package).is_ok())
+                    || policy::operation::commands::available_query(&ctx.home, package).is_ok())
         })
         .partition(|package| package.exact_version_required);
     let (native, indexed): (Vec<_>, Vec<_>) = candidates
@@ -1286,7 +1286,7 @@ fn run_application(
                 && key.starts_with("application:")
             {
                 let resolved = target::resolve(ctx, key)?;
-                if policy::uv_local::is_uv(&resolved.provider) {
+                if software::rules::uv_local::is_uv(&resolved.provider) {
                     return updates::update(ctx, &[&resolved], cli.dry_run);
                 }
             }
@@ -1625,7 +1625,7 @@ fn dispatch(cli: &cli::Cli) -> ExitCode {
                 }
                 return ExitCode::from(code);
             }
-            let data = policy::brew::public_value(&data);
+            let data = software::rules::brew::public_value(&data);
             let value = json!({"schemaVersion":1,"status":if code==0 {"ok"} else {"attention"},"data":data,"warnings":warnings});
             let rendered = if cli.json {
                 emit(&value)

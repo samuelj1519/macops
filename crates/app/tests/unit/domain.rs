@@ -128,7 +128,7 @@ fn legacy_scope_serialization_stays_identical_and_service_kind_is_checked() -> T
     let scope: Scope = serde_json::from_str(old)?;
     assert!(scope.service_identity.is_none());
     assert_eq!(serde_json::to_string(&scope)?, old);
-    let mut p = crate::policy::service::package();
+    let mut p = crate::software::rules::service::package();
     let validate = |p: Package| {
         Catalog {
             schema_version: 1,
@@ -149,7 +149,7 @@ fn legacy_scope_serialization_stays_identical_and_service_kind_is_checked() -> T
         synchronous: true,
     };
     assert!(validate(p).is_err());
-    let mut p = crate::policy::service::package();
+    let mut p = crate::software::rules::service::package();
     p.provider = Provider::Service {
         formula: "other".into(),
     };

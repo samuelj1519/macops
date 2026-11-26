@@ -223,7 +223,7 @@ fn verify_installation(item: &PublishedProfile, profile: &Directory) -> Result<(
         &query.native_id,
         expected.configured_enabled.ok_or_else(stale)?,
     )?;
-    let registration = crate::policy::capability_local::parse_codex_record(
+    let registration = crate::capability::rules::capability_local::parse_codex_record(
         &receipt.package.id,
         &query.record.requested,
         &query.payload.requested,

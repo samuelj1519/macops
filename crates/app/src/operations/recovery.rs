@@ -7,7 +7,7 @@ use crate::{
     domain::{Action, Provider, fingerprint},
     error::{Error, Result},
     platform::{fs as paths, process},
-    policy::state::Recovery,
+    policy::operation::state::Recovery,
 };
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
@@ -21,7 +21,7 @@ fn recover_owned(
 ) -> Result<Option<Value>> {
     let result = if crate::agent::plugin_target::is_publication(journal) {
         crate::agent::plugin_target::recover(ctx, store, journal, resolve_failed, yes)?
-    } else if crate::policy::chezmoi_native::is_native(&journal.plan) {
+    } else if crate::config::rules::chezmoi_native::is_native(&journal.plan) {
         crate::config::chezmoi_native::recover(ctx, store, journal, resolve_failed, yes)?
     } else if crate::skills::native_skills::is_native(journal) {
         crate::skills::native_skills::recover(ctx, store, journal, resolve_failed, yes)?
@@ -162,8 +162,8 @@ fn recover_before_write_with(
     approve: impl FnOnce(&Journal) -> Result<()>,
     accepts: impl FnOnce(&Journal) -> Result<bool>,
 ) -> Result<Option<Recovered>> {
-    let Some(original) =
-        store::active(ctx)?.filter(|journal| crate::policy::state::pending(journal.phase))
+    let Some(original) = store::active(ctx)?
+        .filter(|journal| crate::policy::operation::state::pending(journal.phase))
     else {
         return Ok(None);
     };
@@ -171,7 +171,7 @@ fn recover_before_write_with(
     let blocked =
         |reason: &str| Error::attention("recovery_required", format!("还没开始新操作。\n{reason}"));
     let scoped;
-    let ctx = if crate::policy::service::is_control(original.plan.action) {
+    let ctx = if crate::software::rules::service::is_control(original.plan.action) {
         scoped = crate::operations::identity::service_context(ctx)?;
         &scoped
     } else {
@@ -238,7 +238,7 @@ fn recover_before_write_with(
     let active = Store::read::<Journal>(&store.root, "active.json")?
         .ok_or_else(|| blocked("没能确认上一次操作是否结束。请用 mo history 查看记录。"))?;
     store::validate_journal(&active)?;
-    if crate::policy::state::pending(active.phase) {
+    if crate::policy::operation::state::pending(active.phase) {
         let reason = if result["recoveryBlocker"] == "claude_profile_changed" {
             "Claude 设置后来有改动。请先确认要保留哪份设置。"
         } else {
@@ -341,7 +341,7 @@ impl Followups {
     }
 
     fn state(&self, journal: &Journal) -> RecoveryState {
-        if crate::policy::state::pending(journal.phase) {
+        if crate::policy::operation::state::pending(journal.phase) {
             return RecoveryState::Pending;
         }
         if journal.phase != Phase::Succeeded {
@@ -656,7 +656,7 @@ fn recover_locked(
         && journal.process_group.is_none()
         && journal.plan.action == Action::Adopt
     {
-        crate::policy::state::adopt_was_committed(
+        crate::policy::operation::state::adopt_was_committed(
             &journal,
             store
                 .receipts()?
@@ -666,7 +666,7 @@ fn recover_locked(
     } else {
         false
     };
-    match crate::policy::state::recovery(
+    match crate::policy::operation::state::recovery(
         &journal,
         &ctx.state,
         journal.process_group.is_some_and(process::group_alive),
@@ -694,7 +694,7 @@ fn recover_locked(
                     .ok_or_else(|| Error::new("invalid_uv_plan", "缺少 uv 查询"))?;
                 let observed =
                     providers::observe_query(&journal.plan.package, query, &journal.scope, false)?;
-                crate::policy::state::require_fresh_plan(
+                crate::policy::operation::state::require_fresh_plan(
                     &journal.plan,
                     &journal.plan.package,
                     &observed,

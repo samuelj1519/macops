@@ -161,7 +161,7 @@ fn versioned_package(spec: &str) -> Option<(&str, Option<&str>)> {
     } else {
         (spec, None)
     };
-    crate::policy::parsers::registry_name(package).then_some((package, version))
+    crate::policy::operation::parsers::registry_name(package).then_some((package, version))
 }
 
 fn parse(line: &str) -> Option<Candidate> {

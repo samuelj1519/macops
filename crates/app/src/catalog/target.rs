@@ -4,7 +4,7 @@ use crate::{
     domain::{Kind, NpmContract, Observation, Package, Provider, Receipts},
     error::{Error, Result},
     platform::fs as paths,
-    policy::targets,
+    policy::catalog::targets,
 };
 use std::{collections::BTreeMap, path::Path};
 
@@ -125,7 +125,7 @@ fn resolve_with(ctx: &Context, key: &str, discover_brew: bool, lookup: Lookup) -
 }
 
 fn from_declaration(ctx: &Context, package: &Package) -> Result<Package> {
-    if crate::policy::uv_local::is_uv(&package.provider) {
+    if crate::software::rules::uv_local::is_uv(&package.provider) {
         return crate::software::uv_ownership::declared(ctx, package);
     }
     Ok(package.clone())
@@ -179,7 +179,7 @@ fn from_resource(
 
 fn observed_npm(ctx: &Context, scope: &str, native_id: &str) -> Result<Package> {
     let prefix = paths::read_path(Path::new(scope))?;
-    if !crate::policy::parsers::registry_name(native_id) {
+    if !crate::policy::operation::parsers::registry_name(native_id) {
         return Err(Error::new("invalid_native_package", "npm名称无效"));
     }
     let identity = targets::npm_id(&prefix, native_id)?;
@@ -201,7 +201,7 @@ fn observed_npm(ctx: &Context, scope: &str, native_id: &str) -> Result<Package> 
 }
 
 pub fn refresh(ctx: &Context, planned: &Package) -> Result<Package> {
-    if crate::policy::uv_local::is_uv(&planned.provider) {
+    if crate::software::rules::uv_local::is_uv(&planned.provider) {
         return crate::software::uv_ownership::refresh(ctx, planned);
     }
     if matches!(planned.provider, Provider::ConfigObserved { .. }) {
@@ -240,12 +240,12 @@ pub fn refresh(ctx: &Context, planned: &Package) -> Result<Package> {
 
 pub fn canonical(p: &Package) -> Result<Option<String>> {
     if let Provider::BrewFormula { query, .. } = &p.provider {
-        return crate::policy::brew::logical_id(&query.key).map(Some);
+        return crate::software::rules::brew::logical_id(&query.key).map(Some);
     }
     if let Provider::Mise { package } = &p.provider {
         return crate::domain::resource::id("mise-tool", package).map(Some);
     }
-    if crate::policy::uv_local::is_uv(&p.provider) {
+    if crate::software::rules::uv_local::is_uv(&p.provider) {
         return crate::software::uv_ownership::identity(p);
     }
     if matches!(p.provider, Provider::CapabilityObserved { .. }) {
@@ -285,7 +285,7 @@ pub fn receipts(ctx: &Context) -> Result<Receipts> {
         });
     }
     let mut receipts: Receipts = paths::regular_json(&path)?;
-    crate::policy::state::receipt_schema(&receipts)?;
+    crate::policy::operation::state::receipt_schema(&receipts)?;
     receipts
         .installations
         .retain(|_, receipt| !crate::agent::resource_agents::receipt_is_archived(ctx, receipt));
@@ -294,11 +294,11 @@ pub fn receipts(ctx: &Context) -> Result<Receipts> {
 
 fn receipt_identity(receipt: &crate::domain::Receipt) -> Result<Option<String>> {
     if let Some(query @ crate::domain::QuerySpec::LocalUvTool(local)) = &receipt.query {
-        crate::policy::uv_local::binding(&receipt.package, query)?;
-        return crate::policy::uv_local::query_id(local).map(Some);
+        crate::software::rules::uv_local::binding(&receipt.package, query)?;
+        return crate::software::rules::uv_local::query_id(local).map(Some);
     }
     if let Some(query @ crate::domain::QuerySpec::LocalCapability(local)) = &receipt.query {
-        crate::policy::capability_local::binding(&receipt.package, query)?;
+        crate::capability::rules::capability_local::binding(&receipt.package, query)?;
         return Ok(Some(crate::capability::capability_local::query_identity(
             &receipt.package,
             local,
@@ -311,7 +311,7 @@ fn receipt_identity(receipt: &crate::domain::Receipt) -> Result<Option<String>> 
         )?));
     }
     if let Some(query @ crate::domain::QuerySpec::LocalNpm(local)) = &receipt.query {
-        crate::policy::npm_local::binding(&receipt.package, query)?;
+        crate::software::rules::npm_local::binding(&receipt.package, query)?;
         return Ok(Some(targets::npm_id(
             &local.namespace.canonical_prefix,
             &local.name,
@@ -341,7 +341,7 @@ fn owner(ctx: &Context, identity: &str) -> Result<Option<Package>> {
 }
 
 pub fn check_owner(ctx: &Context, p: &Package) -> Result<()> {
-    if crate::policy::uv_local::is_uv(&p.provider) {
+    if crate::software::rules::uv_local::is_uv(&p.provider) {
         return crate::software::uv_ownership::snapshot(ctx, p).map(|_| ());
     }
     if let Some(receipt) = receipts(ctx)?.installations.get(&p.id)

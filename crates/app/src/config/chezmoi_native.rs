@@ -1,16 +1,22 @@
 use crate::{
     cli::Config,
-    config::chezmoi_binding as io,
+    config::{
+        chezmoi_binding as io,
+        rules::chezmoi_native::{
+            self as policy, Binding, Managed, NativeCommand, Query, QueryKind,
+        },
+    },
     context::Context,
     domain::{
         Action, ConfigAuthority, Kind, Observation, Package, Phase, Plan, Provider, QuerySpec,
         fingerprint,
     },
     error::{Error, Result},
-    operations,
-    operations::native_runner::{self, FrozenInvocation, NativeOutcome},
-    operations::store::{Journal, Store},
-    policy::chezmoi_native::{self as policy, Binding, Managed, NativeCommand, Query, QueryKind},
+    operations::{
+        self,
+        native_runner::{self, FrozenInvocation, NativeOutcome},
+        store::{Journal, Store},
+    },
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};

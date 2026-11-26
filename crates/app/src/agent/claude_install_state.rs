@@ -101,7 +101,7 @@ pub(super) fn published(
         return Err(invalid());
     }
     Ok((
-        crate::policy::resources::claude_model(&settings_bytes)?.selected,
+        crate::policy::catalog::resources::claude_model(&settings_bytes)?.selected,
         evidence,
     ))
 }

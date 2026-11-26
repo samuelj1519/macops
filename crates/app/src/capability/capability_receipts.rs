@@ -1,17 +1,19 @@
 use crate::{
-    capability::capability_local,
-    capability::invocation_inventory::Patch,
+    capability::{
+        capability_local,
+        invocation_inventory::Patch,
+        rules::capability_local::{self as policy, StampInput},
+    },
     context::Context,
     domain::{Observation, QuerySpec, Receipts, fingerprint},
     error::{Error, Result},
-    policy::capability_local::{self as policy, StampInput},
 };
 
 fn book(bytes: &[u8]) -> Result<Receipts> {
     let value = crate::policy::json::parse(bytes)?;
     let crate::policy::json::Object(receipts) =
         serde_json::from_value::<crate::policy::json::Object<Receipts>>(value)?;
-    crate::policy::state::receipt_schema(&receipts)?;
+    crate::policy::operation::state::receipt_schema(&receipts)?;
     Ok(receipts)
 }
 #[derive(Clone, Copy)]

@@ -29,9 +29,10 @@ fn profile_assessment_builds_owned_changes_without_writing_configs_or_exposing_c
     let before = br#"{ "model" : "custom-\u006dodel", "env":{"TOKEN":"PRIVATE_VALUE"} }"#;
     fs::write(&target, before)?;
     let authority = crate::operations::governance::capture(&ctx)?;
-    let selected = crate::policy::profile_select::split(delivery::Selection::Explicit(vec![
-        "profile:mi".into(),
-    ]))?;
+    let selected =
+        crate::policy::profile::profile_select::split(delivery::Selection::Explicit(vec![
+            "profile:mi".into(),
+        ]))?;
     let plan = assess(&ctx, &authority, &selected)?;
     assert_eq!(plan.patches.len(), 1);
     assert_eq!(plan.patches[0].path, target);
@@ -70,7 +71,9 @@ fn fixture() -> std::result::Result<(tempfile::TempDir, Context), Box<dyn std::e
     Ok((temp, ctx))
 }
 fn selected() -> Result<Selected> {
-    crate::policy::profile_select::split(delivery::Selection::Explicit(vec!["profile:mi".into()]))
+    crate::policy::profile::profile_select::split(delivery::Selection::Explicit(vec![
+        "profile:mi".into(),
+    ]))
 }
 fn hash(plan: &Assessment, ctx: &Context, path: &Path) -> Result<String> {
     let book = invocation::record(&ctx.home, plan.book_after.as_deref().ok_or_else(invalid)?)?;

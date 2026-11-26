@@ -35,7 +35,7 @@ fn terminal_history_shows_typed_operations_and_limits_recovery_to_pending() -> T
         (Phase::Succeeded, "已完成", 4),
     ] {
         journal.phase = phase;
-        let recovery = if crate::policy::state::pending(phase) {
+        let recovery = if crate::policy::operation::state::pending(phase) {
             RecoveryState::Pending
         } else {
             RecoveryState::Settled

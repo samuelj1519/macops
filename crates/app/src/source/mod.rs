@@ -1,3 +1,4 @@
+pub(crate) mod rules;
 pub(crate) mod source_files;
 pub(crate) mod source_git;
 pub(crate) mod source_inventory;

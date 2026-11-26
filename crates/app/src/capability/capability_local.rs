@@ -1,17 +1,17 @@
 use crate::{
-    config::config_local::capture_anchor,
-    context::Context,
-    domain::resource::{Coverage, CoverageState, Data, Management, Resource, State},
-    domain::{
-        CapabilityKind, CapabilityQueryKind, ConfigAnchor, Kind, LocalCapabilityQuery, Observation,
-        OwnedPath, Package, PathKind, Provider,
-    },
-    error::{Error, Result},
-    platform::fs::{self as paths, Directory, EntryKind},
-    policy::capability_local::{
+    capability::rules::capability_local::{
         self as policy, FILE_LIMIT, PAYLOAD_BYTE_BUDGET, PAYLOAD_DEPTH_LIMIT, PAYLOAD_ENTRY_LIMIT,
         StampInput,
     },
+    config::config_local::capture_anchor,
+    context::Context,
+    domain::{
+        CapabilityKind, CapabilityQueryKind, ConfigAnchor, Kind, LocalCapabilityQuery, Observation,
+        OwnedPath, Package, PathKind, Provider,
+        resource::{Coverage, CoverageState, Data, Management, Resource, State},
+    },
+    error::{Error, Result},
+    platform::fs::{self as paths, Directory, EntryKind},
 };
 use sha2::{Digest, Sha256};
 use std::{ffi::OsStr, os::unix::ffi::OsStrExt, path::Path};
@@ -42,7 +42,7 @@ pub fn canonical_identity(package: &Package) -> Result<String> {
     };
     match capability {
         CapabilityKind::SkillsCli => {
-            crate::policy::native_skills::installation_id(&paths::read_path(payload)?)
+            crate::skills::rules::native_skills::installation_id(&paths::read_path(payload)?)
         }
         CapabilityKind::ClaudePlugin => {
             let prof = profile_id.as_deref().ok_or_else(invalid_pkg)?;
@@ -57,7 +57,7 @@ pub fn canonical_identity(package: &Package) -> Result<String> {
 
 pub fn query_identity(package: &Package, local: &LocalCapabilityQuery) -> Result<String> {
     match local.capability {
-        CapabilityKind::SkillsCli => crate::policy::native_skills::installation_id(
+        CapabilityKind::SkillsCli => crate::skills::rules::native_skills::installation_id(
             &local.payload.canonical_parent.join(&local.payload.name),
         ),
         CapabilityKind::ClaudePlugin => canonical_identity(package),
@@ -888,7 +888,7 @@ fn read_skill_raw_source(lock_path: &Path, name: &str) -> Result<String> {
     let Some(bytes) = read_anchored_file(&anchor, &mut budget)? else {
         return Err(Error::attention("not_installed", name));
     };
-    let lock = crate::policy::resources::skill_lock(&bytes, false)?;
+    let lock = crate::policy::catalog::resources::skill_lock(&bytes, false)?;
     let Some(rec) = lock.skills.get(name) else {
         return Err(Error::attention("not_installed", name));
     };
@@ -909,8 +909,8 @@ pub fn project_plugin_settings(
     query: &LocalCapabilityQuery,
     after: &[u8],
 ) -> Result<(
-    crate::policy::capability_local::ParsedRecord,
-    crate::policy::capability_local::ParsedRecord,
+    crate::capability::rules::capability_local::ParsedRecord,
+    crate::capability::rules::capability_local::ParsedRecord,
 )> {
     if query.capability != CapabilityKind::ClaudePlugin {
         return Err(invalid_pkg());

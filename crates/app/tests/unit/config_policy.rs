@@ -262,7 +262,7 @@ fn package_validation_rejects_mismatched_kinds_authorities_and_templates() -> Te
 fn query_and_journal_bindings_reject_tampering_even_with_recomputed_hashes() -> TestResult {
     let pkg = static_pkg()?;
     let valid = config_journal()?;
-    crate::policy::state::validate_journal(&valid)?;
+    crate::policy::operation::state::validate_journal(&valid)?;
     let cmd_query = QuerySpec::Command(CommandSpec {
         program: "/bin/echo".into(),
         args: vec![],
@@ -301,7 +301,7 @@ fn query_and_journal_bindings_reject_tampering_even_with_recomputed_hashes() -> 
 #[test]
 fn journal_plan_validation_rejects_tampering_even_with_recomputed_hashes() -> TestResult {
     let valid = config_journal()?;
-    crate::policy::state::validate_journal(&valid)?;
+    crate::policy::operation::state::validate_journal(&valid)?;
     let mut bad_before_j = valid.clone();
     bad_before_j.plan.before = Observation::ConfigFile {
         authority: ConfigAuthority::ChezmoiCandidate,
@@ -310,7 +310,7 @@ fn journal_plan_validation_rejects_tampering_even_with_recomputed_hashes() -> Te
         mode_matches_source: None,
     };
     bad_before_j.plan_sha256 = fingerprint(&bad_before_j.plan)?;
-    assert!(crate::policy::state::validate_journal(&bad_before_j).is_err());
+    assert!(crate::policy::operation::state::validate_journal(&bad_before_j).is_err());
     for tamper in 0..10 {
         let mut j = valid.clone();
         match tamper {
@@ -349,7 +349,7 @@ fn journal_plan_validation_rejects_tampering_even_with_recomputed_hashes() -> Te
         j.plan.recipe_sha256 = fingerprint(&j.plan.package)?;
         j.plan_sha256 = fingerprint(&j.plan)?;
         assert!(
-            crate::policy::state::validate_journal(&j).is_err(),
+            crate::policy::operation::state::validate_journal(&j).is_err(),
             "{tamper}"
         );
     }
@@ -372,7 +372,7 @@ fn journal_plan_validation_rejects_tampering_even_with_recomputed_hashes() -> Te
     }));
     untracked_j.plan.recipe_sha256 = fingerprint(&untracked_j.plan.package)?;
     untracked_j.plan_sha256 = fingerprint(&untracked_j.plan)?;
-    crate::policy::state::validate_journal(&untracked_j)?;
+    crate::policy::operation::state::validate_journal(&untracked_j)?;
     Ok(())
 }
 

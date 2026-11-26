@@ -1,3 +1,4 @@
+use super::rules::{self, Placement};
 use crate::{
     context::Context,
     domain::FileId,
@@ -6,12 +7,9 @@ use crate::{
     migration::migration_scan::{self, Scan},
     migration::migration_writers::Fence,
     platform::fs::Directory,
-    policy::{
-        governance::{
-            self as policy, CommittedMigration, DirectoryBinding, DurableBindings, Layout,
-            MigrationPhase,
-        },
-        migration::{self, Placement},
+    policy::governance::{
+        self as policy, CommittedMigration, DirectoryBinding, DurableBindings, Layout,
+        MigrationPhase,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -206,7 +204,7 @@ fn prepare_with(
     frozen_locations
         .cache
         .clone_from(&manifest.ledger.layout.cache);
-    migration::validate_placements(&frozen_locations, &manifest.placements)?;
+    rules::validate_placements(&frozen_locations, &manifest.placements)?;
     let bytes = json(&manifest)?;
     fs::write_new(&stage, MANIFEST, &bytes)?;
     let pending = Pending {
@@ -253,7 +251,7 @@ fn prepare_with(
 }
 
 pub fn load(ctx: &Context, id: &str) -> Result<Batch> {
-    if !crate::policy::state::valid_id(id) {
+    if !crate::policy::operation::state::valid_id(id) {
         return Err(fs::error());
     }
     let root = fs::directory(&ctx.state)?;
@@ -284,7 +282,7 @@ pub fn load(ctx: &Context, id: &str) -> Result<Batch> {
     frozen_locations
         .cache
         .clone_from(&manifest.ledger.layout.cache);
-    migration::validate_placements(&frozen_locations, &manifest.placements)?;
+    rules::validate_placements(&frozen_locations, &manifest.placements)?;
     if manifest.schema_version != 1
         || manifest.ledger.migration_id != id
         || manifest.stage != pending.stage
@@ -780,7 +778,7 @@ fn pending_id(ctx: &Context) -> Option<String> {
     let crate::policy::json::Object(record) =
         serde_json::from_value::<crate::policy::json::Object<Pending>>(value).ok()?;
     (record.schema_version == 1
-        && crate::policy::state::valid_id(&record.id)
+        && crate::policy::operation::state::valid_id(&record.id)
         && record.id.len() <= 128
         && record.stage.requested == ctx.data.join("migrations").join(&record.id))
     .then_some(record.id)

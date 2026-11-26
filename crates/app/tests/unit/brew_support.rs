@@ -1,7 +1,7 @@
 use crate::{
     domain::*,
     error::Result,
-    policy::brew::{
+    software::rules::brew::{
         EFFECT_CONTRACT, QUERY_SCRIPT, SOURCE_COMMIT, context_id, logical_id, observation,
     },
 };
@@ -74,7 +74,7 @@ pub(crate) fn query() -> TestResultQuery {
             absolute_path: "/fixture/state/query.rb".into(),
             canonical_path: "/fixture/state/query.rb".into(),
             file_id: node(false, 6).identity,
-            sha256: crate::policy::cache::digest(QUERY_SCRIPT),
+            sha256: crate::policy::catalog::cache::digest(QUERY_SCRIPT),
             size: QUERY_SCRIPT.len() as u64,
             product_build_id: "c".repeat(64),
         },

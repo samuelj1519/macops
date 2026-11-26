@@ -303,13 +303,21 @@ fn uv_package_binding_and_state_expectations_are_explicit() -> crate::test_suppo
         *package = "bad/".into();
     }
     assert!(binding(&invalid, plan.query.as_ref().ok_or("query")?).is_err());
-    assert!(crate::policy::commands::available_query(Path::new("/home"), &plan.package).is_err());
     assert!(
-        crate::policy::state::plan_inputs(&plan.package, Action::Adopt, &plan.before, Some("1"))
+        crate::policy::operation::commands::available_query(Path::new("/home"), &plan.package)
             .is_err()
     );
     assert!(
-        crate::policy::state::plan_inputs(
+        crate::policy::operation::state::plan_inputs(
+            &plan.package,
+            Action::Adopt,
+            &plan.before,
+            Some("1")
+        )
+        .is_err()
+    );
+    assert!(
+        crate::policy::operation::state::plan_inputs(
             &crate::test_support::package(),
             Action::Adopt,
             &plan.before,
@@ -317,14 +325,26 @@ fn uv_package_binding_and_state_expectations_are_explicit() -> crate::test_suppo
         )
         .is_err()
     );
-    assert!(crate::policy::state::expected(&journal, &plan.before));
+    assert!(crate::policy::operation::state::expected(
+        &journal,
+        &plan.before
+    ));
     journal.plan.action = Action::Upgrade;
-    assert!(!crate::policy::state::expected(&journal, &plan.before));
+    assert!(!crate::policy::operation::state::expected(
+        &journal,
+        &plan.before
+    ));
     journal.plan.action = Action::Adopt;
     journal.plan.before = Observation::Missing { evidence: None };
-    assert!(!crate::policy::state::expected(&journal, &plan.before));
+    assert!(!crate::policy::operation::state::expected(
+        &journal,
+        &plan.before
+    ));
     journal.plan.package = crate::test_support::package();
-    assert!(!crate::policy::state::expected(&journal, &plan.before));
+    assert!(!crate::policy::operation::state::expected(
+        &journal,
+        &plan.before
+    ));
     Ok(())
 }
 
@@ -342,8 +362,13 @@ fn uv_invalid_nested_inputs_propagate_through_public_policy_boundaries()
     wrong.action = Action::Upgrade;
     assert!(validate_plan(&wrong).is_err());
     assert!(
-        crate::policy::state::plan_inputs(&plan.package, Action::Upgrade, &plan.before, None)
-            .is_err()
+        crate::policy::operation::state::plan_inputs(
+            &plan.package,
+            Action::Upgrade,
+            &plan.before,
+            None
+        )
+        .is_err()
     );
     let mut wrong = journal.clone();
     wrong.plan.command = Some(crate::test_support::command("illegal"));
@@ -351,7 +376,7 @@ fn uv_invalid_nested_inputs_propagate_through_public_policy_boundaries()
     wrong.plan_sha256 = fingerprint(&wrong.plan)?;
     wrong.plan.recipe_sha256 = fingerprint(&wrong.plan.package)?;
     wrong.plan_sha256 = fingerprint(&wrong.plan)?;
-    assert!(crate::policy::state::validate_journal(&wrong).is_err());
+    assert!(crate::policy::operation::state::validate_journal(&wrong).is_err());
     let empty = Receipts {
         schema_version: 1,
         installations: BTreeMap::new(),

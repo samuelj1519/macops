@@ -1,11 +1,15 @@
 use crate::{
-    capability::capability_store as files,
+    capability::{
+        capability_store as files,
+        rules::{
+            capability_tx::Namespace,
+            invocation::{self, MetadataKind},
+        },
+    },
     error::{Error, Result},
-    policy::{
-        capability_tx::Namespace,
-        invocation::{self, MetadataKind},
+    policy::source_tree::{Content, Position, Slot, Tree},
+    source::rules::{
         source_invocation::{self as policy, Applied},
-        source_tree::{Content, Position, Slot, Tree},
         source_tx::UpgradedRoot,
     },
 };
@@ -28,7 +32,7 @@ pub fn metadata(slot: &Slot, tree: &Tree, relative: &str) -> Result<Option<Vec<u
         remaining: relative.split('/').map(str::to_owned).collect(),
     };
     let (state, raw) = files::observe(&namespace, 1024 * 1024)?;
-    if !matches!(state,crate::policy::capability_tx::State::File{identity,sha256:ref actual,mode} if identity==entry.identity && actual==sha256 && mode==entry.mode)
+    if !matches!(state,crate::capability::rules::capability_tx::State::File{identity,sha256:ref actual,mode} if identity==entry.identity && actual==sha256 && mode==entry.mode)
         || raw.as_ref().is_none_or(|raw| raw.len() as u64 != *size)
     {
         return Err(invalid());

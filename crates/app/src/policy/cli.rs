@@ -173,7 +173,7 @@ pub fn config_scope(command: &cli::Command, requested: bool) -> error::Result<()
             cli::Command::App {
                 project: _,
                 command: Some(cli::AppCmd::Upgrade { id: Some(id), .. })
-            } if crate::policy::ai::upgrade_target(id).is_some()
+            } if crate::agent::ai_policy::upgrade_target(id).is_some()
         )
         && !matches!(
             command,

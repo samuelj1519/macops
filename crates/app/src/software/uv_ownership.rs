@@ -5,7 +5,7 @@ use crate::{
         fingerprint,
     },
     error::{Error, Result},
-    policy::uv_local as policy,
+    software::rules::uv_local as policy,
 };
 use std::{
     collections::{BTreeMap, BTreeSet},

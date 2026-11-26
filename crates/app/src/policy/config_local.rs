@@ -14,7 +14,7 @@ pub fn config_id(target: &Path) -> Result<String> {
 }
 
 pub fn classify_source_name(name: &str) -> std::result::Result<ConfigModePolicy, String> {
-    match crate::policy::chezmoi::source_name(name, false) {
+    match crate::config::rules::chezmoi::source_name(name, false) {
         Ok(Some(mapped)) if mapped.template => Err("source_template_not_evaluated".into()),
         Ok(Some(mapped)) if mapped.symlink => Err("source_link_expression_not_read".into()),
         Ok(Some(_)) => {
@@ -85,7 +85,7 @@ pub fn stamp_fingerprint(
 pub fn validate_anchor(anchor: &ConfigAnchor) -> Result<()> {
     crate::policy::paths::lexical(&anchor.requested)?;
     crate::policy::paths::lexical(&anchor.canonical_parent)?;
-    if !crate::policy::resources::component(&anchor.name)
+    if !crate::policy::catalog::resources::component(&anchor.name)
         || anchor.requested.file_name().and_then(|n| n.to_str()) != Some(anchor.name.as_str())
     {
         return Err(Error::new(
@@ -116,7 +116,7 @@ pub fn validate_package(package: &Package) -> Result<()> {
         || target
             .file_name()
             .and_then(|n| n.to_str())
-            .is_none_or(|n| !crate::policy::resources::component(n))
+            .is_none_or(|n| !crate::policy::catalog::resources::component(n))
     {
         return Err(Error::new("invalid_config_package", &package.id));
     }
@@ -259,7 +259,7 @@ pub fn adoptable_observation(package: &Package, before: &Observation) -> Result<
 pub fn validate_plan(plan: &Plan) -> Result<()> {
     if let Some(query @ QuerySpec::NativeConfig(_)) = &plan.query {
         binding(&plan.package, query)?;
-        return crate::policy::chezmoi_native::validate_plan(plan);
+        return crate::config::rules::chezmoi_native::validate_plan(plan);
     }
 
     if let Some(query) = &plan.query {
@@ -278,7 +278,7 @@ pub fn validate_plan(plan: &Plan) -> Result<()> {
         plan.action,
         Action::Apply | Action::Restore | Action::Reconcile
     ) {
-        return crate::policy::config_tx::validate_config_tx_plan(plan);
+        return crate::config::rules::config_tx::validate_config_tx_plan(plan);
     }
     if plan.action != Action::Adopt
         || plan.command.is_some()

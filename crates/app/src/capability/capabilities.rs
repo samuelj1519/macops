@@ -1,4 +1,4 @@
-use crate::policy::skills::matches_resource;
+use crate::skills::rules::skills::matches_resource;
 use crate::{
     cli::{Command, Policy, SkillCmd},
     context::Context,
@@ -444,7 +444,7 @@ fn declared(authority: &Governance) -> Result<Vec<Value>> {
                 | "derived-skills"
                 | "app-managed"
         );
-        rows.push(json!({"id":format!("asset:{name}"),"name":crate::policy::resources::source_label(name),"kind":if known {kind}else{"unsupported"},"status":"declared"}));
+        rows.push(json!({"id":format!("asset:{name}"),"name":crate::policy::catalog::resources::source_label(name),"kind":if known {kind}else{"unsupported"},"status":"declared"}));
     }
     Ok(rows)
 }
@@ -499,21 +499,21 @@ fn add_source_aliases(
         ) else {
             continue;
         };
-        if crate::policy::native_skills::installation_id(&crate::platform::fs::read_path(
+        if crate::skills::rules::native_skills::installation_id(&crate::platform::fs::read_path(
             &ctx.home.join(".agents/skills").join(native_id),
         )?)? != resource.id
-            || !resource
-                .aliases
-                .contains(&crate::policy::capability_local::skill_capability_id(
+            || !resource.aliases.contains(
+                &crate::capability::rules::capability_local::skill_capability_id(
                     &lock, native_id, kind, source,
-                )?)
+                )?,
+            )
         {
             continue;
         }
         if let Some(alias) = ids
             .get(source)
             .and_then(Value::as_str)
-            .filter(|alias| crate::policy::resources::component(alias))
+            .filter(|alias| crate::policy::catalog::resources::component(alias))
         {
             resource.aliases.push(alias.into());
             resource.aliases.push(format!("source:{alias}"));

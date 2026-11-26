@@ -108,7 +108,7 @@ fn native_mutation_templates_bind_target_scope_and_supported_actions() -> TestRe
         ),
     ] {
         p.provider = provider;
-        if crate::policy::uv_local::is_uv(&p.provider) {
+        if crate::software::rules::uv_local::is_uv(&p.provider) {
             uv_mutations_blocked(home, &p);
             continue;
         }
@@ -238,7 +238,7 @@ fn query_templates_only_use_read_interfaces() -> TestResult {
         ),
     ] {
         p.provider = provider;
-        if crate::policy::uv_local::is_uv(&p.provider) {
+        if crate::software::rules::uv_local::is_uv(&p.provider) {
             assert_eq!(
                 query(home, &p).err().map(|e| e.code),
                 Some("uv_local_query_required".into())
@@ -344,7 +344,7 @@ fn discovery_and_available_queries_do_not_become_writes() -> TestResult {
 
 #[test]
 fn services_only_offer_declared_control_commands_and_identity_queries() -> TestResult {
-    let p = crate::policy::service::package();
+    let p = crate::software::rules::service::package();
     assert_eq!(
         query(Path::new("/fixture/home"), &p)?,
         Template::Named {
@@ -378,7 +378,7 @@ fn services_only_offer_declared_control_commands_and_identity_queries() -> TestR
         .is_err()
     );
     assert!(
-        crate::policy::state::plan_inputs(
+        crate::policy::operation::state::plan_inputs(
             &p,
             Action::Install,
             &Observation::Service {
@@ -391,7 +391,7 @@ fn services_only_offer_declared_control_commands_and_identity_queries() -> TestR
         .is_err()
     );
     assert!(
-        crate::policy::state::plan_inputs(
+        crate::policy::operation::state::plan_inputs(
             &package(),
             Action::Start,
             &Observation::Missing { evidence: None },

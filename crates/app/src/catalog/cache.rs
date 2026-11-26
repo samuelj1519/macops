@@ -70,7 +70,7 @@ fn snapshot(namespace: &Namespace, book: &Book) -> Result<(Ownership, Vec<Candid
             }
             Err(e) => return Err(e),
         };
-        crate::policy::cache::require_digest(hash, &item.sha256)?;
+        crate::policy::catalog::cache::require_digest(hash, &item.sha256)?;
         owned.files.insert(name, hash.clone());
         candidates.push(item);
     }
@@ -96,7 +96,7 @@ pub fn cleanup(ctx: &Context, package: &Package, dry_run: bool, yes: bool) -> Re
         );
     };
     namespace.assert_current(ctx, &registry)?;
-    crate::policy::cache::registered_scope(&registry, &namespace.key, &ctx.cache)?;
+    crate::policy::catalog::cache::registered_scope(&registry, &namespace.key, &ctx.cache)?;
     let book = registry.book(&namespace.path, &namespace.identity, &namespace.key);
     let (_, candidates) = snapshot(&namespace, &book)?;
     let review = review(&namespace, &book)?;
@@ -121,7 +121,7 @@ pub fn cleanup(ctx: &Context, package: &Package, dry_run: bool, yes: bool) -> Re
     namespace.assert_current(ctx, &registry)?;
     let mut book = registry.book(&namespace.path, &namespace.identity, &namespace.key);
     let (mut owned, current) = snapshot(&namespace, &book)?;
-    crate::policy::cache::fresh_cleanup(&candidates, &current)?;
+    crate::policy::catalog::cache::fresh_cleanup(&candidates, &current)?;
     let mut journal = cleanup_journal(ctx, package, &candidates)?;
     let quarantine = format!(".cleanup-{}", journal.id);
     journal.message = format!("quarantine={}/indexes/{}", ctx.cache.display(), quarantine);
@@ -136,7 +136,7 @@ pub fn cleanup(ctx: &Context, package: &Package, dry_run: bool, yes: bool) -> Re
     } else {
         purge(&namespace.indexes, &quarantine, &candidates, &mut owned)
     };
-    crate::policy::cache::retain_remaining(&mut book, &owned.files);
+    crate::policy::catalog::cache::retain_remaining(&mut book, &owned.files);
     registry.scopes.insert(namespace.key.clone(), book);
     Store::atomic(&store.root, BOOK_FILE, &registry)?;
     match result {
@@ -161,7 +161,7 @@ pub fn cleanup(ctx: &Context, package: &Package, dry_run: bool, yes: bool) -> Re
 }
 
 fn review(namespace: &Namespace, book: &Book) -> Result<Vec<String>> {
-    Ok(crate::policy::cache::review_names(
+    Ok(crate::policy::catalog::cache::review_names(
         entries(&namespace.root)?,
         entries(&namespace.indexes)?,
         &book.owned,
@@ -213,7 +213,7 @@ fn purge(
             rustix::fs::RenameFlags::NOREPLACE,
         )
         .map_err(fs_error)?;
-        if !crate::policy::cache::candidate_matches(
+        if !crate::policy::catalog::cache::candidate_matches(
             expected,
             &candidate(&isolated, &expected.name)?,
         ) {
@@ -264,4 +264,4 @@ fn cleanup_journal(
 #[path = "../../tests/unit/cache.rs"]
 mod tests;
 
-use crate::policy::cache::cache_advice;
+use crate::policy::catalog::cache::cache_advice;

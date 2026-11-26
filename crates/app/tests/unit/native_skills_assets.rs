@@ -2,7 +2,7 @@
 use super::*;
 use crate::{
     cli::Cli,
-    policy::source_payload::{Entry, Payload},
+    source::rules::source_payload::{Entry, Payload},
     test_support::TestResult,
 };
 use clap::Parser;
@@ -22,7 +22,7 @@ fn fixture() -> std::result::Result<
     fs::create_dir(&home)?;
     let cli = Cli::try_parse_from(["macops", "--home", home.to_str().ok_or("home")?, "app"])?;
     let ctx = Context::from_cli(&cli, &mut vec![])?;
-    let recipe: Recipe = crate::policy::native_skills::decode(&serde_json::to_vec(
+    let recipe: Recipe = crate::skills::rules::native_skills::decode(&serde_json::to_vec(
         &serde_json::json!({
         "schemaVersion":1,"id":"writing-dna-skill","owner":"skills-cli","cliVersion":"1.9.0",
         "source":{"repository":"larashero3-dotcom/writing-dna-skill","commit":"a".repeat(40),"skillDirectory":".","memberName":"writing-dna-skill","trackingRef":null},

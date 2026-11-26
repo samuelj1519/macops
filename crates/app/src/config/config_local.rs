@@ -72,7 +72,7 @@ pub(crate) fn capture_anchor(path: &Path) -> Result<ConfigAnchor> {
     let name = clean
         .file_name()
         .and_then(|n| n.to_str())
-        .filter(|n| crate::policy::resources::component(n))
+        .filter(|n| crate::policy::catalog::resources::component(n))
         .ok_or_else(|| Error::new("invalid_config_target", "配置文件名不安全"))?
         .to_owned();
     let dir = Directory::open(parent)?;

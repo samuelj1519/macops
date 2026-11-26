@@ -63,26 +63,26 @@ pub fn plan(
     version: Option<&str>,
     dry_run: bool,
 ) -> Result<Plan> {
-    crate::policy::uv_local::action(&package.provider, action)?;
+    crate::software::rules::uv_local::action(&package.provider, action)?;
     if matches!(package.provider, Provider::Uv { binding: None, .. }) {
         return Err(Error::attention(
             "legacy_uv_query_unbound",
             "旧 uv 声明未绑定 namespace，不能采纳或启动原生查询",
         ));
     }
-    crate::policy::state::version_request(package, action, version)?;
+    crate::policy::operation::state::version_request(package, action, version)?;
     let frozen = local_query(ctx, package, action)?;
     let before = match &frozen {
         Some(query) => providers::observe_query(package, query, &ctx.scope, false)?,
         None => inventory::observe(ctx, package),
     };
-    crate::policy::state::plan_inputs(package, action, &before, version)?;
+    crate::policy::operation::state::plan_inputs(package, action, &before, version)?;
     if action == Action::Adopt {
         return adoption_plan(ctx, package, before, frozen);
     }
     check_before(ctx, package, action, &before, frozen.as_ref())?;
     let cached = if dry_run && version.is_none() && action != Action::Uninstall {
-        crate::policy::cache::indexed_version(
+        crate::policy::catalog::cache::indexed_version(
             &crate::catalog::updates::read(ctx)?,
             package,
             &ctx.scope,
@@ -90,9 +90,13 @@ pub fn plan(
     } else {
         None
     };
-    let resolution =
-        crate::policy::state::version_resolution(action, dry_run, version, cached.as_deref())?;
-    if resolution == crate::policy::state::Resolution::Unresolved {
+    let resolution = crate::policy::operation::state::version_resolution(
+        action,
+        dry_run,
+        version,
+        cached.as_deref(),
+    )?;
+    if resolution == crate::policy::operation::state::Resolution::Unresolved {
         return Ok(Plan {
             brew: None,
             npm_binding: None,
@@ -116,12 +120,13 @@ pub fn plan(
         .as_ref()
         .and_then(crate::software::mise_owner::retirement::query_witness);
     let target = match resolution {
-        crate::policy::state::Resolution::Explicit(v)
-        | crate::policy::state::Resolution::Cached(v) => Some(v),
-        crate::policy::state::Resolution::Latest => {
+        crate::policy::operation::state::Resolution::Explicit(v)
+        | crate::policy::operation::state::Resolution::Cached(v) => Some(v),
+        crate::policy::operation::state::Resolution::Latest => {
             Some(crate::catalog::updates::latest(ctx, package)?)
         }
-        crate::policy::state::Resolution::Absent | crate::policy::state::Resolution::Unresolved => {
+        crate::policy::operation::state::Resolution::Absent
+        | crate::policy::operation::state::Resolution::Unresolved => {
             retirement.map(|release| release.version.clone())
         }
     };
@@ -145,7 +150,7 @@ pub fn plan(
         warnings: if matches!(package.provider, Provider::Brew { .. }) {
             vec!["brew 无通用固定版本参数；若解析后版本变化，后置验证将停止并报告 unknown".into()]
         } else if let Provider::Npm { authority, .. } = &package.provider {
-            crate::policy::npm_local::write_warnings(authority.as_ref(), action)
+            crate::software::rules::npm_local::write_warnings(authority.as_ref(), action)
         } else {
             vec![]
         },
@@ -180,7 +185,7 @@ fn native_write_spec(
     };
     if let Some(QuerySpec::LocalNpm(query)) = frozen {
         crate::software::npm_local::verify_plain_namespace_for_write(query, action)?;
-        crate::policy::npm_local::bind_canonical_command_paths(
+        crate::software::rules::npm_local::bind_canonical_command_paths(
             &mut command,
             &query.namespace.canonical_prefix,
         )?;
@@ -230,7 +235,7 @@ pub(crate) fn execute_checked(
     yes: bool,
     check: impl FnOnce() -> Result<()>,
 ) -> Result<Value> {
-    crate::policy::uv_local::validate_plan(&plan)?;
+    crate::software::rules::uv_local::validate_plan(&plan)?;
     if dry_run {
         return Ok(json!({"mode":"dry-run","backend":"rust","plan":plan,"persistentWrites":false}));
     }
@@ -255,7 +260,7 @@ pub(crate) fn execute_checked(
         None => inventory::observe(ctx, &plan.package),
     };
     let current = crate::catalog::target::refresh(ctx, &plan.package)?;
-    crate::policy::state::require_fresh_plan(&plan, &current, &observed)?;
+    crate::policy::operation::state::require_fresh_plan(&plan, &current, &observed)?;
     check_before(ctx, &plan.package, plan.action, &observed, frozen)?;
     if let Some(QuerySpec::LocalNpm(query)) = &plan.query {
         crate::software::npm_local::verify_plain_namespace_for_write(query, plan.action)?;
@@ -288,7 +293,7 @@ pub(crate) fn execute_checked(
                         &journal.scope,
                         false,
                     )?;
-                    crate::policy::state::require_fresh_plan(
+                    crate::policy::operation::state::require_fresh_plan(
                         &journal.plan,
                         &journal.plan.package,
                         &current,
@@ -305,7 +310,7 @@ pub(crate) fn execute_checked(
         return Ok(json!(journal));
     }
     let result = launch(&store, &mut journal)?;
-    if let Some(message) = crate::policy::state::completion(
+    if let Some(message) = crate::policy::operation::state::completion(
         result.code,
         result.uncertain,
         journal.process_group.is_some_and(process::group_alive),
@@ -360,7 +365,7 @@ fn observe_frozen(
     let committed = receipts
         .installations
         .get(&journal.plan.package.id)
-        .map(|receipt| crate::policy::npm_local::committed_install_query(journal, receipt))
+        .map(|receipt| crate::software::rules::npm_local::committed_install_query(journal, receipt))
         .transpose()?
         .flatten();
     let spec = journal
@@ -438,8 +443,8 @@ fn finish(store: &Store, journal: &mut Journal) -> Result<()> {
 }
 
 pub fn launch(store: &Store, journal: &mut Journal) -> Result<process::Output> {
-    if crate::policy::uv_local::is_uv(&journal.plan.package.provider) {
-        return Err(crate::policy::uv_local::blocked());
+    if crate::software::rules::uv_local::is_uv(&journal.plan.package.provider) {
+        return Err(crate::software::rules::uv_local::blocked());
     }
     let mut output_file = tempfile::tempfile()?;
     let mut error_file = tempfile::tempfile()?;
@@ -523,7 +528,7 @@ pub fn launch(store: &Store, journal: &mut Journal) -> Result<process::Output> {
 pub fn worker(path: &Path) -> Result<()> {
     let mut gate = [0_u8; 4];
     std::io::stdin().read_exact(&mut gate)?;
-    crate::policy::state::worker_gate(gate)?;
+    crate::policy::operation::state::worker_gate(gate)?;
     let journal: Journal = paths::regular_json(path)?;
     let error = prepare_worker(
         &journal,
@@ -548,8 +553,8 @@ fn prepare_worker(
             "Native Skills 只能使用冻结的原生 supervisor 协议",
         ));
     }
-    if crate::policy::uv_local::is_uv(&journal.plan.package.provider) {
-        return Err(crate::policy::uv_local::blocked());
+    if crate::software::rules::uv_local::is_uv(&journal.plan.package.provider) {
+        return Err(crate::software::rules::uv_local::blocked());
     }
     if crate::agent::native_plugin_tx::is_plugin(journal)
         || crate::agent::codex_install::is_install(journal)
@@ -559,13 +564,14 @@ fn prepare_worker(
             "native_plugin_worker_required",
         ));
     }
-    if crate::policy::chezmoi_native::is_native(&journal.plan) || journal.plan.brew.is_some() {
+    if crate::config::rules::chezmoi_native::is_native(&journal.plan) || journal.plan.brew.is_some()
+    {
         return Err(Error::attention(
             "native_worker_required",
             "此计划必须使用已绑定原生执行器",
         ));
     }
-    crate::policy::state::worker_identity(journal, path, pid, group)?;
+    crate::policy::operation::state::worker_identity(journal, path, pid, group)?;
     if let Some(query) = journal
         .plan
         .query
@@ -574,7 +580,11 @@ fn prepare_worker(
     {
         let current =
             providers::observe_query(&journal.plan.package, query, &journal.scope, false)?;
-        crate::policy::state::require_fresh_plan(&journal.plan, &journal.plan.package, &current)?;
+        crate::policy::operation::state::require_fresh_plan(
+            &journal.plan,
+            &journal.plan.package,
+            &current,
+        )?;
         if let QuerySpec::LocalNpm(npm_query) = query {
             crate::software::npm_local::verify_plain_namespace_for_write(
                 npm_query,
@@ -615,7 +625,7 @@ mod worker_tests;
 pub(crate) fn locked_journal(store: &Store, id: &str) -> Result<Journal> {
     let history = Store::read::<Journal>(&store.operations, &format!("{id}.json"))?;
     let active = Store::read::<Journal>(&store.root, "active.json")?;
-    crate::policy::state::recovery_journal(id, active, history)
+    crate::policy::operation::state::recovery_journal(id, active, history)
 }
 
 fn check_before(
@@ -626,7 +636,7 @@ fn check_before(
     frozen: Option<&QuerySpec>,
 ) -> Result<()> {
     check_existing_owner(ctx, package)?;
-    crate::policy::state::require_install_slot(action, before)?;
+    crate::policy::operation::state::require_install_slot(action, before)?;
     if matches!(action, Action::Upgrade | Action::Uninstall) {
         let receipts_file = ctx.state.join("receipts.json");
         let receipts: Receipts = if paths::read_path(&receipts_file)?.exists() {
@@ -647,13 +657,15 @@ fn check_before(
         if let QuerySpec::Mise(query) = &mut query {
             query.retirement = None;
         }
-        crate::policy::state::receipt_matches(&ctx.scope, package, before, &query, receipt)?;
+        crate::policy::operation::state::receipt_matches(
+            &ctx.scope, package, before, &query, receipt,
+        )?;
     }
     Ok(())
 }
 
 fn check_existing_owner(ctx: &Context, package: &Package) -> Result<()> {
-    if crate::policy::uv_local::is_uv(&package.provider) {
+    if crate::software::rules::uv_local::is_uv(&package.provider) {
         return crate::software::uv_ownership::snapshot(ctx, package).map(|_| ());
     }
     crate::catalog::target::check_owner(ctx, package)?;
@@ -662,7 +674,7 @@ fn check_existing_owner(ctx: &Context, package: &Package) -> Result<()> {
         return Ok(());
     }
     let receipts: Receipts = paths::regular_json(&path)?;
-    crate::policy::state::existing_owner(
+    crate::policy::operation::state::existing_owner(
         &ctx.scope,
         package,
         receipts.installations.get(&package.id),
@@ -684,7 +696,7 @@ fn adoption_plan(
     Ok(Plan {
         brew: None,
         npm_binding: None,
-        uv_owner: if crate::policy::uv_local::is_uv(&package.provider) {
+        uv_owner: if crate::software::rules::uv_local::is_uv(&package.provider) {
             Some(crate::software::uv_ownership::snapshot(ctx, package)?)
         } else {
             None
@@ -692,7 +704,7 @@ fn adoption_plan(
         timeout_secs: ctx.timeout_secs,
         package: package.clone(),
         action: Action::Adopt,
-        target: if crate::policy::uv_local::is_uv(&package.provider) {
+        target: if crate::software::rules::uv_local::is_uv(&package.provider) {
             None
         } else {
             before.version().map(str::to_owned)
@@ -707,7 +719,7 @@ fn adoption_plan(
     })
 }
 
-use crate::policy::state::expected;
+use crate::policy::operation::state::expected;
 
 #[cfg(test)]
 #[path = "../../tests/unit/npm_operations.rs"]

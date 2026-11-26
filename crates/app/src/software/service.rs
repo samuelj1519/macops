@@ -3,11 +3,8 @@ use crate::{
     context::Context,
     domain::{Action, Observation, Plan, fingerprint},
     error::{Error, Result},
-    operations,
-    operations::identity,
-    operations::providers,
+    operations::{self, identity, providers},
     platform::fs as paths,
-    policy,
 };
 use serde_json::{Value, json};
 
@@ -22,7 +19,7 @@ pub fn control(
         return Err(Error::new("undeclared_service", name));
     }
     let scoped = identity::service_context(ctx)?;
-    let package = policy::service::package();
+    let package = crate::software::rules::service::package();
     let catalog = inventory::load(&scoped)?;
     if fingerprint(catalog.select(&package.id)?)? != fingerprint(&package)? {
         return Err(Error::attention(
@@ -37,7 +34,7 @@ pub fn control(
             "当前服务状态或归属无法确认，未执行",
         ));
     }
-    if policy::service::expected(action, &before) {
+    if crate::software::rules::service::expected(action, &before) {
         return Ok(
             json!({"backend":"rust","mode":if dry_run {"dry-run"} else {"no-op"},"service":name,"observation":before,"changed":false,"persistentWrites":false}),
         );

@@ -1,10 +1,10 @@
 use crate::{
+    config::rules::chezmoi_native::{Binding, Stamp},
     context::Context,
     domain::CommandSpec,
     error::{Error, Result},
     operations::store::Store,
     platform::fs::{self as paths, Directory},
-    policy::chezmoi_native::{Binding, Stamp},
 };
 use sha2::{Digest, Sha256};
 use std::{
@@ -145,7 +145,7 @@ pub fn inputs(binding: &Binding, sources: &[PathBuf]) -> Result<Vec<Stamp>> {
 }
 
 pub fn verify(binding: &Binding) -> Result<()> {
-    crate::policy::chezmoi_native::validate(binding)?;
+    crate::config::rules::chezmoi_native::validate(binding)?;
     if paths::read_path(&binding.lookup)? != binding.program {
         return Err(changed());
     }
@@ -406,7 +406,7 @@ fn discover_bound(ctx: &Context, lookup: PathBuf, program: PathBuf) -> Result<Bi
         .trim_end_matches(',');
     let version = format!(
         "chezmoi version v{}",
-        crate::policy::parsers::exact_version(version).map_err(|_| changed())?
+        crate::policy::operation::parsers::exact_version(version).map_err(|_| changed())?
     );
     let config_data = crate::policy::json::parse(&run(&["dump-config", "--format=json"])?)
         .map_err(|_| changed())?;

@@ -1,12 +1,14 @@
 use super::{Cache, Managed, io, package, policy, validate_cache};
 use crate::{
+    config::rules::chezmoi_native::{Query, QueryKind, SourceChange, SourceMode},
     context::Context,
     domain::{Plan, Provider, QuerySpec, fingerprint},
     error::{Error, Result},
-    operations,
-    operations::store::{Journal, Phase, Store},
+    operations::{
+        self,
+        store::{Journal, Phase, Store},
+    },
     platform::fs::Directory,
-    policy::chezmoi_native::{Query, QueryKind, SourceChange, SourceMode},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};

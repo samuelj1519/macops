@@ -1,10 +1,8 @@
 #![cfg(test)]
 use super::*;
 use crate::{
-    policy::{
-        delivery::Profile,
-        profile_fields::{ConfigProfile, Role},
-    },
+    capability::rules::delivery::Profile,
+    policy::profile::profile_fields::{ConfigProfile, Role},
     test_support::TestResult,
 };
 fn plugins(profile: Profile, names: &[&str]) -> Request {

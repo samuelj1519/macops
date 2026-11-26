@@ -109,7 +109,7 @@ fn native_check_and_typed_candidate_cache_are_readonly_for_native_registry_and_s
     let id = policy::installation_id(&disk::payload(&ctx, "alpha")?)?;
     let now = crate::operations::store::now();
     let scope = cache_scope(&ctx);
-    let candidate = crate::policy::source_index::Candidate {
+    let candidate = crate::source::rules::source_index::Candidate {
         member: id.clone(),
         repository: "owner/repo".into(),
         locator_sha256: policy::locator(&recipe, &id)?,
@@ -121,7 +121,7 @@ fn native_check_and_typed_candidate_cache_are_readonly_for_native_registry_and_s
     };
     let cache = CheckCache {
         schema_version: 1,
-        index: crate::policy::source_index::Index::empty(scope.clone())?.merge(
+        index: crate::source::rules::source_index::Index::empty(scope.clone())?.merge(
             &scope,
             vec![candidate],
             now,
@@ -309,7 +309,7 @@ fn tracking_cache_uses_actual_native_folder_hash_and_ignores_repository_only_com
     let id = policy::installation_id(&disk::payload(&ctx, "alpha")?)?;
     let scope = cache_scope(&ctx);
     let now = crate::operations::store::now();
-    let candidate = crate::policy::source_index::Candidate {
+    let candidate = crate::source::rules::source_index::Candidate {
         member: id.clone(),
         repository: "owner/repo".into(),
         locator_sha256: policy::locator(&recipe, &id)?,
@@ -321,7 +321,7 @@ fn tracking_cache_uses_actual_native_folder_hash_and_ignores_repository_only_com
     };
     let cache = CheckCache {
         schema_version: 1,
-        index: crate::policy::source_index::Index::empty(scope.clone())?.merge(
+        index: crate::source::rules::source_index::Index::empty(scope.clone())?.merge(
             &scope,
             vec![candidate],
             now,
@@ -444,7 +444,9 @@ fn observed_native_success_advances_customization_and_record_stages_only_after_t
     assert_eq!(result["deliveryStage"], "verified");
     assert_eq!(journal.phase, Phase::Succeeded);
     let raw = fs::read(disk::payload(&ctx, "alpha")?.join("SKILL.md"))?;
-    assert!(crate::policy::invocation::manual_frontmatter(&raw)?);
+    assert!(crate::capability::rules::invocation::manual_frontmatter(
+        &raw
+    )?);
     let receipt: StepReceipt =
         policy::decode(&fs::read(receipt_path(&ctx, &journal.plan.package.id))?)?;
     assert_eq!(receipt.operation_id, journal.id);

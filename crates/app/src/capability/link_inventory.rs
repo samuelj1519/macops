@@ -1,15 +1,18 @@
 use crate::{
-    capability::capability_guard,
-    capability::capability_store as store,
+    capability::{
+        capability_guard, capability_store as store,
+        rules::{
+            capability_tx::{DirectoryWitness, LinkAuthority, Namespace, State, Witness},
+            delivery::{
+                self, LinkRule, LinkText, LinkUnit, Profile, Profiles, Selection, SourceGroup,
+            },
+        },
+    },
     context::Context,
     error::{Error, Result},
     operations::governance::Governance,
     platform::fs::{Directory, EntryKind},
-    policy::{
-        capability_tx::{DirectoryWitness, LinkAuthority, Namespace, State, Witness},
-        delivery::{self, LinkRule, LinkText, LinkUnit, Profile, Profiles, Selection, SourceGroup},
-        governance::Dataset,
-    },
+    policy::governance::Dataset,
 };
 use serde_json::{Value, json};
 use std::{
@@ -238,7 +241,7 @@ fn channels(bytes: Option<&[u8]>) -> Result<BTreeMap<String, String>> {
         .map(|(source, id)| {
             let id = id
                 .as_str()
-                .filter(|s| crate::policy::resources::component(s) && s.len() <= 255)
+                .filter(|s| crate::policy::catalog::resources::component(s) && s.len() <= 255)
                 .ok_or_else(invalid)?;
             Ok((source.clone(), id.into()))
         })
@@ -257,7 +260,7 @@ fn source_groups(
     let mut identities = BTreeMap::new();
     let mut observed = BTreeMap::new();
     if let Some(bytes) = reader.regular(&lock)? {
-        let book = crate::policy::resources::skill_lock(&bytes, false)?;
+        let book = crate::policy::catalog::resources::skill_lock(&bytes, false)?;
         for (name, record) in book.skills {
             let Some(unit) = units.get_mut(&name) else {
                 return Err(Error::attention(
@@ -265,7 +268,7 @@ fn source_groups(
                     "原生登记包含缺失 canonical 载荷，保留链接待审",
                 ));
             };
-            unit.id = crate::policy::capability_local::skill_capability_id(
+            unit.id = crate::capability::rules::capability_local::skill_capability_id(
                 &lock,
                 &name,
                 &record.source_type,

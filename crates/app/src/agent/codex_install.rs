@@ -364,7 +364,7 @@ fn project_config(
     {
         return Err(stale());
     }
-    let plugins = crate::policy::resources::codex_plugins(bytes)?;
+    let plugins = crate::policy::catalog::resources::codex_plugins(bytes)?;
     if installed {
         let id = p.offer.native_id();
         let configured = doc
@@ -814,7 +814,10 @@ fn adoption(ctx: &Context, p: &Prepared) -> Result<Plan> {
     let native_id = p.offer.native_id();
     let payload = p.payload();
     let package = Package {
-        id: crate::policy::capability_local::codex_capability_id(&profile_id, &native_id)?,
+        id: crate::capability::rules::capability_local::codex_capability_id(
+            &profile_id,
+            &native_id,
+        )?,
         name: native_id.clone(),
         kind: Kind::Plugin,
         official_url: "https://developers.openai.com/codex/plugins".into(),
@@ -837,7 +840,7 @@ fn adoption(ctx: &Context, p: &Prepared) -> Result<Plan> {
     crate::catalog::target::check_owner(ctx, &package)?;
     let query = capability_local::capture(&package)?;
     let before = capability_local::observe_default(&package.id, &query)?;
-    crate::policy::capability_local::adoptable_observation(&package, &before)?;
+    crate::capability::rules::capability_local::adoptable_observation(&package, &before)?;
     Ok(Plan {
         brew: None,
         uv_owner: None,
@@ -860,7 +863,7 @@ fn fence(store: &Store, allowed: &str) -> Result<()> {
     store.check_migration_pending()?;
     if let Some(active) = Store::read::<Journal>(&store.root, "active.json")? {
         crate::operations::store::validate_journal(&active)?;
-        if crate::policy::state::pending(active.phase) && active.id != allowed {
+        if crate::policy::operation::state::pending(active.phase) && active.id != allowed {
             return Err(failed("recovery_required"));
         }
     }
@@ -972,7 +975,7 @@ fn publish_isolated(
         }
         if let Some(active) = Store::read::<Journal>(&store.root, "active.json")?
             && active.id == record.id
-            && crate::policy::state::pending(active.phase)
+            && crate::policy::operation::state::pending(active.phase)
         {
             store
                 .publish_existing_terminal(&active)?
@@ -1283,11 +1286,11 @@ fn recover_using(
     if journal.phase == Phase::Failed {
         return Ok(json!(journal));
     }
-    if crate::policy::state::pending(journal.phase) {
+    if crate::policy::operation::state::pending(journal.phase) {
         fence(store, &journal.id)?;
         if let Some(active) = Store::read::<Journal>(&store.root, "active.json")?
             && active.id == journal.id
-            && crate::policy::state::pending(active.phase)
+            && crate::policy::operation::state::pending(active.phase)
             && let Some(terminal) = store.publish_existing_terminal(&active)?
         {
             *journal = terminal;
@@ -1299,7 +1302,7 @@ fn recover_using(
             return Ok(json!(journal));
         }
     }
-    if crate::policy::state::pending(journal.phase) {
+    if crate::policy::operation::state::pending(journal.phase) {
         let outcome = (native.outcome)(journal)?;
         if outcome == NativeOutcome::Running {
             return Err(failed("operation_in_flight"));

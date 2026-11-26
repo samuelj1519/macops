@@ -61,7 +61,7 @@ fn exact_release(output: &ProcessOutput, query: &MiseQuery) -> Result<Release> {
     {
         return Err(review());
     }
-    crate::policy::parsers::exact_version(&release.version)?;
+    crate::policy::operation::parsers::exact_version(&release.version)?;
     Ok(release)
 }
 

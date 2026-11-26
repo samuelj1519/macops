@@ -42,7 +42,7 @@ fn fixture() -> Result<(tempfile::TempDir, Context, Package)> {
         ),
     )?;
     let package = Package {
-        id: crate::policy::uv_local::tool_id(&root, "demo-tool")?,
+        id: crate::software::rules::uv_local::tool_id(&root, "demo-tool")?,
         name: "demo-tool".into(),
         kind: Kind::Cli,
         official_url: String::new(),
@@ -64,7 +64,7 @@ fn uv_plan_drift_owner_change_and_unknown_namespace_never_commit() -> TestResult
         let (_tmp, ctx, package) = fixture()?;
         let planned = plan(&ctx, &package, Action::Adopt, None, false)?;
         let (name, binding) =
-            crate::policy::uv_local::descriptor(&package.provider).ok_or("binding")?;
+            crate::software::rules::uv_local::descriptor(&package.provider).ok_or("binding")?;
         match change {
             "metadata" => fs::write(
                 binding
@@ -251,7 +251,8 @@ fn uv_adopted_namespace_replacement_cannot_be_silently_recaptured() -> TestResul
     let (_tmp, ctx, package) = fixture()?;
     let planned = plan(&ctx, &package, Action::Adopt, None, false)?;
     execute(&ctx, planned, false, true)?;
-    let (_, binding) = crate::policy::uv_local::descriptor(&package.provider).ok_or("binding")?;
+    let (_, binding) =
+        crate::software::rules::uv_local::descriptor(&package.provider).ok_or("binding")?;
     fs::rename(&binding.tool_dir, ctx.home.join("old-tool-root"))?;
     fs::create_dir(&binding.tool_dir)?;
     fs::rename(

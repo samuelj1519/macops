@@ -1,20 +1,25 @@
 use crate::{
-    capability::capability_guard,
-    capability::capability_store as store,
-    capability::link_inventory::Reader,
+    capability::{
+        capability_guard, capability_store as store,
+        link_inventory::Reader,
+        rules::{
+            delivery::{self, Profile, Profiles},
+            invocation,
+        },
+    },
     context::Context,
     error::{Error, Result},
     operations::governance::Governance,
     platform::fs::Directory,
     policy::{
-        claude_fields, codex_profile,
-        delivery::{self, Profile, Profiles},
         governance::Dataset,
-        invocation,
-        profile_authority::{self, Authority, Client, StaticSource, Target},
-        profile_fields::{ConfigProfile, Intent, Owner, Role},
-        profile_registry,
-        profile_select::Selected,
+        profile::{
+            claude_fields, codex_profile,
+            profile_authority::{self, Authority, Client, StaticSource, Target},
+            profile_fields::{ConfigProfile, Intent, Owner, Role},
+            profile_registry,
+            profile_select::Selected,
+        },
     },
 };
 use serde_json::{Value, json};
@@ -30,8 +35,8 @@ fn invalid() -> Error {
 }
 pub struct Patch {
     pub path: PathBuf,
-    pub before: crate::policy::capability_tx::State,
-    pub namespace: crate::policy::capability_tx::Namespace,
+    pub before: crate::capability::rules::capability_tx::State,
+    pub namespace: crate::capability::rules::capability_tx::Namespace,
     pub before_bytes: Vec<u8>,
     pub after: Vec<u8>,
     pub mode: u32,
@@ -176,7 +181,7 @@ fn pstack_catalog(
 ) -> Result<(Vec<String>, String)> {
     let path = root.join("plugins/installed_plugins.json");
     let bytes = reader.regular(&path)?.ok_or_else(invalid)?;
-    let book = crate::policy::resources::plugin_book(&bytes)?;
+    let book = crate::policy::catalog::resources::plugin_book(&bytes)?;
     let rows: Vec<_> = book
         .plugins
         .get("pstack@cursor-plugins")
@@ -188,7 +193,7 @@ fn pstack_catalog(
         return Err(invalid());
     };
     let version = record.version.as_deref().ok_or_else(invalid)?;
-    if !crate::policy::resources::component(version)
+    if !crate::policy::catalog::resources::component(version)
         || record.path
             != root
                 .join("plugins/cache/cursor-plugins/pstack")
@@ -607,7 +612,7 @@ fn project_work(
             book.profiles.remove(&path);
         }
         if after != before_bytes {
-            let crate::policy::capability_tx::State::File { mode, .. } = before else {
+            let crate::capability::rules::capability_tx::State::File { mode, .. } = before else {
                 return Err(invalid());
             };
             patches.push(Patch {

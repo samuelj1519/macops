@@ -3,6 +3,7 @@ use crate::{
     domain::{MiseQuery, Observation, QuerySpec, Receipts},
     error::{Error, Result},
     platform::fs as paths,
+    policy::operation::state as state_policy,
 };
 use fs2::FileExt;
 use rustix::fs::{Mode, OFlags};
@@ -343,14 +344,14 @@ impl Store {
             Ok(journal)
         };
         let completed = decode(&history.0)?;
-        if crate::policy::state::pending(completed.phase) {
+        if state_policy::pending(completed.phase) {
             return Ok(None);
         }
         let mut expected = active.clone();
         expected.phase = completed.phase;
         expected.message.clone_from(&completed.message);
         let observed = state.regular_config_snapshot(active_name, LIMIT)?;
-        if !crate::policy::state::pending(active.phase)
+        if !state_policy::pending(active.phase)
             || crate::domain::fingerprint(&completed)? != crate::domain::fingerprint(&expected)?
             || crate::domain::fingerprint(&decode(&observed.0)?)?
                 != crate::domain::fingerprint(active)?
@@ -385,7 +386,7 @@ impl Store {
             schema_version: 1,
             installations: std::collections::BTreeMap::default(),
         });
-        crate::policy::state::receipt_schema(&value)?;
+        state_policy::receipt_schema(&value)?;
         self.verify_namespace()?;
         Ok(value)
     }
@@ -442,21 +443,19 @@ impl Store {
             }
             self.verify_namespace()
         };
-        if crate::policy::service::is_control(journal.plan.action) {
+        if crate::software::rules::service::is_control(journal.plan.action) {
             return check().map_err(CommitFailure::Check);
         }
         let mut receipts = self.receipts().map_err(CommitFailure::Outcome)?;
         let changed = match verified_query {
-            Some(query) => crate::policy::state::commit_verified_receipt(
+            Some(query) => state_policy::commit_verified_receipt(
                 &mut receipts,
                 journal,
                 observation,
                 now(),
                 Some(query.clone()),
             ),
-            None => {
-                crate::policy::state::commit_receipt(&mut receipts, journal, observation, now())
-            }
+            None => state_policy::commit_receipt(&mut receipts, journal, observation, now()),
         }
         .map_err(CommitFailure::Outcome)?;
         if !changed {
@@ -510,7 +509,7 @@ impl Store {
 }
 
 fn require_settled(journal: &Journal) -> Result<()> {
-    if crate::policy::state::pending(journal.phase) {
+    if state_policy::pending(journal.phase) {
         return Err(Error::attention(
             "recovery_required",
             "上一次操作的结果还没确认。运行 mo recover 查看待检查的操作。",
@@ -551,7 +550,7 @@ pub fn history(ctx: &Context) -> Result<Vec<Journal>> {
     Ok(result)
 }
 
-pub use crate::policy::state::{valid_id, validate_journal};
+pub use crate::policy::operation::state::{valid_id, validate_journal};
 #[cfg(test)]
 #[path = "../../tests/unit/store.rs"]
 mod tests;

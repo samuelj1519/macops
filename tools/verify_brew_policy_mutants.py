@@ -10,7 +10,7 @@ import stat
 import subprocess
 
 ROOT=Path(__file__).resolve().parents[1]
-POLICY='crates/app/src/policy/brew.rs'
+POLICY='crates/app/src/software/rules/brew.rs'
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
@@ -40,7 +40,7 @@ def main():
         (work/'source-base.json').write_text(json.dumps(manifest,sort_keys=True,indent=2)+'\n')
         (tree/POLICY).write_text(source.replace(old,new,1))
         build=(args.reuse_build_root/name/'build') if args.reuse_build_root else (work/'build')
-        command=['/usr/bin/env','RUSTC_WRAPPER=','CARGO_TARGET_DIR='+str(build),'cargo','test','--workspace','--lib','policy::brew::tests::'+test,'--all-features','--locked','--offline','--','--exact','--nocapture']
+        command=['/usr/bin/env','RUSTC_WRAPPER=','CARGO_TARGET_DIR='+str(build),'cargo','test','--workspace','--lib','software::rules::brew::tests::'+test,'--all-features','--locked','--offline','--','--exact','--nocapture']
         result=subprocess.run(command,cwd=tree,capture_output=True,text=True,timeout=240)
         output=result.stdout+result.stderr;(work/'test.log').write_text(output)
         valid=result.returncode==101 and 'test result: FAILED' in output and '1 failed' in output and 'could not compile' not in output and 'error[E' not in output

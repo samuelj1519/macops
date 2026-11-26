@@ -3,7 +3,7 @@ use crate::{
     domain::{Scope, ServiceIdentity},
     error::{Error, Result},
     platform::fs as paths,
-    policy::service,
+    software::rules::service,
 };
 use std::{
     os::unix::fs::MetadataExt,

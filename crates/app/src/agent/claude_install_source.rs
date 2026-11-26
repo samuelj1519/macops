@@ -1,14 +1,18 @@
 use crate::{
-    agent::codex_install_source::{Files, VerifiedFile, sha, with_verified_files},
-    agent::native_plugins::valid_name,
+    agent::{
+        codex_install_source::{Files, VerifiedFile, sha, with_verified_files},
+        native_plugins::valid_name,
+    },
     error::{Error, Result},
     platform::fs::Directory,
     policy::{
         source_git::{ObjectId, Repository},
-        source_payload::{Entry, Payload},
         source_tree::{Slot, Tree},
     },
-    source::source_git::Git,
+    source::{
+        rules::source_payload::{Entry, Payload},
+        source_git::Git,
+    },
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

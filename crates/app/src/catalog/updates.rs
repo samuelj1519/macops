@@ -10,11 +10,11 @@ use serde_json::{Value, json};
 pub use crate::domain::Index;
 
 pub fn latest(ctx: &Context, package: &Package) -> Result<String> {
-    let spec = crate::operations::providers::resolve(crate::policy::commands::available_query(
-        &ctx.home, package,
-    )?)?;
+    let spec = crate::operations::providers::resolve(
+        crate::policy::operation::commands::available_query(&ctx.home, package)?,
+    )?;
     let out = crate::operations::command::query(&ctx.scope, &spec)?;
-    crate::policy::parsers::available(package, &out)
+    crate::policy::operation::parsers::available(package, &out)
 }
 
 pub fn load(ctx: &Context) -> Result<(Index, Option<Book>)> {
@@ -23,7 +23,7 @@ pub fn load(ctx: &Context) -> Result<(Index, Option<Book>)> {
         return Ok((Index::empty(), None));
     };
     namespace.assert_current(ctx, &registry)?;
-    crate::policy::cache::registered_scope(&registry, &namespace.key, &ctx.cache)?;
+    crate::policy::catalog::cache::registered_scope(&registry, &namespace.key, &ctx.cache)?;
     let book = registry.book(&namespace.path, &namespace.identity, &namespace.key);
     let index = if let Some(ref hash) = book.current {
         namespace.read_blob::<Index>(hash)?
@@ -40,7 +40,7 @@ pub fn read(ctx: &Context) -> Result<Index> {
 
 pub fn update(ctx: &Context, packages: &[&Package], dry_run: bool) -> Result<Value> {
     for package in packages {
-        crate::policy::uv_local::action(&package.provider, crate::domain::Action::Update)?;
+        crate::software::rules::uv_local::action(&package.provider, crate::domain::Action::Update)?;
     }
     if dry_run {
         return Ok(
@@ -82,7 +82,7 @@ fn update_locked(
     for package in packages {
         match latest(package) {
             Ok(version) => {
-                crate::policy::cache::apply_refresh(
+                crate::policy::catalog::cache::apply_refresh(
                     &mut index,
                     &mut book,
                     package,
@@ -98,7 +98,7 @@ fn update_locked(
     namespace.assert_current(ctx, &registry)?;
     let (hash, created) = namespace.publish(&index)?;
     namespace.assert_current(ctx, &registry)?;
-    let owned = crate::policy::cache::register_current(&mut book, &hash, created);
+    let owned = crate::policy::catalog::cache::register_current(&mut book, &hash, created);
     registry.scopes.insert(namespace.key.clone(), book);
     Store::atomic(&store.root, BOOK_FILE, &registry)?;
     Ok(json!({"results":results,"cache":ctx.cache,"index":hash,"created":created,"owned":owned}))
@@ -109,7 +109,7 @@ pub fn outdated(ctx: &Context, packages: &[&Package]) -> Result<Value> {
     let mut rows = vec![];
     for p in packages {
         let installed = crate::catalog::inventory::observe(ctx, p);
-        let row = crate::policy::cache::outdated_row(
+        let row = crate::policy::catalog::cache::outdated_row(
             p,
             &ctx.scope,
             &installed,

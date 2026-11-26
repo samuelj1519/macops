@@ -710,7 +710,7 @@ fn fence(store: &Store, allowed: &str) -> Result<()> {
     store.check_migration_pending()?;
     if let Some(active) = Store::read::<Journal>(&store.root, "active.json")? {
         store::validate_journal(&active)?;
-        if crate::policy::state::pending(active.phase) && active.id != allowed {
+        if crate::policy::operation::state::pending(active.phase) && active.id != allowed {
             return Err(Error::attention(
                 "recovery_required",
                 "先核对当前未收口的原操作",
@@ -726,7 +726,10 @@ fn adoption(input: &Frozen, journal: &Journal) -> Result<Plan> {
     let profile_id = crate::domain::resource::id("agent", &("claude", &profile))?;
     let native_id = p.offer.native_id();
     let package = Package {
-        id: crate::policy::capability_local::plugin_capability_id(&profile_id, &native_id),
+        id: crate::capability::rules::capability_local::plugin_capability_id(
+            &profile_id,
+            &native_id,
+        ),
         name: p.offer.plugin.clone(),
         kind: Kind::Plugin,
         official_url: p.offer.url()?,
@@ -903,7 +906,7 @@ fn finish_publication(
         }
         if let Some(active) = Store::read::<Journal>(&store.root, "active.json")?
             && active.id == record.id
-            && crate::policy::state::pending(active.phase)
+            && crate::policy::operation::state::pending(active.phase)
         {
             store
                 .publish_existing_terminal(&active)?
@@ -1233,13 +1236,13 @@ fn recover_using(
     scope(ctx, journal)?;
     let directory = physical(&store.path)?;
     let input = frozen(journal, &directory)?;
-    if crate::policy::state::pending(journal.phase) {
+    if crate::policy::operation::state::pending(journal.phase) {
         fence(store, &journal.id)?;
         if let Some(terminal) = store.publish_existing_terminal(journal)? {
             *journal = terminal;
         }
     }
-    if crate::policy::state::pending(journal.phase) {
+    if crate::policy::operation::state::pending(journal.phase) {
         finish_original(store, journal, &input, resolve_failed, yes, native)?;
     }
     if journal.phase == Phase::Succeeded

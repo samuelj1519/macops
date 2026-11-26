@@ -32,7 +32,7 @@ fn native_adoption_rechecks_source_version_links_and_canonical_declarations() ->
             br#"{"name":"demo","version":"1.0.0","_resolved":"first"}"#,
         )?;
         let package = Package {
-            id: crate::policy::targets::npm_id(&prefix, "demo")?,
+            id: crate::policy::catalog::targets::npm_id(&prefix, "demo")?,
             name: "demo".into(),
             kind: crate::domain::Kind::Cli,
             provider: Provider::NpmObserved {

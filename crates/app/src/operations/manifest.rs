@@ -4,10 +4,9 @@ use crate::{
     context::Context,
     domain::{Action, Package, Plan, Receipt, fingerprint},
     error::{Error, Result},
-    operations,
-    operations::providers,
+    operations::{self, providers},
     platform::fs::Directory,
-    policy::manifest::{self as policy, Entry, Manifest},
+    policy::operation::manifest::{self as policy, Entry, Manifest},
 };
 use serde_json::{Value, json};
 use std::{
@@ -257,7 +256,9 @@ fn replay_plan(ctx: &Context, intent: &Entry, version: &str) -> Result<Option<Pl
             crate::catalog::target::check_owner(ctx, &package)?;
             let query = providers::capture_query(ctx, &package, Some(Action::Upgrade))?;
             let native = providers::observe_query(&package, &query, &ctx.scope, false)?;
-            crate::policy::state::receipt_matches(&ctx.scope, &package, &native, &query, receipt)?;
+            crate::policy::operation::state::receipt_matches(
+                &ctx.scope, &package, &native, &query, receipt,
+            )?;
             return Ok(None);
         }
     }
@@ -282,7 +283,7 @@ fn check_pending_read_only(ctx: &Context) -> Result<()> {
     )?;
     if let Some(journal) = active {
         crate::operations::store::validate_journal(&journal)?;
-        if crate::policy::state::pending(journal.phase) {
+        if crate::policy::operation::state::pending(journal.phase) {
             return Err(Error::attention(
                 "operation_recovery_required",
                 "上一次操作的结果还没确认。运行 mo recover 查看待检查的操作。",

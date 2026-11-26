@@ -147,22 +147,25 @@ fn observer_journal_cannot_be_repurposed_into_a_mutating_worker() -> TestResult 
     };
     j.plan.recipe_sha256 = fingerprint(&j.plan.package)?;
     j.plan_sha256 = fingerprint(&j.plan)?;
-    crate::policy::state::validate_journal(&j)?;
+    crate::policy::operation::state::validate_journal(&j)?;
     let mut invalid_scope = j.clone();
     invalid_scope.scope.service_identity = Some(crate::domain::ServiceIdentity {
         name: "fixture".into(),
         uid: 501,
     });
     invalid_scope.scope_sha256 = fingerprint(&invalid_scope.scope)?;
-    assert!(crate::policy::state::validate_journal(&invalid_scope).is_err());
+    assert!(crate::policy::operation::state::validate_journal(&invalid_scope).is_err());
     validate_journal(&j)?;
-    assert!(crate::policy::state::expected(&j, &j.plan.before));
+    assert!(crate::policy::operation::state::expected(
+        &j,
+        &j.plan.before
+    ));
     let mut invalid = j.clone();
     invalid.plan.package.id = "another-instance".into();
     assert!(validate_journal(&invalid).is_err());
     invalid.plan.recipe_sha256 = fingerprint(&invalid.plan.package)?;
     invalid.plan_sha256 = fingerprint(&invalid.plan)?;
-    assert!(crate::policy::state::validate_journal(&invalid).is_err());
+    assert!(crate::policy::operation::state::validate_journal(&invalid).is_err());
     for action in [Action::Install, Action::Upgrade, Action::Uninstall] {
         let mut bad = j.clone();
         bad.plan.action = action;
@@ -293,12 +296,12 @@ fn native_baseline_comparison_and_execution_contract_preserve_read_only_authorit
         Comparison::Unknown
     );
     let p = observer()?;
-    crate::policy::state::plan_inputs(&p, Action::Adopt, &observed, None)?;
+    crate::policy::operation::state::plan_inputs(&p, Action::Adopt, &observed, None)?;
     for action in [Action::Install, Action::Upgrade, Action::Uninstall] {
-        assert!(crate::policy::state::plan_inputs(&p, action, &observed, None).is_err());
+        assert!(crate::policy::operation::state::plan_inputs(&p, action, &observed, None).is_err());
     }
     assert!(
-        crate::policy::state::plan_inputs(
+        crate::policy::operation::state::plan_inputs(
             &crate::test_support::package(),
             Action::Adopt,
             &observed,
@@ -308,13 +311,16 @@ fn native_baseline_comparison_and_execution_contract_preserve_read_only_authorit
     );
     let mut invalid = p;
     invalid.id = "wrong".into();
-    assert!(crate::policy::state::plan_inputs(&invalid, Action::Adopt, &observed, None).is_err());
+    assert!(
+        crate::policy::operation::state::plan_inputs(&invalid, Action::Adopt, &observed, None)
+            .is_err()
+    );
     let mut j = crate::test_support::journal()?;
     j.plan.before = observed.clone();
     assert!(validate_journal(&j).is_err());
-    assert!(!crate::policy::state::expected(&j, &observed));
+    assert!(!crate::policy::operation::state::expected(&j, &observed));
     j.plan.action = Action::Adopt;
-    assert!(!crate::policy::state::expected(
+    assert!(!crate::policy::operation::state::expected(
         &j,
         &Observation::NativePackage {
             version: "1.0.0".into(),
@@ -451,7 +457,10 @@ fn config_observer_baseline_and_inputs_stay_isolated_from_npm_observers() -> Tes
     let mut bad_obs = observer()?;
     bad_obs.id = "broken".into();
     assert!(super::observer(&bad_obs).is_err());
-    assert!(crate::policy::state::plan_inputs(&cfg_pkg, Action::Adopt, &npm_obs, None).is_err());
+    assert!(
+        crate::policy::operation::state::plan_inputs(&cfg_pkg, Action::Adopt, &npm_obs, None)
+            .is_err()
+    );
     let cap_obs = Observation::CapabilityPack {
         capability: crate::domain::CapabilityKind::SkillsCli,
         pack: None,

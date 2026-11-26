@@ -1,12 +1,12 @@
 use crate::{
-    capability::capability_store as files,
+    capability::{
+        capability_store as files,
+        rules::capability_tx::{Namespace, State, Witness},
+    },
     error::{Error, Result},
     platform::fs::{Directory, EntryKind},
-    policy::{
-        capability_tx::{Namespace, State, Witness},
-        source_files::{self as policy, Object, Pair},
-        source_tree::{Position, Slot},
-    },
+    policy::source_tree::{Position, Slot},
+    source::rules::source_files::{self as policy, Object, Pair},
 };
 use std::{ffi::OsStr, io::Write, os::unix::fs::MetadataExt};
 fn invalid() -> Error {

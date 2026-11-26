@@ -73,7 +73,7 @@ pub fn observe(ctx: &Context) -> Result<Observation> {
             continue;
         };
         let profile_id = crate::domain::resource::id("agent", &("claude", &path))?;
-        match crate::policy::resources::plugin_book(&raw) {
+        match crate::policy::catalog::resources::plugin_book(&raw) {
             Ok(book)=>for (name,records) in book.plugins {
                 if records.is_empty() {observation.unsupported.push(json!({"id":format!("plugin:{name}"),"profile":profile_id,"reason":"unknown_native_plugin_registration"}));}
                 for record in records {
@@ -89,10 +89,12 @@ pub fn observe(ctx: &Context) -> Result<Observation> {
 }
 impl Observation {
     pub fn verify(&self) -> Result<()> {
-        crate::capability::capability_store::open(&crate::policy::capability_tx::Namespace {
-            ancestor: self.home.clone(),
-            remaining: vec![".probe".into()],
-        })?;
+        crate::capability::capability_store::open(
+            &crate::capability::rules::capability_tx::Namespace {
+                ancestor: self.home.clone(),
+                remaining: vec![".probe".into()],
+            },
+        )?;
         if profiles(&self.ctx)?
             != self
                 .profiles
@@ -103,10 +105,12 @@ impl Observation {
             return Err(invalid());
         }
         for binding in &self.profiles {
-            crate::capability::capability_store::open(&crate::policy::capability_tx::Namespace {
-                ancestor: binding.clone(),
-                remaining: vec![".probe".into()],
-            })?;
+            crate::capability::capability_store::open(
+                &crate::capability::rules::capability_tx::Namespace {
+                    ancestor: binding.clone(),
+                    remaining: vec![".probe".into()],
+                },
+            )?;
         }
         self.reader.verify()
     }

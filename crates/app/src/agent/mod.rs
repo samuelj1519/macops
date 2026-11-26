@@ -1,6 +1,7 @@
 pub(crate) mod ai;
 pub(crate) mod ai_gate;
 pub(crate) mod ai_payload;
+pub(crate) mod ai_policy;
 pub(crate) mod ai_state;
 pub(crate) mod ai_tx;
 pub(crate) mod claude_install;

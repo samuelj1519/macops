@@ -1,8 +1,8 @@
 use super::*;
 use crate::domain::{Action, Observation};
 use crate::{
+    config::rules::chezmoi_native::{Binding, Stamp},
     domain::Scope,
-    policy::chezmoi_native::{Binding, Stamp},
     test_support::TestResult,
 };
 use clap::Parser;

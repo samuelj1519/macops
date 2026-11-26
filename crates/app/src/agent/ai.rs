@@ -1,5 +1,6 @@
 use crate::{
     agent::ai_gate as gate,
+    agent::ai_policy as policy,
     agent::ai_state::{self, Mise, Snapshot, Upgrade},
     cli::{AgentCmd, AppCmd, Command},
     config::config_tx,
@@ -8,7 +9,6 @@ use crate::{
         Action, CommandSpec, Kind, Observation, Package, Plan, Provider, QuerySpec, fingerprint,
     },
     error::{Error, Result},
-    policy::ai as policy,
 };
 use serde_json::{Value, json};
 
@@ -236,7 +236,7 @@ fn prepare(
                 &mise,
                 vec![
                     "latest".into(),
-                    crate::policy::config_tx::ai_mise_spec(tool)?.into(),
+                    crate::config::rules::config_tx::ai_mise_spec(tool)?.into(),
                 ],
             )?;
             version = policy::version(tool, Some(latest.trim()))?;
@@ -286,7 +286,7 @@ fn upgrade_args(upgrade: &Upgrade) -> Result<Vec<String>> {
             "--pin".into(),
             format!(
                 "{}@{}",
-                crate::policy::config_tx::ai_mise_spec(&upgrade.tool)?,
+                crate::config::rules::config_tx::ai_mise_spec(&upgrade.tool)?,
                 upgrade
                     .version
                     .as_deref()

@@ -1,5 +1,5 @@
 use crate::{
-    context::Context, domain::resource::Snapshot, error::Result, policy::resources::Filter,
+    context::Context, domain::resource::Snapshot, error::Result, policy::catalog::resources::Filter,
 };
 use std::path::Path;
 

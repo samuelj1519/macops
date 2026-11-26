@@ -2,6 +2,7 @@ pub(crate) mod migration_fs;
 pub(crate) mod migration_scan;
 pub(crate) mod migration_tx;
 pub(crate) mod migration_writers;
+mod rules;
 
 use crate::{
     cli::Migrate,
@@ -92,12 +93,9 @@ pub fn verify(ctx: &Context) -> Result<Value> {
         }
         let path = governance.paths.dataset(dataset);
         let checked = match fs::snapshot(&path) {
-            Ok(Some((bytes, _))) => crate::policy::migration::validate_dataset(
-                &ctx.home,
-                dataset,
-                &bytes,
-                nix::unistd::geteuid().as_raw(),
-            ),
+            Ok(Some((bytes, _))) => {
+                rules::validate_dataset(&ctx.home, dataset, &bytes, nix::unistd::geteuid().as_raw())
+            }
             Ok(None) if matches!(ledger.converted.get(&dataset), Some(Transfer::Missing)) => Ok(()),
             Ok(None) => Err(fs::error()),
             Err(error) => Err(error),
@@ -116,7 +114,7 @@ pub fn verify(ctx: &Context) -> Result<Value> {
 }
 
 fn recover(ctx: &Context, id: &str, dry_run: bool, yes: bool) -> Result<Value> {
-    if !crate::policy::state::valid_id(id) || id.len() > 128 {
+    if !crate::policy::operation::state::valid_id(id) || id.len() > 128 {
         return Err(fs::error());
     }
     if !migration_tx::pending(ctx)? {

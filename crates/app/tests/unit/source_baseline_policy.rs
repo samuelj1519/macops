@@ -156,8 +156,8 @@ fn a_second_member_cannot_claim_the_same_canonical_root_or_enter_a_duplicate_boo
     assert!(read(Some(&serde_json::to_vec(&doc)?), home, 501).is_err());
     Ok(())
 }
-fn patch(baseline: &Baseline) -> crate::policy::capability_tx::FileChange {
-    use crate::policy::{
+fn patch(baseline: &Baseline) -> crate::capability::rules::capability_tx::FileChange {
+    use crate::capability::rules::{
         capability_tx::{Blob, FileChange, Namespace, State},
         delivery::ChangeKind,
     };
@@ -190,9 +190,9 @@ fn patch(baseline: &Baseline) -> crate::policy::capability_tx::FileChange {
 #[test]
 fn own_metadata_projection_updates_only_selected_content_full_mode_and_explicit_private_parent()
 -> TestResult {
-    use crate::policy::{
-        capability_tx::{Namespace, State},
-        source_tree::ShapeEntry,
+    use crate::{
+        capability::rules::capability_tx::{Namespace, State},
+        policy::source_tree::ShapeEntry,
     };
     let (source, slot, tree) = fixture();
     let home = Path::new("/home");
@@ -210,7 +210,7 @@ fn own_metadata_projection_updates_only_selected_content_full_mode_and_explicit_
     );
     let mut generated = edit.clone();
     generated.path = baseline.slot.path().join("agents/openai.yaml");
-    generated.kind = crate::policy::delivery::ChangeKind::CodexPolicy;
+    generated.kind = crate::capability::rules::delivery::ChangeKind::CodexPolicy;
     generated.before = State::Missing;
     generated.before_blob = None;
     generated.namespace = Namespace {
@@ -253,10 +253,10 @@ fn metadata_projection_rejects_unknown_parents_modes_members_and_unmatched_befor
     let original = patch(&baseline);
     let mut cases = vec![];
     let mut p = original.clone();
-    p.kind = crate::policy::delivery::ChangeKind::ProfileJson;
+    p.kind = crate::capability::rules::delivery::ChangeKind::ProfileJson;
     cases.push(p);
     let mut p = original.clone();
-    p.before = crate::policy::capability_tx::State::Missing;
+    p.before = crate::capability::rules::capability_tx::State::Missing;
     cases.push(p);
     let mut p = original.clone();
     p.path = baseline.slot.path();
@@ -278,11 +278,11 @@ fn metadata_projection_rejects_unknown_parents_modes_members_and_unmatched_befor
     cases.push(p);
     let mut p = original.clone();
     p.path = baseline.slot.path().join("missing/file");
-    p.before = crate::policy::capability_tx::State::Missing;
+    p.before = crate::capability::rules::capability_tx::State::Missing;
     cases.push(p);
     let mut p = original.clone();
     p.path = baseline.slot.path().join("SKILL.md/file");
-    p.before = crate::policy::capability_tx::State::Missing;
+    p.before = crate::capability::rules::capability_tx::State::Missing;
     cases.push(p);
     for p in cases {
         assert!(project(&baseline, &[p], home, 501).is_err());

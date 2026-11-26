@@ -199,7 +199,7 @@ fn service_observation_requires_complete_flags_and_proven_user_without_echoing_i
 fn service_journal_requires_type_action_identity_and_a_frozen_command_pair() -> TestResult {
     let j = control_journal(Action::Start)?;
     validate_binding(&j)?;
-    crate::policy::state::validate_journal(&j)?;
+    crate::policy::operation::state::validate_journal(&j)?;
     validate_binding(&journal()?)?;
     validate_binding(&control_journal(Action::Stop)?)?;
     let mut bad = j.clone();
@@ -267,7 +267,7 @@ fn service_journal_never_accepts_other_formulas_programs_or_arguments() -> TestR
     };
     query.args = vec!["--all".into()];
     assert!(validate_binding(&bad).is_err());
-    assert!(crate::policy::state::expected(
+    assert!(crate::policy::operation::state::expected(
         &j,
         &Observation::Service {
             running: true,
@@ -275,7 +275,7 @@ fn service_journal_never_accepts_other_formulas_programs_or_arguments() -> TestR
             registered: true
         }
     ));
-    assert!(!crate::policy::state::expected(
+    assert!(!crate::policy::operation::state::expected(
         &j,
         &Observation::Service {
             running: true,

@@ -1,16 +1,14 @@
+use super::rules::{self, Classification};
 use crate::{
     context::Context,
     error::{Error, Result},
     migration::migration_fs as fs,
     migration::migration_writers::Fence,
     platform::fs::{Bindings, BoundTarget, Directory, EntryKind, Metadata},
-    policy::{
-        governance::{
-            self as policy, Archive, ArchiveKind, CommittedMigration, DATASETS, Dataset, FileProof,
-            IndexedEntry, Layout, LegacyLink, RetainKind, Retained, RetainedEntry, RetainedShape,
-            Transfer,
-        },
-        migration::{self, Classification},
+    policy::governance::{
+        self as policy, Archive, ArchiveKind, CommittedMigration, DATASETS, Dataset, FileProof,
+        IndexedEntry, Layout, LegacyLink, RetainKind, Retained, RetainedEntry, RetainedShape,
+        Transfer,
     },
 };
 use serde::Serialize;
@@ -116,7 +114,7 @@ fn capture_with(ctx: &Context, conflicts: bool, legacy_layout: Option<&Layout>) 
     }
     if let Some((bytes, _)) = fs::snapshot(&ctx.state.join("active.json"))? {
         match serde_json::from_slice::<crate::domain::Journal>(&bytes) {
-            Ok(journal) if !crate::policy::state::pending(journal.phase) => (),
+            Ok(journal) if !crate::policy::operation::state::pending(journal.phase) => (),
             _ => scan.block(
                 &ctx.state.join("active.json"),
                 "migration_existing_operation_pending",
@@ -149,7 +147,7 @@ fn capture_with(ctx: &Context, conflicts: bool, legacy_layout: Option<&Layout>) 
     for name in fs::names(&home)? {
         let path = ctx.home.join(name);
         if matches!(
-            migration::classify(&p, &path),
+            rules::classify(&p, &path),
             Classification::RetainInPlace(policy::RetainKind::Harness)
         ) {
             classify_entry(ctx, &mut scan, &path)?;
@@ -211,12 +209,7 @@ fn dataset_input(ctx: &Context, scan: &mut Scan, dataset: Dataset, conflicts: bo
             scan.converted.insert(dataset, Transfer::Missing);
         }
         Some((bytes, proof)) => {
-            migration::validate_dataset(
-                &ctx.home,
-                dataset,
-                &bytes,
-                nix::unistd::geteuid().as_raw(),
-            )?;
+            rules::validate_dataset(&ctx.home, dataset, &bytes, nix::unistd::geteuid().as_raw())?;
             scan.converted.insert(
                 dataset,
                 Transfer::Copied {
@@ -257,7 +250,7 @@ fn classify_entry(ctx: &Context, scan: &mut Scan, path: &Path) -> Result<()> {
         return Ok(());
     };
     let locations = crate::operations::governance::locations(ctx);
-    match migration::classify(&locations, path) {
+    match rules::classify(&locations, path) {
         Classification::Convert(_) | Classification::Runtime | Classification::LegacyWriter => (),
         Classification::RetainInPlace(_) => {
             match retained_entry(&locations, path, &target, &metadata)? {
@@ -521,7 +514,7 @@ fn archive_entry_gate(
     }
     if kind == ArchiveKind::Settings
         && relative.parent() == Some(Path::new("manifests"))
-        && !migration::known_manifest(name)
+        && !rules::known_manifest(name)
     {
         return Err(Error::attention(
             "migration_unknown_manifest",

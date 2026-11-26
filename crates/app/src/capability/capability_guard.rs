@@ -1,8 +1,10 @@
 use crate::{
-    capability::capability_store as store,
+    capability::{
+        capability_store as store,
+        rules::capability_tx::{Candidate, DirectoryEntry, Manifest, Pending, State},
+    },
     error::{Error, Result},
     platform::fs::Directory,
-    policy::capability_tx::{Candidate, DirectoryEntry, Manifest, Pending, State},
 };
 use std::{collections::BTreeMap, ffi::OsStr, os::unix::ffi::OsStringExt, path::Path};
 
@@ -141,7 +143,7 @@ fn verify_parents(pending: &Pending) -> Result<()> {
 fn verify_authorities(manifest: &Manifest) -> Result<()> {
     if let Some(authority) = &manifest.links {
         for binding in std::iter::once(&authority.canonical).chain(authority.profiles.values()) {
-            store::open(&crate::policy::capability_tx::Namespace {
+            store::open(&crate::capability::rules::capability_tx::Namespace {
                 ancestor: binding.clone(),
                 remaining: vec![".probe".into()],
             })?;
@@ -153,12 +155,12 @@ fn verify_authorities(manifest: &Manifest) -> Result<()> {
             .values()
             .flat_map(|t| t.clients.values())
         {
-            store::open(&crate::policy::capability_tx::Namespace {
+            store::open(&crate::capability::rules::capability_tx::Namespace {
                 ancestor: client.live_root.clone(),
                 remaining: vec![".probe".into()],
             })?;
             if let Some(source) = &client.source {
-                store::open(&crate::policy::capability_tx::Namespace {
+                store::open(&crate::capability::rules::capability_tx::Namespace {
                     ancestor: source.root.clone(),
                     remaining: vec![".probe".into()],
                 })?;

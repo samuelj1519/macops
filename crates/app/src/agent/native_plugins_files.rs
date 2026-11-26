@@ -308,7 +308,7 @@ fn claude(reader: &mut Passive, instance: &Instance, recipe: &Recipe) -> Result<
     let Some(bytes) = reader.file(&plugins.join("installed_plugins.json"))? else {
         return Ok(result);
     };
-    let book = crate::policy::resources::plugin_book(&bytes)?;
+    let book = crate::policy::catalog::resources::plugin_book(&bytes)?;
     let Some(records) = book.plugins.get(&id) else {
         result.registration = Registration::Absent;
         return Ok(result);

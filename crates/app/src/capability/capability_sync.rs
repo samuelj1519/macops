@@ -80,7 +80,7 @@ fn changes(assessment: &Assessment, blobs: &files::Blobs) -> Result<Vec<FileChan
             }
             changes.push(FileChange {
                 path: patch.path.clone(),
-                kind: crate::policy::delivery::ChangeKind::ManagedLink,
+                kind: crate::capability::rules::delivery::ChangeKind::ManagedLink,
                 namespace: patch.namespace.clone(),
                 before: patch.before.clone(),
                 before_blob: saved_blob(blobs, raw.as_deref())?,
@@ -230,14 +230,14 @@ pub(super) fn sync(
     dry_run: bool,
     yes: bool,
 ) -> Result<Value> {
-    let requested = crate::policy::delivery::selection(
+    let requested = crate::capability::rules::delivery::selection(
         selection.name.as_deref(),
         &selection.only,
         selection.all,
         selection.revision.as_deref(),
         selection.change_id.as_deref(),
     )?;
-    let selected = crate::policy::profile_select::split(requested)?;
+    let selected = crate::policy::profile::profile_select::split(requested)?;
     let initial = crate::operations::governance::capture(ctx)?;
     initial.ensure_settled()?;
     let assessment = Assessment {

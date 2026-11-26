@@ -81,16 +81,16 @@ pub fn observe_query(
             reason: "legacy_uv_query_unbound".into(),
         });
     }
-    crate::policy::uv_local::binding(p, query)?;
+    crate::software::rules::uv_local::binding(p, query)?;
     if let QuerySpec::LocalUvTool(query) = query {
         return crate::software::uv_local::observe(
             query,
             &mut crate::software::uv_local::TOTAL_LIMIT.clone(),
         );
     }
-    crate::policy::npm_local::binding(p, query)?;
+    crate::software::rules::npm_local::binding(p, query)?;
     crate::policy::config_local::binding(p, query)?;
-    crate::policy::capability_local::binding(p, query)?;
+    crate::capability::rules::capability_local::binding(p, query)?;
     if let QuerySpec::LocalNpm(query) = query {
         return crate::software::npm_local::observe_scoped(
             Some(scope),
@@ -129,7 +129,7 @@ pub fn observe_query(
             )),
         };
     }
-    if let Some(target) = crate::policy::targets::descriptor(p)? {
+    if let Some(target) = crate::policy::catalog::targets::descriptor(p)? {
         if !matches!((&p.provider,query), (Provider::Command {query:old,..}, QuerySpec::Command(current)) if old==current)
         {
             return Err(crate::error::Error::new(
@@ -171,7 +171,7 @@ pub fn observe_output(
         let identity = scope.service_identity.as_ref().ok_or_else(|| {
             crate::error::Error::new("invalid_service_scope", "服务查询缺少冻结身份")
         })?;
-        return crate::policy::service::observation(formula, output, identity);
+        return crate::software::rules::service::observation(formula, output, identity);
     }
     if matches!(p.provider, Provider::Bun { .. }) && empty_bun_scope(scope, output)? {
         return Ok(Observation::Missing { evidence: None });
@@ -188,12 +188,12 @@ pub fn empty_bun_scope(scope: &crate::domain::Scope, output: &process::Output) -
     Ok(!manifest.exists() && !payload.exists())
 }
 
-pub use crate::policy::parsers::{parse_observation, synchronous};
+pub use crate::policy::operation::parsers::{parse_observation, synchronous};
 
-pub fn resolve(template: crate::policy::commands::Template) -> Result<CommandSpec> {
+pub fn resolve(template: crate::policy::operation::commands::Template) -> Result<CommandSpec> {
     match template {
-        crate::policy::commands::Template::Exact(spec) => Ok(spec),
-        crate::policy::commands::Template::Named { name, args } => Ok(CommandSpec {
+        crate::policy::operation::commands::Template::Exact(spec) => Ok(spec),
+        crate::policy::operation::commands::Template::Named { name, args } => Ok(CommandSpec {
             program: crate::operations::command::executable(&name)?,
             args,
         }),
@@ -215,7 +215,7 @@ pub fn mutation_spec(
     } else {
         false
     };
-    resolve(crate::policy::commands::mutation(
+    resolve(crate::policy::operation::commands::mutation(
         &ctx.home, mise_owned, p, action, version,
     )?)
 }
@@ -225,7 +225,7 @@ pub fn query_spec(ctx: &Context, p: &Package) -> Result<QuerySpec> {
 
 pub fn capture_query(ctx: &Context, p: &Package, action: Option<Action>) -> Result<QuerySpec> {
     use crate::domain::NpmContract;
-    if crate::policy::uv_local::descriptor(&p.provider).is_some()
+    if crate::software::rules::uv_local::descriptor(&p.provider).is_some()
         && let Some(receipt) = crate::catalog::target::receipts(ctx)?
             .installations
             .remove(&p.id)
@@ -236,7 +236,7 @@ pub fn capture_query(ctx: &Context, p: &Package, action: Option<Action>) -> Resu
                 "uv 旧收据没有冻结本地 namespace，不能重新绑定",
             ));
         };
-        crate::policy::uv_local::binding(p, &query)?;
+        crate::software::rules::uv_local::binding(p, &query)?;
         return Ok(query);
     }
     let query = match &p.provider {
@@ -270,7 +270,7 @@ pub fn capture_query(ctx: &Context, p: &Package, action: Option<Action>) -> Resu
         Provider::Mise { .. } => QuerySpec::Mise(crate::software::mise_owner::plan_query(
             ctx,
             p,
-            resolve(crate::policy::commands::query(&ctx.home, p)?)?,
+            resolve(crate::policy::operation::commands::query(&ctx.home, p)?)?,
             action,
         )?),
         Provider::ConfigObserved { .. } => {
@@ -279,11 +279,12 @@ pub fn capture_query(ctx: &Context, p: &Package, action: Option<Action>) -> Resu
         Provider::CapabilityObserved { .. } => {
             QuerySpec::LocalCapability(crate::capability::capability_local::capture(p)?)
         }
-        _ => resolve(crate::policy::commands::query(&ctx.home, p)?).map(QuerySpec::Command)?,
+        _ => resolve(crate::policy::operation::commands::query(&ctx.home, p)?)
+            .map(QuerySpec::Command)?,
     };
-    crate::policy::uv_local::binding(p, &query)?;
-    crate::policy::npm_local::binding(p, &query)?;
+    crate::software::rules::uv_local::binding(p, &query)?;
+    crate::software::rules::npm_local::binding(p, &query)?;
     crate::policy::config_local::binding(p, &query)?;
-    crate::policy::capability_local::binding(p, &query)?;
+    crate::capability::rules::capability_local::binding(p, &query)?;
     Ok(query)
 }

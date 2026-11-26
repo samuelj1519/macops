@@ -1,7 +1,7 @@
 #![cfg(test)]
 use super::*;
 use crate::{
-    policy::{delivery::Profile, profile_fields::Role},
+    capability::rules::delivery::Profile, policy::profile::profile_fields::Role,
     test_support::TestResult,
 };
 fn claim() -> Claim {

@@ -5,7 +5,8 @@ use crate::{
     },
     error::{Error, Result},
     platform::fs::{self as paths, Directory, EntryKind},
-    policy::{config_local as config_policy, npm_local as policy},
+    policy::config_local as config_policy,
+    software::rules::npm_local as policy,
 };
 use sha2::{Digest, Sha256};
 use std::{
@@ -451,7 +452,10 @@ fn evidence(
 ) -> Result<NpmEvidence> {
     Ok(NpmEvidence {
         kind: NpmQueryKind::LocalV1,
-        namespace: crate::policy::targets::npm_id(&query.namespace.canonical_prefix, &query.name)?,
+        namespace: crate::policy::catalog::targets::npm_id(
+            &query.namespace.canonical_prefix,
+            &query.name,
+        )?,
         canonical_prefix: query.namespace.canonical_prefix.clone(),
         prefix_identity,
         fingerprint,
@@ -578,7 +582,7 @@ fn package_prefix(package: &crate::domain::Package) -> Result<Option<PathBuf>> {
     match &package.provider {
         crate::domain::Provider::Npm { prefix, .. }
         | crate::domain::Provider::NpmObserved { prefix, .. } => Ok(Some(prefix.clone())),
-        _ => Ok(crate::policy::targets::descriptor(package)?.map(|target| target.prefix)),
+        _ => Ok(crate::policy::catalog::targets::descriptor(package)?.map(|target| target.prefix)),
     }
 }
 
@@ -607,7 +611,7 @@ fn issue(
     state: crate::domain::resource::CoverageState,
     code: &str,
 ) {
-    crate::policy::chezmoi::issue(report, state, code.into());
+    crate::config::rules::chezmoi::issue(report, state, code.into());
 }
 
 fn add_namespace(
@@ -832,7 +836,7 @@ fn package_row(
         }
     };
     Ok(Resource {
-        id: crate::policy::targets::npm_id(prefix, &query.name)?,
+        id: crate::policy::catalog::targets::npm_id(prefix, &query.name)?,
         name: query.name.clone(),
         aliases: vec![],
         management: Management::Native,

@@ -77,9 +77,9 @@ fn policy_sync_prepares_a_missing_metadata_directory_and_is_idempotent() -> Test
     assert_eq!(fs::read(&f.skill)?, before);
     let result = sync(&f.ctx, Some("CASE-1"), false, true)?;
     assert_eq!(result["status"], "succeeded");
-    assert!(crate::policy::invocation::manual_frontmatter(&fs::read(
-        &f.skill
-    )?)?);
+    assert!(crate::capability::rules::invocation::manual_frontmatter(
+        &fs::read(&f.skill)?
+    )?);
     assert!(
         f.skill
             .parent()
@@ -197,9 +197,9 @@ fn each_physical_commit_boundary_recovers_without_rerunning_and_preserves_full_b
             assert!(!f.ctx.home.join(".agents/invocation-overlays.json").exists());
         } else {
             assert_eq!(b.journal.phase, Phase::Succeeded);
-            assert!(crate::policy::invocation::manual_frontmatter(&fs::read(
-                &f.skill
-            )?)?);
+            assert!(crate::capability::rules::invocation::manual_frontmatter(
+                &fs::read(&f.skill)?
+            )?);
         }
         let phase = b.journal.phase;
         recover_journal(&f.ctx, &b.store, &mut b.journal, false, true)?;
@@ -314,7 +314,7 @@ fn adopted_receipt(
             &json!({"version":3,"skills":{"example":{"source":"owner/repo","sourceType":"github","sourceUrl":"https://github.com/owner/repo","ref":"a".repeat(40),"skillFolderHash":"b".repeat(40)}}}),
         )?,
     )?;
-    let id = crate::policy::capability_local::skill_capability_id(
+    let id = crate::capability::rules::capability_local::skill_capability_id(
         &record,
         "example",
         "github",
@@ -778,7 +778,7 @@ fn link_batch(f: &Fixture, change: &str) -> std::result::Result<Batch, Box<dyn s
     let plan = crate::capability::link_inventory::assess(
         &f.ctx,
         &authority,
-        crate::policy::delivery::Selection::All,
+        crate::capability::rules::delivery::Selection::All,
     )?;
     let root = backup(&authority, change)?;
     let blobs = files::Blobs::create(&root)?;
@@ -1150,7 +1150,7 @@ fn profile_configuration_and_metadata_policies_keep_each_others_independent_over
     let retired: Value = serde_json::from_slice(&fs::read(&book_path)?)?;
     assert_eq!(retired["files"], metadata);
     assert!(
-        crate::policy::invocation::record(&f.ctx.home, &fs::read(&book_path)?)?
+        crate::capability::rules::invocation::record(&f.ctx.home, &fs::read(&book_path)?)?
             .profiles
             .is_empty()
     );
@@ -1298,7 +1298,7 @@ fn configuration_only_sync_creates_governance_storage_for_an_unmanaged_profile()
     let config = crate::policy::json::parse(&configured)?;
     assert_eq!(config["model"], "isolated");
     assert_eq!(config["enabledPlugins"]["shared@vendor"], false);
-    let book = crate::policy::invocation::record(&f.ctx.home, &fs::read(control)?)?;
+    let book = crate::capability::rules::invocation::record(&f.ctx.home, &fs::read(control)?)?;
     assert!(!book.profiles.is_empty());
     assert!(
         agents

@@ -4,10 +4,12 @@ use crate::{
     platform::fs::Directory,
     policy::{
         source_git::{Component, ObjectId, RelativePath, TreeKind},
-        source_payload::{Entry, Payload, Rules},
         source_tree::{Slot, Tree},
     },
-    source::source_git::Git,
+    source::{
+        rules::source_payload::{Entry, Payload, Rules},
+        source_git::Git,
+    },
 };
 use std::{ffi::OsStr, io::Write, os::unix::fs::MetadataExt};
 fn invalid() -> Error {

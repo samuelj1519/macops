@@ -1,23 +1,24 @@
 use crate::{
-    capability::capability_store as files,
+    capability::{
+        capability_store as files,
+        rules::capability_tx::{Namespace, State, Witness},
+    },
     context::Context,
     domain::{
         Action, GovernanceCategory, Journal, Kind, Observation, Package, Phase, Plan, Provider,
         QuerySpec, Receipt, Receipts, fingerprint,
     },
     error::{Error, Result},
-    operations::governance::Governance,
-    operations::store::Store,
+    operations::{governance::Governance, store::Store},
     platform::fs::Directory,
-    policy::{
-        capability_tx::{Namespace, State, Witness},
-        governance::Layout,
-        source_tx::{
+    policy::governance::Layout,
+    source::{
+        rules::source_tx::{
             self as policy, Action as SourceAction, Ledger, Manifest, ObservedRoot, Pending,
             Progress, Slot,
         },
+        source_inventory::Adoption,
     },
-    source::source_inventory::Adoption,
 };
 use serde_json::{Value, json};
 use std::{ffi::OsStr, os::unix::fs::MetadataExt, path::Path};
@@ -112,7 +113,7 @@ fn receipts(before: Option<&[u8]>, manifest: &Manifest) -> Result<Option<Vec<u8>
         schema_version: 1,
         ..Receipts::default()
     });
-    crate::policy::state::receipt_schema(&book)?;
+    crate::policy::operation::state::receipt_schema(&book)?;
     for native in natives {
         if let SourceAction::Upgrade { roots, .. } = &manifest.action {
             let previous = book
@@ -736,7 +737,7 @@ fn verify_projection(manifest: &Manifest, blobs: &files::Blobs) -> Result<()> {
     let before = managed.before.as_ref().map(|b| blobs.get(b)).transpose()?;
     let after = managed.after.as_ref().map(|b| blobs.get(b)).transpose()?;
     let expected = match &manifest.action {
-        SourceAction::Adopt { root } => Some(crate::policy::source_baseline::adopt(
+        SourceAction::Adopt { root } => Some(crate::source::rules::source_baseline::adopt(
             before.as_deref(),
             root.baseline.clone(),
             &manifest.home,
@@ -752,7 +753,7 @@ fn verify_projection(manifest: &Manifest, blobs: &files::Blobs) -> Result<()> {
             };
             files::cas(&invocation.namespace, &invocation.state)?;
             let rules = files::observe(&invocation.namespace, 1024 * 1024)?.1;
-            let applied = crate::policy::source_invocation::applied(
+            let applied = crate::source::rules::source_invocation::applied(
                 &manifest.home,
                 rules.as_deref(),
                 raw(3, false)?.as_deref(),
@@ -763,25 +764,27 @@ fn verify_projection(manifest: &Manifest, blobs: &files::Blobs) -> Result<()> {
                 roots,
                 raw(3, true)?.as_deref(),
             )?;
-            let native = crate::policy::source_projection::native(
+            let native = crate::source::rules::source_projection::native(
                 raw(0, false)?.as_deref(),
                 roots,
                 manifest.created_at,
             )?;
             if native != raw(0, true)?
-                || crate::policy::source_projection::definitions(raw(1, false)?.as_deref(), roots)?
-                    != raw(1, true)?
+                || crate::source::rules::source_projection::definitions(
+                    raw(1, false)?.as_deref(),
+                    roots,
+                )? != raw(1, true)?
             {
                 return Err(invalid());
             }
-            crate::policy::source_projection::receipt_specs(roots, native.as_deref())?;
-            crate::policy::source_projection::overlays(
+            crate::source::rules::source_projection::receipt_specs(roots, native.as_deref())?;
+            crate::source::rules::source_projection::overlays(
                 raw(3, false)?.as_deref(),
                 raw(3, true)?.as_deref(),
                 roots,
                 &manifest.home,
             )?;
-            crate::policy::source_projection::managed(
+            crate::source::rules::source_projection::managed(
                 before.as_deref(),
                 roots,
                 &manifest.home,
@@ -836,8 +839,8 @@ fn load(ctx: &Context, store: &Store, journal: &Journal) -> Result<Batch> {
         || manifest.layout.state != store.path
         || manifest.layout.config != ctx.config
         || manifest.layout.data != ctx.data
-        || crate::policy::delivery::native_lock_path(&ctx.home, &ctx.scope)
-            != crate::policy::delivery::native_lock_path(&manifest.home, &manifest.scope)
+        || crate::capability::rules::delivery::native_lock_path(&ctx.home, &ctx.scope)
+            != crate::capability::rules::delivery::native_lock_path(&manifest.home, &manifest.scope)
         || manifest.scope != journal.scope
         || manifest.operation_id != journal.id
         || root.path.file_name() != Some(OsStr::new(&manifest.change_id))

@@ -55,7 +55,7 @@ def relearn_root(text):
 
 
 CASES = [
-    ("unknown-governance", "crates/app/src/policy/migration.rs", lambda t: replace(t, "    Classification::Block\n}", "    Classification::Runtime\n}"), "cli", "migration::migration_unknown_governance_target_conflicts_and_special_inputs_block_without_writes"),
+    ("unknown-governance", "crates/app/src/migration/rules.rs", lambda t: replace(t, "    Classification::Block\n}", "    Classification::Runtime\n}"), "cli", "migration::migration_unknown_governance_target_conflicts_and_special_inputs_block_without_writes"),
     ("old-source-proof", "crates/app/src/migration/migration_scan.rs", lambda t: replace(t, "current.converted.get(&dataset) != ledger.converted.get(&dataset)", "false"), "lib", "migration::migration_tx::tests::changed_source_before_commit_rolls_back_without_creating_authority"),
     ("late-archive-divergence", "crates/app/src/migration/migration_scan.rs", lambda t: replace(t, "current.archives != ledger.archives || ", ""), "cli", "migration::migration_indexes_dependency_lock_and_dirty_link_bytes_without_executing_or_following"),
     ("missing-old-dataset", "crates/app/src/migration/mod.rs", lambda t: replace(t, "    for dataset in crate::policy::governance::DATASETS {", "    for dataset in crate::policy::governance::DATASETS {\n        if matches!(ledger.converted.get(&dataset),Some(Transfer::Missing)){continue;}"), "cli", "migration::migration_verify_validates_new_business_datasets_even_when_originally_missing"),

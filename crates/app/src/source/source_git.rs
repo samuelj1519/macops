@@ -1,9 +1,8 @@
 use crate::{
+    capability::rules::capability_tx::{Namespace, State},
     error::{Error, Result},
-    platform::fs::Directory,
-    platform::process,
+    platform::{fs::Directory, process},
     policy::{
-        capability_tx::{Namespace, State},
         governance::DirectoryBinding,
         source_git::{ObjectId, Repository, TreeEntry, tree_entries},
     },

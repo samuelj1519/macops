@@ -1,8 +1,7 @@
 use crate::{
-    capability::capability_store as files,
+    capability::{capability_store as files, rules::capability_tx::State},
     error::{Error, Result},
     platform::fs::{self, Directory},
-    policy::capability_tx::State,
 };
 use std::{
     os::unix::fs::{DirBuilderExt, MetadataExt},

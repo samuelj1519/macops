@@ -1,11 +1,9 @@
 use crate::{
+    capability::rules::capability_tx::{Blob, Namespace, State},
     error::{Error, Result},
     operations::store::Store,
     platform::fs::{Directory, EntryKind},
-    policy::{
-        capability_tx::{Blob, Namespace, State},
-        governance::DirectoryBinding,
-    },
+    policy::governance::DirectoryBinding,
 };
 use sha2::{Digest, Sha256};
 use std::{
@@ -118,7 +116,7 @@ pub fn observe(namespace: &Namespace, limit: u64) -> Result<(State, Option<Vec<u
         EntryKind::Symlink => {
             let text =
                 rustix::fs::readlinkat(root.file(), name.as_str(), Vec::new()).map_err(io)?;
-            let text = crate::policy::delivery::LinkText::from_bytes(text.as_bytes())?;
+            let text = crate::capability::rules::delivery::LinkText::from_bytes(text.as_bytes())?;
             if root.metadata(OsStr::new(name))?.is_none_or(|next| {
                 next.identity != meta.identity || next.kind != meta.kind || next.mode != meta.mode
             }) {
@@ -181,7 +179,7 @@ impl Blobs {
         Ok(blob)
     }
     pub fn get(&self, blob: &Blob) -> Result<Vec<u8>> {
-        if !crate::policy::capability_tx::blob_valid(blob) {
+        if !crate::capability::rules::capability_tx::blob_valid(blob) {
             return Err(Error::new("invalid_capability_blob", "备份摘要或大小无效"));
         }
         let (bytes, metadata) = self
@@ -208,12 +206,12 @@ pub fn stage(
     namespace: &Namespace,
     bytes: Option<&[u8]>,
     mode: u32,
-) -> Result<crate::policy::capability_tx::Candidate> {
+) -> Result<crate::capability::rules::capability_tx::Candidate> {
     use rustix::fs::{Mode, OFlags};
     use std::io::Write;
     let target = target_path(namespace);
     let Some(bytes) = bytes else {
-        return Ok(crate::policy::capability_tx::Candidate {
+        return Ok(crate::capability::rules::capability_tx::Candidate {
             target,
             staged: None,
             after: State::Missing,
@@ -242,7 +240,7 @@ pub fn stage(
     let staged = root.path.join(&name);
     let after = observe(&self::namespace(&staged)?, bytes.len() as u64)?.0;
     root.verify()?;
-    Ok(crate::policy::capability_tx::Candidate {
+    Ok(crate::capability::rules::capability_tx::Candidate {
         target,
         staged: Some(staged),
         after,
@@ -252,14 +250,14 @@ pub fn stage(
 pub fn publish(
     namespace: &Namespace,
     before: &State,
-    candidate: &crate::policy::capability_tx::Candidate,
+    candidate: &crate::capability::rules::capability_tx::Candidate,
 ) -> Result<()> {
     publish_checked(namespace, before, candidate, || Ok(()))
 }
 pub fn publish_checked(
     namespace: &Namespace,
     before: &State,
-    candidate: &crate::policy::capability_tx::Candidate,
+    candidate: &crate::capability::rules::capability_tx::Candidate,
     check: impl FnOnce() -> Result<()>,
 ) -> Result<()> {
     crate::platform::fs::write_path(&candidate.target)?;
@@ -308,7 +306,7 @@ pub fn publish_checked(
 
 pub fn prepare_parent(
     namespace: &Namespace,
-) -> Result<Option<crate::policy::capability_tx::ParentCandidate>> {
+) -> Result<Option<crate::capability::rules::capability_tx::ParentCandidate>> {
     if parent(namespace)?.is_some() {
         return Ok(None);
     }
@@ -324,14 +322,18 @@ pub fn prepare_parent(
     ancestor.file().sync_all()?;
     let root = ancestor.child(OsStr::new(&name))?;
     let staged = root.path.clone();
-    Ok(Some(crate::policy::capability_tx::ParentCandidate {
-        target: target_path(namespace).parent().ok_or_else(changed)?.into(),
-        binding: binding(&root, &staged)?,
-        staged,
-    }))
+    Ok(Some(
+        crate::capability::rules::capability_tx::ParentCandidate {
+            target: target_path(namespace).parent().ok_or_else(changed)?.into(),
+            binding: binding(&root, &staged)?,
+            staged,
+        },
+    ))
 }
 
-pub fn parent_published(candidate: &crate::policy::capability_tx::ParentCandidate) -> Result<bool> {
+pub fn parent_published(
+    candidate: &crate::capability::rules::capability_tx::ParentCandidate,
+) -> Result<bool> {
     match Directory::open(&candidate.target) {
         Ok(root) if root.identity() == &candidate.binding.identity => {
             let actual = binding(&root, &candidate.target)?;
@@ -349,7 +351,9 @@ pub fn parent_published(candidate: &crate::policy::capability_tx::ParentCandidat
     }
 }
 
-pub fn publish_parent(candidate: &crate::policy::capability_tx::ParentCandidate) -> Result<()> {
+pub fn publish_parent(
+    candidate: &crate::capability::rules::capability_tx::ParentCandidate,
+) -> Result<()> {
     crate::platform::fs::write_path(&candidate.target)?;
     if parent_published(candidate)? {
         return Ok(());
@@ -382,8 +386,8 @@ mod tests;
 
 pub fn stage_link(
     namespace: &Namespace,
-    text: &crate::policy::delivery::LinkText,
-) -> Result<crate::policy::capability_tx::Candidate> {
+    text: &crate::capability::rules::delivery::LinkText,
+) -> Result<crate::capability::rules::capability_tx::Candidate> {
     let root = parent(namespace)?.ok_or_else(changed)?;
     let name = format!(".{}.cap.tmp", crate::operations::store::operation_id());
     rustix::fs::symlinkat(text.as_str(), root.file(), name.as_str()).map_err(io)?;
@@ -391,7 +395,7 @@ pub fn stage_link(
     let staged = root.path.join(&name);
     let after = observe(&self::namespace(&staged)?, 4096)?.0;
     root.verify()?;
-    Ok(crate::policy::capability_tx::Candidate {
+    Ok(crate::capability::rules::capability_tx::Candidate {
         target: target_path(namespace),
         staged: Some(staged),
         after,
@@ -401,9 +405,9 @@ pub fn publish_link(
     home: &Path,
     namespace: &Namespace,
     before: &State,
-    candidate: &crate::policy::capability_tx::Candidate,
+    candidate: &crate::capability::rules::capability_tx::Candidate,
 ) -> Result<()> {
-    use crate::policy::delivery::{LinkText, link_target_parts};
+    use crate::capability::rules::delivery::{LinkText, link_target_parts};
     let target = target_path(namespace);
     let (_, name) = link_target_parts(home, &target)?;
     let expected = LinkText::managed(&name)?;
@@ -469,7 +473,7 @@ pub fn remove_link_stage(namespace: &Namespace, expected: &State) -> Result<()> 
     if !name
         .strip_prefix('.')
         .and_then(|n| n.strip_suffix(".cap.tmp"))
-        .is_some_and(crate::policy::state::valid_id)
+        .is_some_and(crate::policy::operation::state::valid_id)
         || !matches!(expected, State::Link { mode: Some(_), .. })
     {
         return Err(changed());

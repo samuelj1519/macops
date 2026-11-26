@@ -8,12 +8,16 @@ use crate::{
         QuerySpec, Receipt, Receipts, fingerprint,
     },
     error::{Error, Result},
-    operations::native_runner::{self, FrozenInvocation, NativeOutcome},
-    operations::store::Store,
-    policy::native_skills::{self as policy, Book, Recipe},
-    skills::native_skills_assets::{self, Prepared},
-    skills::native_skills_files::{self as disk, Snapshot},
-    skills::native_skills_steps::{self, Customization},
+    operations::{
+        native_runner::{self, FrozenInvocation, NativeOutcome},
+        store::Store,
+    },
+    skills::{
+        native_skills_assets::{self, Prepared},
+        native_skills_files::{self as disk, Snapshot},
+        native_skills_steps::{self, Customization},
+        rules::native_skills::{self as policy, Book, Recipe},
+    },
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -138,7 +142,7 @@ enum RecipeOrigin {
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 struct InputFence {
-    pub files: Vec<crate::policy::capability_tx::Witness>,
+    pub files: Vec<crate::capability::rules::capability_tx::Witness>,
 }
 impl InputFence {
     fn verify(&self) -> Result<()> {
@@ -177,9 +181,9 @@ struct Frozen {
     receipts_before: Option<Vec<u8>>,
     previous_keys: Vec<String>,
     state_binding: crate::policy::governance::DirectoryBinding,
-    config_witness: crate::policy::capability_tx::Witness,
-    receipts_witness: crate::policy::capability_tx::Witness,
-    step_witness: crate::policy::capability_tx::Witness,
+    config_witness: crate::capability::rules::capability_tx::Witness,
+    receipts_witness: crate::capability::rules::capability_tx::Witness,
+    step_witness: crate::capability::rules::capability_tx::Witness,
     input_fence: InputFence,
     harness_claude: Option<PathBuf>,
     harness_codex: Option<PathBuf>,
@@ -189,7 +193,7 @@ struct Frozen {
 #[serde(deny_unknown_fields)]
 struct EnvironmentGuards {
     temp: crate::policy::governance::DirectoryBinding,
-    gitconfig: crate::policy::capability_tx::Witness,
+    gitconfig: crate::capability::rules::capability_tx::Witness,
 }
 impl EnvironmentGuards {
     fn capture(ctx: &Context) -> Result<Self> {
@@ -207,10 +211,12 @@ impl EnvironmentGuards {
         Ok(Self { temp, gitconfig })
     }
     fn verify(&self) -> Result<()> {
-        crate::capability::capability_store::open(&crate::policy::capability_tx::Namespace {
-            ancestor: self.temp.clone(),
-            remaining: vec![".probe".into()],
-        })?;
+        crate::capability::capability_store::open(
+            &crate::capability::rules::capability_tx::Namespace {
+                ancestor: self.temp.clone(),
+                remaining: vec![".probe".into()],
+            },
+        )?;
         if crate::capability::capability_store::observe(&self.gitconfig.namespace, 1024)?.0
             != self.gitconfig.state
         {
@@ -376,7 +382,7 @@ fn owners(
 ) -> Result<(
     Option<Vec<u8>>,
     Vec<String>,
-    crate::policy::capability_tx::Witness,
+    crate::capability::rules::capability_tx::Witness,
 )> {
     let (witness, raw) = disk::witness(&ctx.state.join("receipts.json"))?;
     let book: Receipts = raw
@@ -387,7 +393,7 @@ fn owners(
             schema_version: 1,
             installations: BTreeMap::new(),
         });
-    crate::policy::state::receipt_schema(&book)?;
+    crate::policy::operation::state::receipt_schema(&book)?;
     let mut keys = vec![];
     for (key, receipt) in book.installations {
         if matches!(
@@ -549,7 +555,7 @@ fn query_capture(
     captured.result
 }
 fn original_state(frozen: &Frozen) -> Result<crate::platform::fs::Directory> {
-    crate::capability::capability_store::open(&crate::policy::capability_tx::Namespace {
+    crate::capability::capability_store::open(&crate::capability::rules::capability_tx::Namespace {
         ancestor: frozen.state_binding.clone(),
         remaining: vec![".native-probe".into()],
     })
@@ -710,7 +716,7 @@ fn prior_step(
     package: &Package,
     recipe: &Recipe,
     action: Action,
-) -> Result<crate::policy::capability_tx::Witness> {
+) -> Result<crate::capability::rules::capability_tx::Witness> {
     let (step_witness, step_raw) = disk::witness(&receipt_path(ctx, &package.id))?;
     if let Some(raw) = step_raw {
         let previous: StepReceipt = policy::decode(&raw)?;
@@ -931,7 +937,7 @@ fn record_images(
     journal: &Journal,
     frozen: &Frozen,
     progress: &Progress,
-) -> Result<Vec<(crate::policy::capability_tx::Witness, Vec<u8>)>> {
+) -> Result<Vec<(crate::capability::rules::capability_tx::Witness, Vec<u8>)>> {
     let current = if journal.plan.action == Action::Uninstall {
         None
     } else {
@@ -1233,7 +1239,10 @@ fn execute_with_origin(
         .collect::<Result<Vec<_>>>()?;
     paths.push(crate::platform::fs::read_path(package_root)?);
     paths.push(crate::platform::fs::read_path(&disk::lock_path(ctx))?);
-    crate::policy::source_baseline::disjoint(&crate::platform::fs::read_path(&target)?, &paths)?;
+    crate::source::rules::source_baseline::disjoint(
+        &crate::platform::fs::read_path(&target)?,
+        &paths,
+    )?;
     disk::local_scope(ctx, &recipe.install_name, &paths)?;
     if dry {
         let (_, book) = load_book(ctx)?;
@@ -1390,20 +1399,24 @@ fn compatibility_keys(
         &recipe.source.repository,
         &recipe.source.repository.to_ascii_lowercase(),
     ] {
-        keys.insert(crate::policy::capability_local::skill_capability_id(
-            &disk::lock_path(ctx),
-            &recipe.install_name,
-            "github",
-            source,
-        )?);
+        keys.insert(
+            crate::capability::rules::capability_local::skill_capability_id(
+                &disk::lock_path(ctx),
+                &recipe.install_name,
+                "github",
+                source,
+            )?,
+        );
     }
     if let Some(row) = row {
-        keys.insert(crate::policy::capability_local::skill_capability_id(
-            &disk::lock_path(ctx),
-            &recipe.install_name,
-            row["sourceType"].as_str().ok_or_else(invalid)?,
-            row["source"].as_str().ok_or_else(invalid)?,
-        )?);
+        keys.insert(
+            crate::capability::rules::capability_local::skill_capability_id(
+                &disk::lock_path(ctx),
+                &recipe.install_name,
+                row["sourceType"].as_str().ok_or_else(invalid)?,
+                row["source"].as_str().ok_or_else(invalid)?,
+            )?,
+        );
     }
     Ok(keys)
 }
@@ -1538,9 +1551,9 @@ fn normalize_selection(
     ctx: &Context,
     book: &Book,
     rows: &BTreeMap<String, Value>,
-    request: &mut crate::policy::source_select::Request,
+    request: &mut crate::source::rules::source_select::Request,
 ) -> Result<()> {
-    if let crate::policy::delivery::Selection::Explicit(keys) = &mut request.selection {
+    if let crate::capability::rules::delivery::Selection::Explicit(keys) = &mut request.selection {
         for key in keys {
             if let Some(normalized) = repository_selector(key) {
                 *key = normalized;
@@ -1568,9 +1581,9 @@ fn normalize_selection(
 }
 
 fn selected_recipes(ctx: &Context, selection: &crate::cli::SkillSelection) -> Result<Vec<Recipe>> {
-    use crate::policy::{
-        delivery::SourceGroup,
-        source_select::{Member, Request, resolve},
+    use crate::{
+        capability::rules::delivery::SourceGroup,
+        source::rules::source_select::{Member, Request, resolve},
     };
     let mut request = Request::parse(
         selection.name.as_deref(),
@@ -1867,7 +1880,7 @@ fn upgrade_recipe(
 
 fn resolve_upgrade(ctx: &Context, mut recipe: Recipe, revision: Option<&str>) -> Result<Recipe> {
     if let Some(commit) = revision {
-        recipe.source.commit = crate::policy::skills::revision(commit)?;
+        recipe.source.commit = crate::skills::rules::skills::revision(commit)?;
     } else if recipe.source.tracking_ref.is_some() {
         let cache = check_cache(ctx)?;
         let id = policy::installation_id(&crate::platform::fs::read_path(&disk::payload(
@@ -2002,7 +2015,7 @@ pub fn catalog_summary(ctx: &Context) -> Result<Value> {
             .as_ref()
             .filter(|(key, _)| key == &id)
             .map(|(_, value)| value);
-        sources.push(json!({"id":id,"name":name,"owner":"skills-cli","nativeSource":crate::policy::resources::source_label(row["source"].as_str().unwrap_or_default()),"nativeSourceType":row["sourceType"],"nativeRawSkillPath":row.get("skillPath"),"nativeCommit":row.get("commit"),"recipe":active.and_then(|v|v.get("recipe")).cloned().or(recipe.map(recipe_summary).transpose()?),"delivery":active,"maintenance":if active.is_some(){"pending-native-operation"}else if recipe.is_some(){"fixed-recipe"}else{"recipe-required"}}));
+        sources.push(json!({"id":id,"name":name,"owner":"skills-cli","nativeSource":crate::policy::catalog::resources::source_label(row["source"].as_str().unwrap_or_default()),"nativeSourceType":row["sourceType"],"nativeRawSkillPath":row.get("skillPath"),"nativeCommit":row.get("commit"),"recipe":active.and_then(|v|v.get("recipe")).cloned().or(recipe.map(recipe_summary).transpose()?),"delivery":active,"maintenance":if active.is_some(){"pending-native-operation"}else if recipe.is_some(){"fixed-recipe"}else{"recipe-required"}}));
     }
     Ok(
         json!({"maintainable_scope":"native-skills-fixed-recipes","sources":sources,"persistentWrites":false}),
@@ -2114,7 +2127,7 @@ fn pending_delivery(ctx: &Context) -> Result<Option<(String, Value)>> {
 struct CheckCache {
     schema_version: u32,
     #[serde(deserialize_with = "crate::policy::json::object")]
-    index: crate::policy::source_index::Index,
+    index: crate::source::rules::source_index::Index,
     baselines: BTreeMap<String, String>,
     #[serde(deserialize_with = "crate::policy::json::object_map")]
     native_checks: BTreeMap<String, NativeCheck>,
@@ -2126,8 +2139,8 @@ struct NativeCheck {
     uncertain: bool,
     scope: String,
 }
-fn cache_scope(ctx: &Context) -> crate::policy::source_index::Scope {
-    crate::policy::source_index::Scope {
+fn cache_scope(ctx: &Context) -> crate::source::rules::source_index::Scope {
+    crate::source::rules::source_index::Scope {
         home: ctx.home.clone(),
         native_lock: disk::lock_path(ctx),
         definitions: book_path(ctx),
@@ -2138,19 +2151,19 @@ fn check_cache(ctx: &Context) -> Result<CheckCache> {
     let Some(raw) = scoped_files::regular(&ctx.cache.join("native-skills-checks.json"))? else {
         return Ok(CheckCache {
             schema_version: 1,
-            index: crate::policy::source_index::Index::empty(scope)?,
+            index: crate::source::rules::source_index::Index::empty(scope)?,
             baselines: BTreeMap::new(),
             native_checks: BTreeMap::new(),
         });
     };
-    if crate::policy::source_index::legacy(&raw)? {
+    if crate::source::rules::source_index::legacy(&raw)? {
         return Err(Error::attention(
             "native_skills_legacy_index",
             "旧索引不能作为固定配方候选，请重新 update",
         ));
     }
     let cache: CheckCache = policy::decode(&raw)?;
-    crate::policy::source_index::read(
+    crate::source::rules::source_index::read(
         &serde_json::to_vec(&cache.index)?,
         &scope,
         crate::operations::store::now(),
@@ -2371,7 +2384,7 @@ fn refresh_with_candidate(
             ctx,
             &recipe.install_name,
         )?)?)?;
-        candidates.push(crate::policy::source_index::Candidate {
+        candidates.push(crate::source::rules::source_index::Candidate {
             member: id.clone(),
             repository: recipe.source.repository.to_ascii_lowercase(),
             locator_sha256: policy::locator(recipe, &id)?,

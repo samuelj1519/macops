@@ -15,7 +15,7 @@ SPEC.loader.exec_module(FIXTURES)
 
 MUTATIONS = {
     'lost_native_exit': ('crates/app/src/config/chezmoi_native.rs', 'if known_success && verified == Some(true) && !operation.binding.filtered {', 'if verified == Some(true) && !operation.binding.filtered {'),
-    'force_destination': ('crates/app/src/policy/chezmoi_native.rs', '&["--error-on-conflict", "apply", "--recursive=false"]', '&["--force", "apply", "--recursive=false"]'),
+    'force_destination': ('crates/app/src/config/rules/chezmoi_native.rs', '&["--error-on-conflict", "apply", "--recursive=false"]', '&["--force", "apply", "--recursive=false"]'),
     'accept_source_change': ('crates/app/src/config/chezmoi_binding.rs', 'if inputs(binding, &tracked)? != binding.inputs {', 'if false && inputs(binding, &tracked)? != binding.inputs {'),
     'execute_dryrun': ('crates/app/src/config/chezmoi_native.rs', 'if dry {', 'if dry && false {'),
     'replay_unknown': ('crates/app/src/config/chezmoi_native.rs', '    if resolve_failed {\n        operations::confirm', '    if !resolve_failed {\n        let Some(QuerySpec::NativeConfig(query))=&journal.plan.query else{return Err(io::changed());};\n        let target=query.targets[0].to_str().ok_or_else(io::changed)?;\n        return apply(ctx,store,operation.binding.clone(),target,true);\n    }\n    if resolve_failed {\n        operations::confirm'),

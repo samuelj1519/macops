@@ -350,7 +350,7 @@ impl Browser {
                         | Provider::CapabilityObserved { .. }
                 )
             } else {
-                crate::policy::manifest::supports_replay(&package.provider)
+                crate::policy::operation::manifest::supports_replay(&package.provider)
             };
             if !supported {
                 return Err(Error::attention(

@@ -358,7 +358,7 @@ pub(crate) fn original_operation(data: &Value) -> Option<&str> {
     let id = row["id"]
         .as_str()
         .or_else(|| row["operation_id"].as_str())
-        .filter(|id| crate::policy::state::valid_id(id))?;
+        .filter(|id| crate::policy::operation::state::valid_id(id))?;
     matches!(
         row["phase"].as_str().or_else(|| row["status"].as_str()),
         Some("prepared" | "running" | "unknown")

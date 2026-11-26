@@ -1,9 +1,11 @@
 use crate::{
+    capability::rules::delivery::Profile,
     policy::{
-        codex_fields as c,
-        delivery::Profile,
-        deny_fields as d, json_fields as j,
-        profile_fields::{self as p, Presence},
+        json_fields as j,
+        profile::{
+            codex_fields as c, deny_fields as d,
+            profile_fields::{self as p, Presence},
+        },
     },
     test_support::TestResult,
 };

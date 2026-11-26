@@ -1,22 +1,23 @@
 use crate::{
-    config::config_inventory,
-    config::config_local,
+    config::{
+        config_inventory, config_local,
+        rules::config_tx::{
+            self as policy, ConfigBackupRecord, MiseReconcilePlan, ReconcileGuard,
+            RecoveryDecision, RestoreDecision, RootGuard,
+        },
+    },
     context::Context,
     domain::{
         Action, ConfigAnchor, ConfigAuthority, ConfigFileStamp, Kind, LocalConfigQuery,
         Observation, OwnedPath, Package, PathKind, Plan, Provider, QuerySpec, fingerprint,
     },
     error::{Error, Result},
-    operations,
-    operations::store::{CommitFailure, Journal, Phase, Store},
-    platform::fs::{self as paths, Directory, EntryKind},
-    policy::{
-        config_local as local_policy,
-        config_tx::{
-            self as policy, ConfigBackupRecord, MiseReconcilePlan, ReconcileGuard,
-            RecoveryDecision, RestoreDecision, RootGuard,
-        },
+    operations::{
+        self,
+        store::{CommitFailure, Journal, Phase, Store},
     },
+    platform::fs::{self as paths, Directory, EntryKind},
+    policy::config_local as local_policy,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};

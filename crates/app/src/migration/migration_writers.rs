@@ -1,8 +1,8 @@
 use crate::{
-    capability::capability_store,
+    capability::{capability_store, rules::capability_tx::Namespace},
     error::{Error, Result},
     migration::migration_fs as fs,
-    policy::{capability_tx::Namespace, governance::FileProof},
+    policy::governance::FileProof,
 };
 use std::path::{Path, PathBuf};
 

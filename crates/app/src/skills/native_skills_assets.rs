@@ -3,13 +3,9 @@ use crate::{
     context::Context,
     error::{Error, Result},
     platform::fs::Directory,
-    policy::{
-        native_skills::Recipe,
-        source_git::{ObjectId, RelativePath, Repository},
-        source_payload::Rules,
-    },
-    skills::native_skills_files as files,
-    source::source_git::Git,
+    policy::source_git::{ObjectId, RelativePath, Repository},
+    skills::{native_skills_files as files, rules::native_skills::Recipe},
+    source::{rules::source_payload::Rules, source_git::Git},
 };
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, os::unix::fs::PermissionsExt, path::PathBuf};
@@ -184,7 +180,7 @@ impl Prepared {
 struct ArtifactManifest {
     schema_version: u32,
     #[serde(deserialize_with = "crate::policy::json::object")]
-    upstream: crate::policy::native_skills::Source,
+    upstream: crate::skills::rules::native_skills::Source,
     rules: serde_json::Value,
     #[serde(deserialize_with = "crate::policy::json::object")]
     shape: crate::policy::source_tree::Shape,
@@ -202,13 +198,13 @@ pub fn owned_local(
         return Err(invalid());
     }
     let raw = scoped_files::regular(&artifact.join("manifest.json"))?.ok_or_else(invalid)?;
-    let value: serde_json::Value = crate::policy::native_skills::decode(&raw)?;
+    let value: serde_json::Value = crate::skills::rules::native_skills::decode(&raw)?;
     if artifact.file_name().and_then(|p| p.to_str())
         != Some(crate::domain::fingerprint(&value)?.as_str())
     {
         return Err(invalid());
     }
-    let mut manifest: ArtifactManifest = crate::policy::native_skills::decode(&raw)?;
+    let mut manifest: ArtifactManifest = crate::skills::rules::native_skills::decode(&raw)?;
     if !exact_commit {
         manifest.upstream.commit.clone_from(&recipe.source.commit);
     }

@@ -189,7 +189,7 @@ fn wait_gate(path: &Path, binding: &RunBinding) -> Result<(Journal, WorkerBindin
         {
             let journal: Journal = crate::platform::fs::regular_json(path)?;
             validate(&journal, binding)?;
-            crate::policy::state::worker_identity(
+            crate::policy::operation::state::worker_identity(
                 &journal,
                 path,
                 std::process::id(),
@@ -282,7 +282,7 @@ pub fn prepare(
     let (_, home) = store.native_home_keeper()?;
     let mut random = [0u8; 16];
     getrandom::fill(&mut random).map_err(|_| invalid())?;
-    let nonce = crate::policy::invocation::hash(&random)[..32].to_owned();
+    let nonce = crate::capability::rules::invocation::hash(&random)[..32].to_owned();
     let binding = RunBinding {
         schema_version: 2,
         operation_id: journal.id.clone(),
@@ -406,7 +406,7 @@ fn shows_progress(journal: &Journal, verbose: bool) -> bool {
 
 fn progress_capture_allowed(journal: &Journal) -> bool {
     journal.plan.package.kind != crate::domain::Kind::Config
-        && !crate::policy::chezmoi_native::is_native(&journal.plan)
+        && !crate::config::rules::chezmoi_native::is_native(&journal.plan)
 }
 
 fn capture_files(directory: &Directory, progress: bool) -> Result<(std::fs::File, std::fs::File)> {

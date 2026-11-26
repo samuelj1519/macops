@@ -1,5 +1,6 @@
 use crate::{
     agent::ai_gate as gate,
+    agent::ai_policy as policy,
     agent::ai_state::{self, Snapshot, Step, Upgrade},
     config::config_tx,
     context::Context,
@@ -9,7 +10,6 @@ use crate::{
     operations::store::Store,
     platform::fs::Directory,
     platform::process,
-    policy::ai as policy,
 };
 use serde_json::{Value, json};
 use std::{ffi::OsStr, path::Path};
@@ -430,7 +430,7 @@ fn reconcile(ctx: &Context, store: &Store, journal: &mut Journal, upgrade: &Upgr
     }
     let fence =
         config_tx::capture_reconcile_fence(ctx, &live.anchor.requested, &source.anchor.requested)?;
-    let spec = crate::policy::config_tx::ai_mise_spec(&upgrade.tool)?;
+    let spec = crate::config::rules::config_tx::ai_mise_spec(&upgrade.tool)?;
     let from = policy::pin(&source.text, &upgrade.tool)?;
     let to = upgrade
         .version

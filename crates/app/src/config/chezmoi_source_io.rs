@@ -1,10 +1,10 @@
 use super::super::{Cache, Managed, io, policy, validate_cache};
 use crate::{
+    config::rules::chezmoi_native::{Binding, SourceMode, SourceObject, Stamp},
     context::Context,
     domain::{ConfigAuthority, FileId, Package, Provider, fingerprint},
     error::{Error, Result},
     platform::fs::{self as paths, Bindings, BoundTarget, Directory, EntryKind, Metadata},
-    policy::chezmoi_native::{Binding, SourceMode, SourceObject, Stamp},
 };
 use sha2::{Digest, Sha256};
 use std::{

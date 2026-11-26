@@ -143,7 +143,7 @@ fn an_npm_worker_rechecks_installed_package_evidence_before_uninstall() -> TestR
     assert!(matches!(&before, Observation::Present { version, .. } if version == "1.0.0"));
     let program = home.join("fixture-npm");
     fs::write(&program, b"#!/bin/sh\nexit 97\n")?;
-    let args = crate::policy::npm_local::expected_npm_write_args(
+    let args = crate::software::rules::npm_local::expected_npm_write_args(
         &home,
         &prefix,
         name,

@@ -1,6 +1,6 @@
 #![cfg(test)]
 use super::*;
-use crate::{domain::FileId, policy::delivery::Profile, test_support::TestResult};
+use crate::{capability::rules::delivery::Profile, domain::FileId, test_support::TestResult};
 use std::{ffi::OsString, os::unix::ffi::OsStringExt};
 fn dir(path: &str) -> DirectoryBinding {
     let identity = FileId {
@@ -144,7 +144,7 @@ fn authority_binds_each_claim_to_its_exact_live_root_and_source_pair() -> TestRe
     assert!(good.validate(Path::new("relative")).is_err());
     assert_eq!(
         good.target_kind(Path::new("/home/.claude-mi/settings.json"))?,
-        crate::policy::delivery::ChangeKind::ProfileJson
+        crate::capability::rules::delivery::ChangeKind::ProfileJson
     );
     assert!(good.target_kind(Path::new("/unknown")).is_err());
     let mut cases = vec![];
@@ -228,7 +228,7 @@ fn configuration_file_formats_and_codex_roots_cannot_be_confused() -> TestResult
     assert!(wrong_root.validate(Path::new("/home")).is_err());
     assert_eq!(
         a.target_kind(&c.live)?,
-        crate::policy::delivery::ChangeKind::ProfileToml
+        crate::capability::rules::delivery::ChangeKind::ProfileToml
     );
     let mut s = client();
     s.owner.role = Role::Source;

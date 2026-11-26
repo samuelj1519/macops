@@ -1,6 +1,7 @@
 use crate::{
     capability::{
         capability_store as files,
+        rules::capability_tx::{Namespace, State, Witness},
         scoped_files::{private, regular, scope_changed as invalid, write_cas_checked},
     },
     context::Context,
@@ -8,11 +9,8 @@ use crate::{
     error::{Error, Result},
     operations::store::Store,
     platform::fs::{Directory, EntryKind},
-    policy::{
-        capability_tx::{Namespace, State, Witness},
-        native_skills::{self as policy, Recipe},
-        source_tree::{Slot, Tree},
-    },
+    policy::source_tree::{Slot, Tree},
+    skills::rules::native_skills::{self as policy, Recipe},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -116,7 +114,7 @@ pub fn witness(path: &Path) -> Result<(Witness, Option<Vec<u8>>)> {
 pub struct Commit {
     pub before: Witness,
     pub after: Vec<u8>,
-    pub pair: Option<crate::policy::source_files::Pair>,
+    pub pair: Option<crate::source::rules::source_files::Pair>,
 }
 impl Commit {
     pub fn prepare(before: Witness, after: Vec<u8>) -> Result<Self> {
@@ -149,11 +147,10 @@ impl Commit {
         }
         if let Some(pair) = &self.pair {
             if pair.live.path() != target
-                || pair
-                    .before
-                    .as_ref()
-                    .map_or(State::Missing, crate::policy::source_files::Object::state)
-                    != self.before.state
+                || pair.before.as_ref().map_or(
+                    State::Missing,
+                    crate::source::rules::source_files::Object::state,
+                ) != self.before.state
                 || pair.after.sha256 != files::hash(expected)
                 || pair.after.size != expected.len() as u64
                 || pair.retained.parent.requested.parent() != target.parent()
@@ -238,7 +235,7 @@ pub fn write_cas(path: &Path, before: Option<&[u8]>, after: &[u8]) -> Result<()>
 }
 
 pub fn lock_path(ctx: &Context) -> PathBuf {
-    crate::policy::delivery::native_lock_path(&ctx.home, &ctx.scope)
+    crate::capability::rules::delivery::native_lock_path(&ctx.home, &ctx.scope)
 }
 pub fn payload(ctx: &Context, name: &str) -> Result<PathBuf> {
     let p = ctx.home.join(".agents/skills").join(name);
@@ -331,7 +328,7 @@ pub fn local_scope(ctx: &Context, name: &str, reserved: &[PathBuf]) -> Result<()
         &ctx.home.join(".agents/skills"),
     )?);
     for root in roots {
-        crate::policy::source_baseline::disjoint(
+        crate::source::rules::source_baseline::disjoint(
             &crate::platform::fs::read_path(&root)?,
             reserved,
         )?;

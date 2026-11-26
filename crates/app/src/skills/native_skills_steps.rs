@@ -1,14 +1,18 @@
 use crate::capability::scoped_files;
 use crate::{
-    capability::capability_store as files,
-    error::{Error, Result},
-    policy::{
-        capability_tx::{Candidate, ParentCandidate, State, Witness},
-        invocation::{self, MetadataKind},
-        native_skills::Recipe,
-        source_tree::{Slot, Tree},
+    capability::{
+        capability_store as files,
+        rules::{
+            capability_tx::{Candidate, ParentCandidate, State, Witness},
+            invocation::{self, MetadataKind},
+        },
     },
-    skills::native_skills_files::{self as disk, Object},
+    error::{Error, Result},
+    policy::source_tree::{Slot, Tree},
+    skills::{
+        native_skills_files::{self as disk, Object},
+        rules::native_skills::Recipe,
+    },
 };
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::Path};

@@ -227,7 +227,7 @@ fn source_groups_expand_explicitly_without_turning_ambiguous_or_overlapping_name
 
 #[test]
 fn change_kinds_keep_existing_wire_values_and_never_convert_links_into_metadata() -> TestResult {
-    use crate::policy::invocation::MetadataKind;
+    use crate::capability::rules::invocation::MetadataKind;
     for old in [MetadataKind::Frontmatter, MetadataKind::CodexPolicy] {
         let bytes = serde_json::to_vec(&old)?;
         let next = serde_json::from_slice::<ChangeKind>(&bytes)?;

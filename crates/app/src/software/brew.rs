@@ -6,7 +6,7 @@ use crate::{
     },
     error::{Error, Result},
     operations::store::Store,
-    policy::brew as policy,
+    software::rules::brew as policy,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -135,7 +135,7 @@ fn helper_directory(store: &Store) -> Result<std::fs::File> {
         "native-brew",
         "query-scripts",
         "v1",
-        &crate::policy::cache::digest(policy::QUERY_SCRIPT),
+        &crate::policy::catalog::cache::digest(policy::QUERY_SCRIPT),
     ] {
         match mkdirat(&directory, name, Mode::from_bits_truncate(0o700)) {
             Ok(()) | Err(rustix::io::Errno::EXIST) => (),
@@ -183,10 +183,10 @@ fn materialize_script(store: &Store) -> Result<crate::domain::BrewQueryScript> {
     let absolute = store
         .path
         .join("native-brew/query-scripts/v1")
-        .join(crate::policy::cache::digest(policy::QUERY_SCRIPT))
+        .join(crate::policy::catalog::cache::digest(policy::QUERY_SCRIPT))
         .join("query.rb");
     let stamp = query::file_stamp(&absolute)?;
-    if stamp.sha256 != crate::policy::cache::digest(policy::QUERY_SCRIPT)
+    if stamp.sha256 != crate::policy::catalog::cache::digest(policy::QUERY_SCRIPT)
         || stamp.node.mode & 0o777 != 0o400
     {
         return Err(Error::attention(
@@ -345,7 +345,7 @@ fn finish_without_mutator(
         Ok(value) => value,
         Err(error) => Observation::Unknown { reason: error.code },
     };
-    if !crate::policy::state::expected(&journal, &observed) {
+    if !crate::policy::operation::state::expected(&journal, &observed) {
         journal.phase = crate::domain::Phase::Unknown;
         journal.message = "Brew 基线/Noop 后置核验不匹配；没有执行Native mutator".into();
         store.save(&journal)?;
@@ -749,7 +749,7 @@ pub(crate) fn route_object(
 
 pub(super) struct BrewDiscovery {
     pub binding: BrewContextBinding,
-    pub book: crate::policy::resources::BrewBook,
+    pub book: crate::policy::catalog::resources::BrewBook,
 }
 pub(super) fn discovery_books(
     ctx: &Context,
@@ -806,7 +806,7 @@ pub(super) fn discovery_books(
                 "已绑定Brew发现查询未确认",
             ));
         }
-        let book = crate::policy::resources::brew_book(&output.stdout)?;
+        let book = crate::policy::catalog::resources::brew_book(&output.stdout)?;
         results.push(BrewDiscovery {
             binding: record.binding.clone(),
             book,
@@ -857,7 +857,7 @@ fn run_name(journal: &crate::domain::Journal, suffix: &str) -> String {
 fn original_state(
     binding: &crate::policy::governance::DirectoryBinding,
 ) -> Result<crate::platform::fs::Directory> {
-    crate::capability::capability_store::open(&crate::policy::capability_tx::Namespace {
+    crate::capability::capability_store::open(&crate::capability::rules::capability_tx::Namespace {
         ancestor: binding.clone(),
         remaining: vec![".brew-native-query".into()],
     })
@@ -928,7 +928,7 @@ fn execution_owner(journal: &crate::domain::Journal, run: &BrewRunState) -> Resu
         schema_version: 1,
         installations: BTreeMap::new(),
     });
-    crate::policy::state::receipt_schema(&receipts)?;
+    crate::policy::operation::state::receipt_schema(&receipts)?;
     if policy::owner_snapshot(&view.query.key, &catalog, &receipts, &registry)? != view.data.owner {
         return Err(Error::attention(
             "brew_owner_changed",
@@ -1172,7 +1172,7 @@ pub fn recover(
     if original.home != ctx.home || original.state != ctx.state || original.scope != ctx.scope {
         return Err(native_invalid());
     }
-    if dry_run || !crate::policy::state::pending(original.phase) {
+    if dry_run || !crate::policy::operation::state::pending(original.phase) {
         return Ok(serde_json::json!({"journal":original,"persistentWrites":false}));
     }
     let store = match Store::lock(ctx) {
@@ -1211,7 +1211,7 @@ pub(crate) fn recover_locked(
     {
         return Err(native_invalid());
     }
-    if !crate::policy::state::pending(journal.phase) {
+    if !crate::policy::operation::state::pending(journal.phase) {
         return Ok(serde_json::json!({"journal":journal,"persistentWrites":false}));
     }
     if let Some(terminal) = store.publish_existing_terminal(&journal)? {
@@ -1249,9 +1249,8 @@ mod query {
         domain::{BrewContextRecord, BrewEvidenceStamp, BrewQuerySpec, Observation, fingerprint},
         error::{Error, Result},
         operations::store::{self, Store},
-        platform::fs as paths,
-        platform::process,
-        policy::brew as policy,
+        platform::{fs as paths, process},
+        software::rules::brew as policy,
     };
     use std::{
         collections::BTreeMap,
@@ -1391,7 +1390,7 @@ mod query {
         }
         Ok(crate::domain::BrewFileStamp {
             node: node(&before),
-            sha256: crate::policy::cache::digest(&bytes),
+            sha256: crate::policy::catalog::cache::digest(&bytes),
         })
     }
     pub fn verify(query: &BrewQuerySpec) -> Result<()> {

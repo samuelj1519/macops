@@ -1,9 +1,11 @@
 use super::*;
-use crate::policy::{
-    invocation::{self, MetadataKind},
-    json_fields::{self, Edit},
-    source_payload::{Entry, Payload},
-    source_tx::UpgradedRoot,
+use crate::{
+    capability::rules::invocation::{self, MetadataKind},
+    policy::json_fields::{self, Edit},
+    source::rules::{
+        source_payload::{Entry, Payload},
+        source_tx::UpgradedRoot,
+    },
 };
 
 // A historical wire fixture, not an upgrade implementation: two fixed synthetic
@@ -16,7 +18,7 @@ pub(super) fn legacy_v5_fixture() -> std::result::Result<PreparedUpgrade, Box<dy
         crate::policy::governance::Dataset::ManagedAssets,
         16 * 1024 * 1024,
     )?;
-    let native_before = fs::read(crate::policy::delivery::native_lock_path(
+    let native_before = fs::read(crate::capability::rules::delivery::native_lock_path(
         &ctx.home, &ctx.scope,
     ))?;
     let definitions_before = authority.read(
@@ -31,7 +33,7 @@ pub(super) fn legacy_v5_fixture() -> std::result::Result<PreparedUpgrade, Box<dy
         crate::policy::governance::Dataset::InvocationRules,
         1024 * 1024,
     )?;
-    let applied = crate::policy::source_invocation::applied(
+    let applied = crate::source::rules::source_invocation::applied(
         &ctx.home,
         rules_before.as_deref(),
         overlays_before.as_deref(),
@@ -45,10 +47,10 @@ pub(super) fn legacy_v5_fixture() -> std::result::Result<PreparedUpgrade, Box<dy
     }
     let created_at = crate::operations::store::now();
     let native =
-        crate::policy::source_projection::native(Some(&native_before), &roots, created_at)?;
+        crate::source::rules::source_projection::native(Some(&native_before), &roots, created_at)?;
     for root in &mut roots {
         if let Some(spec) = &mut root.native_after {
-            spec.expected = crate::policy::source_receipts::known_skill(
+            spec.expected = crate::source::rules::source_receipts::known_skill(
                 &spec.package.id,
                 &spec.query,
                 native.as_deref().ok_or("native image")?,
@@ -58,14 +60,16 @@ pub(super) fn legacy_v5_fixture() -> std::result::Result<PreparedUpgrade, Box<dy
             )?;
         }
     }
-    let managed = crate::policy::source_projection::managed(
+    let managed = crate::source::rules::source_projection::managed(
         managed_before.as_deref(),
         &roots,
         &ctx.home,
         nix::unistd::geteuid().as_raw(),
     )?;
-    let definitions =
-        crate::policy::source_projection::definitions(definitions_before.as_deref(), &roots)?;
+    let definitions = crate::source::rules::source_projection::definitions(
+        definitions_before.as_deref(),
+        &roots,
+    )?;
     let overlays = overlays_before
         .as_deref()
         .map(|raw| json_fields::apply_governance(raw, &edits))
@@ -95,7 +99,7 @@ fn legacy_payload(name: &str) -> Payload {
 fn legacy_root(
     ctx: &Context,
     authority: &crate::operations::governance::Governance,
-    applied: &crate::policy::source_invocation::Applied,
+    applied: &crate::source::rules::source_invocation::Applied,
     key: &str,
 ) -> std::result::Result<(UpgradedRoot, Vec<Edit>), Box<dyn std::error::Error>> {
     let mut edits = vec![];
@@ -104,7 +108,7 @@ fn legacy_root(
     let mut payload = legacy_payload(&current.baseline.source.canonical_name);
     let base_sha256 = payload.shape(0, 0o700).digest()?;
     let base_shape = payload.shape(current.tree.uid, current.tree.mode);
-    let intent = crate::policy::source_invocation::intent(
+    let intent = crate::source::rules::source_invocation::intent(
         applied.declaration.as_ref(),
         &current.baseline.source.canonical_name,
         None,

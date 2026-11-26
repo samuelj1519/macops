@@ -2,8 +2,8 @@
 use super::*;
 use crate::{
     cli::Cli,
+    config::rules::chezmoi_native::Stamp,
     domain::{FileId, Scope},
-    policy::chezmoi_native::Stamp,
     test_support::TestResult,
 };
 use clap::Parser;

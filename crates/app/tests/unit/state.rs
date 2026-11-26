@@ -629,8 +629,9 @@ fn a_second_commit_cannot_modify_the_first_commit_for_that_operation() -> TestRe
 #[test]
 fn capability_observer_plan_inputs_and_expected_matching_fail_closed() -> TestResult {
     let lock = std::path::PathBuf::from("/fixture/home/.agents/.skill-lock.json");
-    let cap_id =
-        crate::policy::capability_local::skill_capability_id(&lock, "demo", "github", "o/r")?;
+    let cap_id = crate::capability::rules::capability_local::skill_capability_id(
+        &lock, "demo", "github", "o/r",
+    )?;
     let cap_pkg = Package {
         id: cap_id,
         name: "demo".into(),

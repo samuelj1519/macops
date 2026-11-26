@@ -1,10 +1,8 @@
 #![cfg(test)]
 use super::*;
 use crate::{
-    policy::{
-        delivery::Profile,
-        profile_fields::{Claim, Owner, ParentState, Presence, Role},
-    },
+    capability::rules::delivery::Profile,
+    policy::profile::profile_fields::{Claim, Owner, ParentState, Presence, Role},
     test_support::TestResult,
 };
 fn bool_field(profile: ConfigProfile, intent: Intent) -> BoolField {

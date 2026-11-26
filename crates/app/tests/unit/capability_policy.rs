@@ -225,7 +225,7 @@ fn query_and_journal_bindings_reject_tampering_even_with_recomputed_hashes() -> 
     let s = skill_pkg()?;
     let p = plugin_pkg();
     let valid = skill_journal()?;
-    crate::policy::state::validate_journal(&valid)?;
+    crate::policy::operation::state::validate_journal(&valid)?;
     let cmd = QuerySpec::Command(CommandSpec {
         program: "/bin/echo".into(),
         args: vec![],
@@ -308,7 +308,10 @@ fn plan_and_adoptable_observation_reject_missing_and_mutating_forms() -> TestRes
         }
         j.plan.recipe_sha256 = fingerprint(&j.plan.package)?;
         j.plan_sha256 = fingerprint(&j.plan)?;
-        assert!(crate::policy::state::validate_journal(&j).is_err(), "{idx}");
+        assert!(
+            crate::policy::operation::state::validate_journal(&j).is_err(),
+            "{idx}"
+        );
     }
     Ok(())
 }

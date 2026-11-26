@@ -58,7 +58,7 @@ pub enum QuerySpec {
     LocalConfig(#[serde(deserialize_with = "crate::policy::json::object")] LocalConfigQuery),
     NativeConfig(
         #[serde(deserialize_with = "crate::policy::json::object")]
-        crate::policy::chezmoi_native::Query,
+        crate::config::rules::chezmoi_native::Query,
     ),
     LocalCapability(
         #[serde(deserialize_with = "crate::policy::json::object")] LocalCapabilityQuery,
@@ -402,7 +402,7 @@ pub enum Provider {
         #[serde(
             default,
             skip_serializing_if = "Option::is_none",
-            deserialize_with = "crate::policy::uv_local::optional_binding"
+            deserialize_with = "crate::software::rules::uv_local::optional_binding"
         )]
         binding: Option<UvToolBinding>,
     },
@@ -552,17 +552,17 @@ impl Catalog {
             if matches!(p.kind, Kind::Service) != matches!(p.provider, Provider::Service { .. }) {
                 return Err(Error::new("invalid_service_kind", &p.id));
             }
-            crate::policy::brew::validate_package(p)?;
-            crate::policy::uv_local::validate_package(p)?;
+            crate::software::rules::brew::validate_package(p)?;
+            crate::software::rules::uv_local::validate_package(p)?;
             crate::policy::config_local::validate_package(p)?;
-            crate::policy::capability_local::validate_package(p)?;
+            crate::capability::rules::capability_local::validate_package(p)?;
             if let Provider::Npm {
                 package,
                 authority: Some(authority),
                 ..
             } = &p.provider
             {
-                crate::policy::npm_local::validate_authority(package, authority)?;
+                crate::software::rules::npm_local::validate_authority(package, authority)?;
             }
             if let Provider::Service { formula } = &p.provider
                 && formula != "postgresql@16"

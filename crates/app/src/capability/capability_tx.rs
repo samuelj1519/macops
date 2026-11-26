@@ -1,20 +1,21 @@
 use crate::{
-    capability::capability_guard as guard,
-    capability::capability_store as files,
-    capability::invocation_inventory::Assessment,
-    context::Context,
-    domain::{Action, GovernanceCategory, Kind, Observation, Package, Plan, Provider, fingerprint},
-    error::{Error, Result},
-    operations::governance::Governance,
-    operations::store::{Journal, Phase, Store},
-    platform::fs::Directory,
-    policy::{
-        capability_tx::{
+    capability::{
+        capability_guard as guard, capability_store as files,
+        invocation_inventory::Assessment,
+        rules::capability_tx::{
             self as policy, Blob, Candidate, FileChange, LedgerChange, LedgerSlot, Manifest,
             Namespace, Pending, State, Witness,
         },
-        governance::Dataset,
     },
+    context::Context,
+    domain::{Action, GovernanceCategory, Kind, Observation, Package, Plan, Provider, fingerprint},
+    error::{Error, Result},
+    operations::{
+        governance::Governance,
+        store::{Journal, Phase, Store},
+    },
+    platform::fs::Directory,
+    policy::governance::Dataset,
 };
 use serde_json::{Value, json};
 use std::{ffi::OsStr, os::unix::fs::MetadataExt, path::Path};
@@ -323,7 +324,7 @@ fn stage_content(
     if link && let Some(raw) = raw {
         return files::stage_link(
             namespace,
-            &crate::policy::delivery::LinkText::from_bytes(raw)?,
+            &crate::capability::rules::delivery::LinkText::from_bytes(raw)?,
         );
     }
     files::stage(namespace, raw, mode)
@@ -339,13 +340,13 @@ fn prepare(
             &file.namespace,
             file.after_blob.as_ref(),
             file.after_mode.unwrap_or(0o600),
-            file.kind == crate::policy::delivery::ChangeKind::ManagedLink,
+            file.kind == crate::capability::rules::delivery::ChangeKind::ManagedLink,
             blobs,
             pending,
         )?;
         pending.files.push(candidate);
         save_pending(root, manifest, pending)?;
-        if file.kind == crate::policy::delivery::ChangeKind::ManagedLink
+        if file.kind == crate::capability::rules::delivery::ChangeKind::ManagedLink
             && let State::Link {
                 text,
                 mode: Some(mode),
@@ -476,7 +477,7 @@ fn execute(
         for (change, candidate) in manifest.files.iter().zip(&pending.files) {
             guard::verify(manifest, pending)?;
             let candidate = candidate_for(candidate, pending)?;
-            if change.kind == crate::policy::delivery::ChangeKind::ManagedLink {
+            if change.kind == crate::capability::rules::delivery::ChangeKind::ManagedLink {
                 files::publish_link(
                     &manifest.home,
                     &change.namespace,
@@ -550,7 +551,7 @@ pub fn sync(ctx: &Context, change: Option<&str>, dry_run: bool, yes: bool) -> Re
     }
     let operation = crate::operations::store::operation_id();
     let change = change.unwrap_or(&operation);
-    crate::policy::skills::parse_change_id(change).map_err(|_| invalid())?;
+    crate::skills::rules::skills::parse_change_id(change).map_err(|_| invalid())?;
     let root = backup(&authority, change)?;
     let blobs = files::Blobs::create(&root)?;
     let manifest = manifest(ctx, &authority, &assessment, &operation, change, &blobs)?;
@@ -752,10 +753,9 @@ fn rollback_one(
     if before_state(&path, before, &current, pending) {
         return Ok(());
     }
-    let link = manifest
-        .files
-        .iter()
-        .any(|f| f.path == path && f.kind == crate::policy::delivery::ChangeKind::ManagedLink);
+    let link = manifest.files.iter().any(|f| {
+        f.path == path && f.kind == crate::capability::rules::delivery::ChangeKind::ManagedLink
+    });
     let candidate = if link {
         link_rollback_candidate(root, manifest, pending, namespace, before)?
     } else {
@@ -960,9 +960,10 @@ pub fn recover_journal(
         return Err(recovery_scope_changed());
     }
     let (root, blobs, manifest, mut pending, present) = load(store, journal)?;
-    let frozen = crate::policy::delivery::native_lock_path(&journal.home, &journal.scope);
+    let frozen =
+        crate::capability::rules::delivery::native_lock_path(&journal.home, &journal.scope);
     if manifest.inputs.iter().any(|i| i.path == frozen)
-        && crate::policy::delivery::native_lock_path(&ctx.home, &ctx.scope) != frozen
+        && crate::capability::rules::delivery::native_lock_path(&ctx.home, &ctx.scope) != frozen
     {
         return Err(recovery_scope_changed());
     }
@@ -1069,11 +1070,11 @@ pub fn recover_policy(
         ));
     }
     let operation_id = if value.get("schema_version").and_then(Value::as_u64) == Some(5) {
-        decode::<crate::policy::source_tx::Pending>(&raw)?.operation_id
+        decode::<crate::source::rules::source_tx::Pending>(&raw)?.operation_id
     } else {
         decode::<Pending>(&raw)?.operation_id
     };
-    if !crate::policy::state::valid_id(&operation_id) {
+    if !crate::policy::operation::state::valid_id(&operation_id) {
         return Err(invalid());
     }
     if let Some(change) = change {
@@ -1122,7 +1123,7 @@ pub fn write(
             },
     } = command
     {
-        crate::policy::skills::parse_change_id(id)
+        crate::skills::rules::skills::parse_change_id(id)
             .map_err(|_| Error::new("invalid_change_id", "change-id 无效"))?;
     }
     let result = match command {
@@ -1155,7 +1156,7 @@ fn links_manifest(
         }
         changes.push(FileChange {
             path: patch.path.clone(),
-            kind: crate::policy::delivery::ChangeKind::ManagedLink,
+            kind: crate::capability::rules::delivery::ChangeKind::ManagedLink,
             namespace: patch.namespace.clone(),
             before: patch.before.clone(),
             before_blob: saved_blob(blobs, raw.as_deref())?,

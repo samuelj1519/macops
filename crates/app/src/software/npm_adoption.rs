@@ -99,7 +99,7 @@ fn same_instance(query: &LocalNpmQuery, package: &Package) -> Result<bool> {
             name: package,
             prefix,
         } => same_prefix(query, package, prefix),
-        _ => match crate::policy::targets::descriptor(package)? {
+        _ => match crate::policy::catalog::targets::descriptor(package)? {
             Some(legacy) => same_prefix(query, &legacy.name, &legacy.prefix),
             None => Ok(false),
         },
@@ -216,7 +216,7 @@ pub fn recover(
         )
     };
     let proof = journal.plan.npm_binding.as_ref().ok_or_else(unknown)?;
-    if !crate::policy::state::pending(journal.phase) {
+    if !crate::policy::operation::state::pending(journal.phase) {
         return Ok(json!(journal));
     }
     if mark_failed {

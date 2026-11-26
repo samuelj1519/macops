@@ -4,17 +4,17 @@ BASE=pathlib.Path(__file__).resolve().parent.parent
 ART=BASE/'artifacts/uv-readonly/policy-mutants';ART.mkdir(parents=True,exist_ok=True)
 
 def content(file):return (BASE/'crates/app/src'/file).read_text()
-P=content('policy/uv_local.rs');T=content('catalog/target.rs');O=content('software/uv_ownership.rs');L=content('software/uv_local.rs');R=content('operations/recovery.rs')
-V=content('operations/providers.rs');begin=V.index('    if crate::policy::uv_local::descriptor',V.index('pub fn capture_query'));end=V.index('    let query = match',begin)
+P=content('software/rules/uv_local.rs');T=content('catalog/target.rs');O=content('software/uv_ownership.rs');L=content('software/uv_local.rs');R=content('operations/recovery.rs')
+V=content('operations/providers.rs');begin=V.index('    if crate::software::rules::uv_local::descriptor',V.index('pub fn capture_query'));end=V.index('    let query = match',begin)
 mutants=[
  ('namespace-recapture','operations/providers.rs',V[:begin]+V[end:],'operations::uv_tests::uv_adopted_namespace_replacement_cannot_be_silently_recaptured'),
- ('uv-action','policy/uv_local.rs',P.replace('if is_uv(provider) && action != Action::Adopt','if false && is_uv(provider) && action != Action::Adopt'),'policy::uv_local::tests::only_bound_adopt_is_permitted_and_cannot_lend_authority'),
- ('owner-early-return','catalog/target.rs',T.replace('''    if crate::policy::uv_local::is_uv(&package.provider) {
+ ('uv-action','software/rules/uv_local.rs',P.replace('if is_uv(provider) && action != Action::Adopt','if false && is_uv(provider) && action != Action::Adopt'),'software::rules::uv_local::tests::only_bound_adopt_is_permitted_and_cannot_lend_authority'),
+ ('owner-early-return','catalog/target.rs',T.replace('''    if crate::software::rules::uv_local::is_uv(&package.provider) {
         return crate::software::uv_ownership::declared(ctx, package);
     }
 ''',''),'operations::uv_tests::uv_resolve_and_final_publication_recheck_declaration_owner_history'),
  ('owner-snapshot-cas','software/uv_ownership.rs',O.replace('if expected != current','if false && expected != current'),'operations::uv_tests::uv_resolve_and_final_publication_recheck_declaration_owner_history'),
- ('wrong-home-id','policy/uv_local.rs',P.replace('&("uv", root, normalize_name(name)?)','&("uv", Path::new("/HOME"), normalize_name(name)?)'),'policy::uv_local::tests::aliases_and_separate_roots'),
+ ('wrong-home-id','software/rules/uv_local.rs',P.replace('&("uv", root, normalize_name(name)?)','&("uv", Path::new("/HOME"), normalize_name(name)?)'),'software::rules::uv_local::tests::aliases_and_separate_roots'),
  ('external-receipt-path','software/uv_local.rs',L.replace('''install_path.parent() != Some(bin.path.as_path())
             || ''',''),'software::uv_local::tests::budgets_duplicates_receipt_escape_and_lock_competition'),
  ('root-stamp','software/uv_local.rs',L.replace('root.identity != query.namespace.tool_dir.identity','false'),'software::uv_local::tests::stable_tool_and_each_data_leaf_fail_closed'),

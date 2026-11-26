@@ -1,8 +1,6 @@
-pub use crate::policy::source_tx::NativeSpec;
+pub use crate::source::rules::source_tx::NativeSpec;
 use crate::{
-    capability::capability_local,
-    capability::capability_store,
-    capability::link_inventory::Reader,
+    capability::{capability_local, capability_store, link_inventory::Reader},
     context::Context,
     domain::{CapabilityKind, Provider},
     error::{Error, Result},
@@ -10,11 +8,13 @@ use crate::{
     platform::fs::Directory,
     policy::{
         governance::Dataset,
-        source_baseline::{self, Baseline, Identity},
         source_git::{RelativePath, Repository},
         source_tree::{Slot, Tree},
     },
-    source::source_tree,
+    source::{
+        rules::source_baseline::{self, Baseline, Identity},
+        source_tree,
+    },
 };
 use serde_json::Value;
 pub struct Adoption {
@@ -110,7 +110,7 @@ fn native_identity(
         }
         return Ok(None);
     }
-    let record = crate::policy::delivery::native_lock_path(&ctx.home, &ctx.scope);
+    let record = crate::capability::rules::delivery::native_lock_path(&ctx.home, &ctx.scope);
     let Some(bytes) = reader.regular(&record)? else {
         return Ok(None);
     };
@@ -133,10 +133,12 @@ fn native_identity(
         let exact = source
             .zip(kind)
             .map(|(source, kind)| {
-                crate::policy::capability_local::skill_capability_id(&record, name, kind, source)
+                crate::capability::rules::capability_local::skill_capability_id(
+                    &record, name, kind, source,
+                )
             })
             .transpose()?;
-        let logical = crate::policy::native_skills::installation_id(
+        let logical = crate::skills::rules::native_skills::installation_id(
             &crate::platform::fs::read_path(&ctx.home.join(".agents/skills").join(name))?,
         )?;
         if (!exact_id && key == format!("skill:{name}"))
@@ -173,7 +175,7 @@ fn native_identity(
         .get("skillPath")
         .and_then(Value::as_str)
         .ok_or_else(invalid)?;
-    let path = crate::policy::native_skills::skill_directory(raw_path)?;
+    let path = crate::skills::rules::native_skills::skill_directory(raw_path)?;
     let repository = Repository::parse(source)?;
     repository.verify_url(
         row.get("sourceUrl")
@@ -247,7 +249,7 @@ pub fn assess_adoption(
     let mut reader = Reader::new();
     let (identity, native) = if let Some(identity) = declared_identity(&mut reader, authority, key)?
     {
-        let lock = crate::policy::delivery::native_lock_path(&ctx.home, &ctx.scope);
+        let lock = crate::capability::rules::delivery::native_lock_path(&ctx.home, &ctx.scope);
         if let Some(bytes) = reader.regular(&lock)? {
             let document = crate::policy::json::parse(&bytes)?;
             if document.get("version").and_then(Value::as_u64) != Some(3)
@@ -293,7 +295,7 @@ pub fn assess_adoption(
             authority.paths.managed.clone(),
             authority.paths.overlays.clone(),
             authority.paths.manifests.clone(),
-            crate::policy::delivery::native_lock_path(&ctx.home, &ctx.scope),
+            crate::capability::rules::delivery::native_lock_path(&ctx.home, &ctx.scope),
         ],
     )?;
     let tree = source_tree::observe(&slot)?.ok_or_else(invalid)?;
@@ -346,7 +348,7 @@ mod tests;
 pub fn project_metadata(
     ctx: &Context,
     before: Option<&[u8]>,
-    changes: &[crate::policy::capability_tx::FileChange],
+    changes: &[crate::capability::rules::capability_tx::FileChange],
 ) -> Result<Option<Vec<u8>>> {
     let owner = nix::unistd::geteuid().as_raw();
     let book = source_baseline::read(before, &ctx.home, owner)?;
@@ -371,7 +373,7 @@ pub fn project_metadata(
 pub fn verify_metadata(
     home: &std::path::Path,
     raw: Option<&[u8]>,
-    changes: &[crate::policy::capability_tx::FileChange],
+    changes: &[crate::capability::rules::capability_tx::FileChange],
 ) -> Result<()> {
     let owner = nix::unistd::geteuid().as_raw();
     let book = source_baseline::read(raw, home, owner)?;
@@ -393,7 +395,7 @@ fn github_package(
     payload: std::path::PathBuf,
 ) -> Result<crate::domain::Package> {
     let package = crate::domain::Package {
-        id: crate::policy::capability_local::skill_capability_id(
+        id: crate::capability::rules::capability_local::skill_capability_id(
             record, native_id, "github", source,
         )?,
         name: native_id.into(),

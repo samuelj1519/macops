@@ -1102,26 +1102,26 @@ fn journal_and_existing_owner_preserve_logical_brew_identity_across_capture_refr
     if let Provider::BrewFormula { query, .. } = &mut changed.provider {
         query.env_capture_id = "ENV-REFRESH".into();
     }
-    crate::policy::state::existing_owner(&scope, &changed, Some(&old))?;
+    crate::policy::operation::state::existing_owner(&scope, &changed, Some(&old))?;
     let mut selected = scope.clone();
     selected
         .paths
         .insert("XDG_CONFIG_HOME".into(), Some("/new/xdg".into()));
-    crate::policy::state::existing_owner(&selected, &changed, Some(&old))?;
+    crate::policy::operation::state::existing_owner(&selected, &changed, Some(&old))?;
     let mut other = scope.clone();
     other.home = "/different/home".into();
-    assert!(crate::policy::state::existing_owner(&other, &changed, Some(&old)).is_err());
+    assert!(crate::policy::operation::state::existing_owner(&other, &changed, Some(&old)).is_err());
     if let Provider::BrewFormula { query, .. } = &mut changed.provider {
         query.key.full_name = "other".into();
     }
-    assert!(crate::policy::state::existing_owner(&scope, &changed, Some(&old)).is_err());
+    assert!(crate::policy::operation::state::existing_owner(&scope, &changed, Some(&old)).is_err());
     let mut j = crate::test_support::journal()?;
     j.plan = p.clone();
     j.plan_sha256 = fingerprint(&j.plan)?;
     j.scope = scope.clone();
     j.home = scope.home;
     j.scope_sha256 = fingerprint(&j.scope)?;
-    assert!(!crate::policy::state::expected(
+    assert!(!crate::policy::operation::state::expected(
         &j,
         &Observation::Present {
             version: "2.0.0".into(),
@@ -1131,11 +1131,11 @@ fn journal_and_existing_owner_preserve_logical_brew_identity_across_capture_refr
     let mut current = report(q, &[("homebrew/core", "stable", "2.0.0")]);
     current.formula.as_mut().ok_or("formula")?.outdated = false;
     let current = observation(q, stamp(q)?, current)?;
-    assert!(crate::policy::state::expected(&j, &current));
+    assert!(crate::policy::operation::state::expected(&j, &current));
     j.plan.brew.as_mut().ok_or("brew")?.context.epoch += 1;
-    assert!(!crate::policy::state::expected(&j, &current));
+    assert!(!crate::policy::operation::state::expected(&j, &current));
     j.plan_sha256 = fingerprint(&j.plan)?;
-    assert!(crate::policy::state::validate_journal(&j).is_err());
+    assert!(crate::policy::operation::state::validate_journal(&j).is_err());
     let mut invalid = q.clone();
     invalid.key.canonical_prefix = non_utf8_path();
     assert!(resolved_package(&p.package, &invalid).is_err());

@@ -1,10 +1,8 @@
 use crate::{
-    capability::capability_guard,
-    capability::capability_store,
+    capability::{capability_guard, capability_store, rules::capability_tx::Namespace},
     error::{Error, Result},
     platform::fs::{Directory, EntryKind},
     policy::{
-        capability_tx::Namespace,
         source_git::Component,
         source_tree::{self, Change, Content, Entry, Position, Slot, Tree},
     },

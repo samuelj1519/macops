@@ -236,7 +236,7 @@ fn parse_proposals(raw: &[u8], token: &str, documents: usize) -> Result<Vec<Prop
         return Err(Failure::Unverified);
     }
     let content = message["content"].as_str().ok_or(Failure::Unverified)?;
-    let proposals: Proposals = crate::policy::native_skills::decode(content.as_bytes())
+    let proposals: Proposals = crate::skills::rules::native_skills::decode(content.as_bytes())
         .map_err(|_| Failure::Unverified)?;
     let valid = |text: &str, limit: usize| {
         !text.trim().is_empty()

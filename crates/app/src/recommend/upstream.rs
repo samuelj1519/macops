@@ -620,7 +620,9 @@ fn registry_url(candidate: &Candidate) -> Option<(String, &'static str)> {
         Candidate::Npm { name, version, .. } => {
             let (version, scope) = match version.as_deref() {
                 None | Some("latest") => ("latest", "current-release"),
-                Some(version) if crate::policy::manifest::concrete_npm_version(version) => {
+                Some(version)
+                    if crate::policy::operation::manifest::concrete_npm_version(version) =>
+                {
                     (version, "requested-version")
                 }
                 _ => return None,
@@ -657,7 +659,7 @@ fn publishes_from(candidate: &Candidate, repository: &str, claim: &Value) -> boo
             claim["name"] == *name
                 && claim["version"]
                     .as_str()
-                    .is_some_and(crate::policy::manifest::valid_version)
+                    .is_some_and(crate::policy::operation::manifest::valid_version)
                 && version
                     .as_deref()
                     .is_none_or(|expected| expected == "latest" || claim["version"] == expected)

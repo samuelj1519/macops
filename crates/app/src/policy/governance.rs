@@ -683,7 +683,7 @@ pub fn validate(p: &Locations, l: &CommittedMigration) -> Result<()> {
         absolute(root)?;
     }
     if !matches!(l.schema_version, LEGACY_LEDGER_VERSION | LEDGER_VERSION)
-        || !crate::policy::state::valid_id(&l.migration_id)
+        || !crate::policy::operation::state::valid_id(&l.migration_id)
         || l.migration_id.len() > 128
         || l.home != p.home
         || l.legacy_settings != p.settings

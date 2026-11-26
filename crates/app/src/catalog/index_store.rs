@@ -92,7 +92,7 @@ impl Namespace {
             .scopes
             .values()
             .find(|b| b.identity.root == root_id && b.identity.indexes == index_id);
-        crate::policy::cache::unchanged_marker(old, marker.as_ref())?;
+        crate::policy::catalog::cache::unchanged_marker(old, marker.as_ref())?;
         if marker.is_none() && create {
             let mut random = [0_u8; 32];
             getrandom::fill(&mut random)
@@ -109,7 +109,7 @@ impl Namespace {
             marker = Store::read(&indexes, MARKER)?;
         }
         let scope_id = if let Some(marker) = marker {
-            crate::policy::cache::validate_marker(&marker)?;
+            crate::policy::catalog::cache::validate_marker(&marker)?;
             marker.scope_id
         } else {
             String::new()
@@ -128,7 +128,7 @@ impl Namespace {
                     .sync_all()?;
             }
         }
-        let key = crate::policy::cache::identity_key(&identity);
+        let key = crate::policy::catalog::cache::identity_key(&identity);
         Ok(Some(Self {
             root,
             indexes,
@@ -141,7 +141,7 @@ impl Namespace {
     pub fn assert_current(&self, ctx: &Context, registry: &Registry) -> Result<()> {
         let current = Self::open(ctx, false, registry)?
             .ok_or_else(|| Error::attention("cache_scope_changed", "缓存目录已消失"))?;
-        crate::policy::cache::require_identity(&self.identity, &current.identity)
+        crate::policy::catalog::cache::require_identity(&self.identity, &current.identity)
     }
 
     pub fn read_blob<T: DeserializeOwned>(&self, hash: &str) -> Result<T> {
@@ -214,4 +214,4 @@ pub fn read_bytes(directory: &File, name: &str) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-pub use crate::policy::cache::{digest, valid_hash};
+pub use crate::policy::catalog::cache::{digest, valid_hash};

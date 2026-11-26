@@ -1,6 +1,6 @@
 #![cfg(test)]
 use super::*;
-use crate::{policy::profile_fields::Role, test_support::TestResult};
+use crate::{policy::profile::profile_fields::Role, test_support::TestResult};
 use std::{ffi::OsString, os::unix::ffi::OsStringExt};
 #[test]
 fn codex_parent_missing_empty_table_and_empty_array_have_distinct_retirement_results() -> TestResult
@@ -55,7 +55,7 @@ fn codex_requests_require_valid_owner_hash_unique_selection_and_bounded_absolute
     r.owner.intent = Intent::Plugins;
     cases.push(vec![r]);
     let mut r = good.clone();
-    r.owner.profile = ConfigProfile::Claude(crate::policy::delivery::Profile::Mi);
+    r.owner.profile = ConfigProfile::Claude(crate::capability::rules::delivery::Profile::Mi);
     r.owner.intent = Intent::Plugins;
     cases.push(vec![r]);
     let mut r = good.clone();

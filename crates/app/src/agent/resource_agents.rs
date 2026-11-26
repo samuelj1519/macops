@@ -5,7 +5,7 @@ use crate::{
     },
     error::{Error, Result},
     platform::fs as paths,
-    policy::resources as policy,
+    policy::catalog::resources as policy,
 };
 use serde::{Deserialize, Serialize};
 use std::{

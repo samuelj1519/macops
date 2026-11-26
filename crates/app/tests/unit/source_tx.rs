@@ -422,7 +422,7 @@ fn policy_write_and_retirement_advance_full_source_baseline_using_exact_patch_mo
         crate::capability::capability_tx::sync(&ctx, Some("SOURCE-POLICY"), false, true)?["status"],
         "succeeded"
     );
-    let book = crate::policy::source_baseline::read(
+    let book = crate::source::rules::source_baseline::read(
         Some(&fs::read(&authority.paths.managed)?),
         &ctx.home,
         nix::unistd::geteuid().as_raw(),
@@ -453,7 +453,7 @@ fn policy_write_and_retirement_advance_full_source_baseline_using_exact_patch_mo
         crate::capability::capability_tx::sync(&ctx, Some("SOURCE-RETIRE"), false, true)?["status"],
         "succeeded"
     );
-    let book = crate::policy::source_baseline::read(
+    let book = crate::source::rules::source_baseline::read(
         Some(&fs::read(&authority.paths.managed)?),
         &ctx.home,
         nix::unistd::geteuid().as_raw(),
@@ -777,10 +777,12 @@ fn v5_authority_rejects_full_tree_mismatch_layout_overlap_and_invalid_native_bin
 #[test]
 fn known_candidate_receipt_matches_native_observation_after_exchange_without_learning_the_new_live_identity()
 -> TestResult {
-    use crate::policy::{
-        source_payload::{Entry, Payload},
-        source_receipts,
-        source_tree::Change,
+    use crate::{
+        policy::source_tree::Change,
+        source::rules::{
+            source_payload::{Entry, Payload},
+            source_receipts,
+        },
     };
     let (_temp, ctx) = native_fixture()?;
     let assessment = crate::source::source_inventory::assess_adoption(
@@ -1024,8 +1026,8 @@ fn complete_upgrade_context()
     fs::write(alpha.join("SKILL.md"), b"old asset")?;
     let skill = ctx.home.join(".agents/skills/demo/SKILL.md");
     let raw = fs::read(&skill)?;
-    let overlay = crate::policy::invocation::propose(
-        crate::policy::invocation::MetadataKind::Frontmatter,
+    let overlay = crate::capability::rules::invocation::propose(
+        crate::capability::rules::invocation::MetadataKind::Frontmatter,
         "demo",
         "policy",
         Some(&raw),
@@ -1043,8 +1045,8 @@ fn complete_upgrade_context()
             .dataset(crate::policy::governance::Dataset::InvocationRules),
         &rules,
     )?;
-    let codex = crate::policy::invocation::propose(
-        crate::policy::invocation::MetadataKind::CodexPolicy,
+    let codex = crate::capability::rules::invocation::propose(
+        crate::capability::rules::invocation::MetadataKind::CodexPolicy,
         "demo",
         "policy",
         None,
@@ -1062,7 +1064,7 @@ fn complete_upgrade_context()
     fs::write(
         &authority.paths.overlays,
         serde_json::to_vec(
-            &json!({"schema_version":1,"policy_hash":crate::policy::invocation::hash(&rules),"files":{skill.to_str().ok_or("skill path")?:overlay.row,agents.join("openai.yaml").to_str().ok_or("codex path")?:codex.row}}),
+            &json!({"schema_version":1,"policy_hash":crate::capability::rules::invocation::hash(&rules),"files":{skill.to_str().ok_or("skill path")?:overlay.row,agents.join("openai.yaml").to_str().ok_or("codex path")?:codex.row}}),
         )?,
     )?;
     adopt(&ctx, "skill:demo", false, true)?.ok_or("native adoption")?;
@@ -1281,7 +1283,7 @@ fn legacy_v5_upgrade_frozen_authority_rejects_corrupt_roots_pairs_invocation_wit
     let mut pending = batch.pending.clone();
     let pair = batch.manifest.ledgers[0].pair.as_ref().ok_or("pair")?;
     for restored in [false, true] {
-        let candidate = crate::policy::capability_tx::Candidate {
+        let candidate = crate::capability::rules::capability_tx::Candidate {
             target: pair.live.path(),
             staged: Some(pair.retained.path()),
             after: pair.after.state(),
@@ -1418,7 +1420,7 @@ fn historical_native_projection_checks_original_row_pin_and_saved_after_receipt_
     let SourceAction::Upgrade { roots, .. } = &batch.manifest.action else {
         return Err("upgrade".into());
     };
-    let projection = &crate::policy::source_projection::native;
+    let projection = &crate::source::rules::source_projection::native;
     let raw = batch.manifest.ledgers[0]
         .before
         .as_ref()
@@ -1474,7 +1476,7 @@ fn historical_native_projection_checks_original_row_pin_and_saved_after_receipt_
         .transpose()?
         .ok_or("native")?;
     assert!(
-        crate::policy::source_projection::receipt_specs(std::slice::from_ref(&native), None)
+        crate::source::rules::source_projection::receipt_specs(std::slice::from_ref(&native), None)
             .is_err()
     );
     let mut mismatch = native;
@@ -1484,14 +1486,16 @@ fn historical_native_projection_checks_original_row_pin_and_saved_after_receipt_
             pack: None,
         };
     let _ = ctx;
-    assert!(crate::policy::source_projection::receipt_specs(&[mismatch], Some(&after)).is_err());
+    assert!(
+        crate::source::rules::source_projection::receipt_specs(&[mismatch], Some(&after)).is_err()
+    );
     Ok(())
 }
 
 #[test]
 fn historical_projection_refuses_foreign_declarations_missing_baseline_and_inconsistent_no_change_ledger()
 -> TestResult {
-    use crate::policy::source_projection as project;
+    use crate::source::rules::source_projection as project;
     let (_temp, ctx, _store, batch, _journal) = prepared_complete_upgrade()?;
     let SourceAction::Upgrade { roots, .. } = &batch.manifest.action else {
         return Err("upgrade".into());
@@ -1715,10 +1719,11 @@ fn historical_declared_only_upgrade_keeps_native_and_receipt_images_unchanged() 
     let before = batch
         .blobs
         .get(baseline.before.as_ref().ok_or("managed before")?)?;
-    let after = crate::policy::source_projection::managed(Some(&before), roots, &ctx.home, owner)?
-        .ok_or("projected managed images")?;
-    let before_book = crate::policy::source_baseline::read(Some(&before), &ctx.home, owner)?;
-    let after_book = crate::policy::source_baseline::read(Some(&after), &ctx.home, owner)?;
+    let after =
+        crate::source::rules::source_projection::managed(Some(&before), roots, &ctx.home, owner)?
+            .ok_or("projected managed images")?;
+    let before_book = crate::source::rules::source_baseline::read(Some(&before), &ctx.home, owner)?;
+    let after_book = crate::source::rules::source_baseline::read(Some(&after), &ctx.home, owner)?;
     assert_eq!(
         before_book.roots[&native_member],
         after_book.roots[&native_member]
@@ -1772,7 +1777,7 @@ fn historical_near_document_budget(
 #[test]
 fn historical_projection_never_grows_frozen_native_definitions_or_baseline_images_past_the_document_budget()
 -> TestResult {
-    use crate::policy::source_projection as project;
+    use crate::source::rules::source_projection as project;
     let (_temp, ctx, _store, batch, _journal) = prepared_complete_upgrade()?;
     let SourceAction::Upgrade { roots, .. } = &batch.manifest.action else {
         return Err("upgrade".into());
@@ -1800,7 +1805,7 @@ fn historical_projection_never_grows_frozen_native_definitions_or_baseline_image
         .ok_or("native")?;
     let spec = selected.native_before.as_ref().ok_or("spec")?;
     assert_eq!(
-        crate::policy::source_receipts::known_skill(
+        crate::source::rules::source_receipts::known_skill(
             &spec.package.id,
             &spec.query,
             &opaque,

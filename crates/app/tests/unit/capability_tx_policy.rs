@@ -142,7 +142,7 @@ fn example() -> Manifest {
         }],
         files: vec![FileChange {
             path: "/h/.agents/skills/demo/SKILL.md".into(),
-            kind: crate::policy::invocation::MetadataKind::Frontmatter.into(),
+            kind: crate::capability::rules::invocation::MetadataKind::Frontmatter.into(),
             namespace: ns("/h/.agents/skills/demo", "SKILL.md"),
             before: present(3, 0o644),
             before_blob: Some(raw_blob()),
@@ -289,7 +289,7 @@ fn payload_and_ledger_backups_cannot_authorize_other_files_or_link_replacements(
             size: 0,
         });
     });
-    let text = crate::policy::delivery::LinkText::from_bytes(b"../safe")?;
+    let text = crate::capability::rules::delivery::LinkText::from_bytes(b"../safe")?;
     assert!(state_valid(&State::Link {
         identity: file_id(2),
         text: text.clone(),
@@ -397,7 +397,7 @@ fn parent_case() -> (Manifest, Pending) {
     let mut m = example();
     let mut file = m.files[0].clone();
     file.path = "/h/.agents/skills/demo/agents/openai.yaml".into();
-    file.kind = crate::policy::invocation::MetadataKind::CodexPolicy.into();
+    file.kind = crate::capability::rules::invocation::MetadataKind::CodexPolicy.into();
     file.before = State::Missing;
     file.before_blob = None;
     file.namespace.remaining = vec!["agents".into(), "openai.yaml".into()];
@@ -542,7 +542,7 @@ fn governance_plans_cannot_become_process_recipes_or_ordinary_receipt_writes() -
     };
     journal.plan = governance_plan()?;
     assert!(
-        crate::policy::state::commit_receipt(
+        crate::policy::operation::state::commit_receipt(
             &mut receipts,
             &journal,
             Observation::Governance {
@@ -571,12 +571,12 @@ fn journal_nested_namespaces_and_rollback_candidates_propagate_rejection() -> Te
     journal.plan.synchronous = false;
     assert!(validate_journal(&journal).is_err());
     journal.plan_sha256 = crate::domain::fingerprint(&journal.plan)?;
-    assert!(crate::policy::state::validate_journal(&journal).is_err());
+    assert!(crate::policy::operation::state::validate_journal(&journal).is_err());
     Ok(())
 }
 
 fn links_example() -> TestResultManifest {
-    use crate::policy::delivery::{ChangeKind, LinkText, Profile, Selection};
+    use crate::capability::rules::delivery::{ChangeKind, LinkText, Profile, Selection};
     let mut m = example();
     m.schema_version = 3;
     m.category = GovernanceCategory::Links;
@@ -602,7 +602,7 @@ fn links_example() -> TestResultManifest {
         before: State::Missing,
         before_blob: None,
         after_blob: Some(Blob {
-            sha256: crate::policy::invocation::hash(text.as_str().as_bytes()),
+            sha256: crate::capability::rules::invocation::hash(text.as_str().as_bytes()),
             size: text.as_str().len() as u64,
         }),
         after_mode: None,
@@ -614,10 +614,12 @@ fn links_example() -> TestResultManifest {
 type TestResultManifest = std::result::Result<Manifest, Box<dyn std::error::Error>>;
 
 fn configuration_example() -> TestResultManifest {
-    use crate::policy::{
-        delivery::{ChangeKind, Profile},
-        profile_authority::{Authority, Client, Target},
-        profile_fields::{ConfigProfile, Intent, Owner, Role},
+    use crate::{
+        capability::rules::delivery::{ChangeKind, Profile},
+        policy::profile::{
+            profile_authority::{Authority, Client, Target},
+            profile_fields::{ConfigProfile, Intent, Owner, Role},
+        },
     };
     let mut manifest = links_example()?;
     manifest.schema_version = 4;
@@ -641,7 +643,7 @@ fn configuration_example() -> TestResultManifest {
         after_mode: Some(0o600),
     });
     manifest.configuration = Some(Authority {
-        mapping_inputs: crate::policy::config_tx::ConfigRootInputs {
+        mapping_inputs: crate::config::rules::config_tx::ConfigRootInputs {
             source: None,
             destination: None,
             config: None,
@@ -669,7 +671,7 @@ fn configuration_example() -> TestResultManifest {
 #[test]
 fn v4_profile_file_authority_requires_existing_regular_bytes_exact_kind_and_preserved_mode()
 -> TestResult {
-    use crate::policy::delivery::ChangeKind;
+    use crate::capability::rules::delivery::ChangeKind;
     let good = configuration_example()?;
     validate_manifest(&good)?;
     let mut bad_authority = good.clone();
@@ -742,7 +744,7 @@ fn rejected_link(change: impl FnOnce(&mut Manifest)) -> TestResult {
 }
 #[test]
 fn link_layout_profile_bindings_selected_units_and_category_are_closed() -> TestResult {
-    use crate::policy::delivery::{ChangeKind, Profile, Selection};
+    use crate::capability::rules::delivery::{ChangeKind, Profile, Selection};
     rejected_link(|m| m.layout = None)?;
     rejected_link(|m| m.links = None)?;
     rejected_link(|m| {
@@ -838,7 +840,7 @@ fn link_layout_profile_bindings_selected_units_and_category_are_closed() -> Test
 #[test]
 fn link_targets_never_authorize_other_profiles_protected_names_foreign_text_or_unobserved_mode()
 -> TestResult {
-    use crate::policy::delivery::{LinkText, Profile};
+    use crate::capability::rules::delivery::{LinkText, Profile};
     rejected_link(|m| {
         if let Some(l) = &mut m.links {
             l.protected.insert(
@@ -899,7 +901,7 @@ fn link_targets_never_authorize_other_profiles_protected_names_foreign_text_or_u
 #[test]
 fn untrusted_inner_link_authorization_inputs_fail_without_relying_on_outer_dispatch() -> TestResult
 {
-    use crate::policy::delivery::{LinkText, Profile};
+    use crate::capability::rules::delivery::{LinkText, Profile};
     let mut file = example().files.remove(0);
     file.path = "/foreign/SKILL.md".into();
     assert!(validate_metadata_file(&example(), &file).is_err());
@@ -956,10 +958,10 @@ fn untrusted_inner_link_authorization_inputs_fail_without_relying_on_outer_dispa
 fn frozen_nonempty_link_selectors_are_revalidated_in_the_loaded_plan() -> TestResult {
     let mut m = links_example()?;
     m.links.as_mut().ok_or("links")?.requested =
-        crate::policy::delivery::Selection::Explicit(vec!["unit:alpha".into()]);
+        crate::capability::rules::delivery::Selection::Explicit(vec!["unit:alpha".into()]);
     validate_manifest(&m)?;
     m.links.as_mut().ok_or("links")?.requested =
-        crate::policy::delivery::Selection::Explicit(vec!["bad\nselector".into()]);
+        crate::capability::rules::delivery::Selection::Explicit(vec!["bad\nselector".into()]);
     assert!(validate_manifest(&m).is_err());
     Ok(())
 }

@@ -1,16 +1,16 @@
 use crate::{
     agent::resource_agents::InstallTarget,
-    capability::capability_store,
+    capability::{
+        capability_store,
+        rules::capability_tx::{Namespace, State, Witness},
+    },
     context::Context,
     domain::{FileId, Journal, Phase, fingerprint},
     error::{Error, Result},
     operations::store::Store,
     platform::fs::Directory,
-    policy::{
-        capability_tx::{Namespace, State, Witness},
-        source_files::{Object, Pair},
-        source_tree::{Position, Slot, Tree},
-    },
+    policy::source_tree::{Position, Slot, Tree},
+    source::rules::source_files::{Object, Pair},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -643,16 +643,16 @@ pub(crate) fn resume_publication(
     if saved.publication.profile != *target || saved.journal.id != id {
         return Err(conflict());
     }
-    if Store::read::<Journal>(&store.root, "active.json")?
-        .is_some_and(|active| active.id != id && crate::policy::state::pending(active.phase))
-    {
+    if Store::read::<Journal>(&store.root, "active.json")?.is_some_and(|active| {
+        active.id != id && crate::policy::operation::state::pending(active.phase)
+    }) {
         return Err(conflict());
     }
     store.check_migration_pending()?;
     let mut journal =
         Store::read::<Journal>(&store.operations, &format!("{id}.json"))?.unwrap_or(saved.journal);
     crate::operations::store::validate_journal(&journal)?;
-    if crate::policy::state::pending(journal.phase) {
+    if crate::policy::operation::state::pending(journal.phase) {
         store.save(&journal)?;
     }
     recover(ctx, store, &mut journal, false, false).map(Some)
@@ -772,7 +772,7 @@ pub(crate) fn recover(
 ) -> Result<Value> {
     verify_scope(ctx, journal)?;
     let saved = frozen(&store.root, journal)?;
-    if !crate::policy::state::pending(journal.phase) {
+    if !crate::policy::operation::state::pending(journal.phase) {
         return Ok(result(journal, &saved.profile));
     }
     if mark_failed {

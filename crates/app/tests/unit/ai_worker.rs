@@ -26,7 +26,7 @@ impl Fixture {
         for path in [&live, &source, &profile] {
             fs::create_dir_all(path.parent().ok_or("fixture parent")?)?;
         }
-        let key = crate::policy::config_tx::ai_mise_spec(tool)?;
+        let key = crate::config::rules::config_tx::ai_mise_spec(tool)?;
         let old_pin = format!("[tools]\n\"{key}\" = \"1.0.0\"\n");
         fs::write(&live, &old_pin)?;
         fs::write(&source, &old_pin)?;

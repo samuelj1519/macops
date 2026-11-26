@@ -3,6 +3,10 @@ use crate::{
     domain::{Catalog, CommandSpec, Observation, Package, Provider},
     error::{Error, Result},
     platform::fs as paths,
+    policy::{
+        catalog::catalogue,
+        operation::{commands, parsers},
+    },
 };
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -36,7 +40,7 @@ fn load_with_authority(
     let receipts = ctx.state.join("receipts.json");
     if paths::read_path(&receipts)?.exists() {
         let state = crate::catalog::target::receipts(ctx)?;
-        crate::policy::catalogue::merge_receipts(&mut catalog, state)?;
+        catalogue::merge_receipts(&mut catalog, state)?;
     }
     import_apps(ctx, authority, &mut catalog)?;
     add_ai(&mut catalog);
@@ -45,7 +49,7 @@ fn load_with_authority(
         1024 * 1024,
     )? {
         let value = crate::policy::json::parse(&bytes)?;
-        crate::policy::catalogue::add_assets(&mut catalog, &value)?;
+        catalogue::add_assets(&mut catalog, &value)?;
     }
     add_managers(&ctx.cache, &mut catalog);
     catalog.validate()?;
@@ -62,7 +66,7 @@ fn app_rows_with(
     };
     let text = String::from_utf8(bytes)
         .map_err(|_| Error::new("invalid_manifest", "应用清单必须为 UTF-8"))?;
-    crate::policy::parsers::tsv(&text, &["path", "bundle_id", "version", "owner", "source"])
+    parsers::tsv(&text, &["path", "bundle_id", "version", "owner", "source"])
 }
 
 pub fn app_rows(ctx: &Context) -> Result<Vec<BTreeMap<String, String>>> {
@@ -91,7 +95,7 @@ fn observe_result(ctx: &Context, p: &Package) -> Result<Observation> {
             let value =
                 plist::Value::from_reader(std::io::Cursor::new(paths::regular_bytes(&file)?))
                     .map_err(|e| Error::new("invalid_plist", e.to_string()))?;
-            crate::policy::parsers::app_plist(&value, bundle_id, &p.id)
+            parsers::app_plist(&value, bundle_id, &p.id)
         }
         Provider::Legacy { category, selector } if category == "skills" => {
             crate::operations::governance::read(ctx, |authority| {
@@ -105,7 +109,7 @@ fn observe_result(ctx: &Context, p: &Package) -> Result<Observation> {
                     });
                 };
                 let value = crate::policy::json::parse(&bytes)?;
-                Ok(crate::policy::parsers::managed_asset(&value, selector))
+                Ok(parsers::managed_asset(&value, selector))
             })
         }
         Provider::Manager { executable }
@@ -132,7 +136,7 @@ fn observe_result(ctx: &Context, p: &Package) -> Result<Observation> {
                     args: vec![if name == "mimo" { "-v" } else { "--version" }.into()],
                 },
             )?;
-            crate::policy::parsers::manager_observation(&output)
+            parsers::manager_observation(&output)
         }
         Provider::Macops => {
             crate::catalog::cache::check_owned(ctx)?;
@@ -145,7 +149,7 @@ fn observe_result(ctx: &Context, p: &Package) -> Result<Observation> {
     }
 }
 
-pub use crate::policy::parsers::parse_service;
+pub use crate::policy::operation::parsers::parse_service;
 
 pub fn discover(ctx: &Context, manager: &str) -> Result<Value> {
     if manager == "brew" {
@@ -168,13 +172,12 @@ pub fn discover(ctx: &Context, manager: &str) -> Result<Value> {
             json!({"manager":"npm","namespaces":namespaces,"packages":packages,"coverage":coverage,"incomplete":incomplete}),
         );
     }
-    let command =
-        crate::operations::providers::resolve(crate::policy::commands::discovery_query(manager)?)?;
+    let command = crate::operations::providers::resolve(commands::discovery_query(manager)?)?;
     let out = crate::operations::command::query(&ctx.scope, &command)?;
     if manager == "bun" && crate::operations::providers::empty_bun_scope(&ctx.scope, &out)? {
         return Ok(json!({"manager":manager,"status":"empty","data":[],"adopted":false}));
     }
-    let data = crate::policy::parsers::discovery(manager, &out)?;
+    let data = parsers::discovery(manager, &out)?;
     Ok(json!({"manager":manager,"command":command,"data":data,"adopted":false}))
 }
 
@@ -193,7 +196,7 @@ fn import_apps(
             continue;
         };
         paths::read_path(&path)?;
-        if let Some(package) = crate::policy::catalogue::app_row(&row, &path)?
+        if let Some(package) = catalogue::app_row(&row, &path)?
             && !catalog.packages.iter().any(|p| p.id == package.id)
         {
             catalog.packages.push(package);
@@ -202,4 +205,4 @@ fn import_apps(
     Ok(())
 }
 
-use crate::policy::catalogue::{add_ai, add_managers};
+use crate::policy::catalog::catalogue::{add_ai, add_managers};

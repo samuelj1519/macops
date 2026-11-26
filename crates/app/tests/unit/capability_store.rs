@@ -124,7 +124,7 @@ fn namespaces_and_new_parents_detect_links_directory_replacement_and_unsupported
 
 #[test]
 fn dedicated_link_adapter_creates_and_retires_only_exact_owned_leaves() -> TestResult {
-    use crate::policy::delivery::LinkText;
+    use crate::capability::rules::delivery::LinkText;
     use std::os::unix::fs::MetadataExt;
     let temp = tempfile::tempdir_in("/private/tmp")?;
     let home = temp.path();
@@ -140,7 +140,7 @@ fn dedicated_link_adapter_creates_and_retires_only_exact_owned_leaves() -> TestR
     assert!(
         matches!(&before,State::Link{mode:Some(mode),..} if *mode == fs::symlink_metadata(&path).map(|m|m.mode()&0o7777)?)
     );
-    let remove = crate::policy::capability_tx::Candidate {
+    let remove = crate::capability::rules::capability_tx::Candidate {
         target: path.clone(),
         staged: None,
         after: State::Missing,
@@ -156,7 +156,7 @@ fn dedicated_link_adapter_creates_and_retires_only_exact_owned_leaves() -> TestR
 }
 #[test]
 fn equivalent_path_text_and_replaced_same_text_links_are_never_claimed() -> TestResult {
-    use crate::policy::delivery::LinkText;
+    use crate::capability::rules::delivery::LinkText;
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::symlink;
     let temp = tempfile::tempdir_in("/private/tmp")?;
@@ -171,7 +171,7 @@ fn equivalent_path_text_and_replaced_same_text_links_are_never_claimed() -> Test
         symlink(foreign, &path)?;
         let ns = namespace(&path)?;
         let before = observe(&ns, 4096)?.0;
-        let remove = crate::policy::capability_tx::Candidate {
+        let remove = crate::capability::rules::capability_tx::Candidate {
             target: path.clone(),
             staged: None,
             after: State::Missing,
@@ -188,7 +188,7 @@ fn equivalent_path_text_and_replaced_same_text_links_are_never_claimed() -> Test
     let before = observe(&ns, 4096)?.0;
     fs::rename(&path, path.with_file_name("retained"))?;
     symlink(text.as_str(), &path)?;
-    let remove = crate::policy::capability_tx::Candidate {
+    let remove = crate::capability::rules::capability_tx::Candidate {
         target: path.clone(),
         staged: None,
         after: State::Missing,

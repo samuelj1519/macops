@@ -20,7 +20,7 @@ pub const LIMIT: u64 = 16 * 1024 * 1024;
 #[derive(Debug)]
 pub struct RootWitness {
     pub path: PathBuf,
-    namespace: crate::policy::capability_tx::Namespace,
+    namespace: crate::capability::rules::capability_tx::Namespace,
     present: Option<DirectoryBinding>,
 }
 

@@ -372,11 +372,11 @@ pub enum NativePlugins {
 pub enum Policy {
     Check,
     Sync {
-        #[arg(long,value_parser=crate::policy::skills::parse_change_id)]
+        #[arg(long,value_parser=crate::skills::rules::skills::parse_change_id)]
         change_id: Option<String>,
     },
     Recover {
-        #[arg(long,value_parser=crate::policy::skills::parse_change_id)]
+        #[arg(long,value_parser=crate::skills::rules::skills::parse_change_id)]
         change_id: Option<String>,
     },
 }

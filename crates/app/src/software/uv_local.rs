@@ -4,7 +4,7 @@ use crate::{
         UvToolBinding, UvToolEvidence,
     },
     error::{Error, Result},
-    policy::uv_local as policy,
+    software::rules::uv_local as policy,
 };
 use rustix::fs::{AtFlags, FileType, Mode, OFlags, Stat, fstat, open, openat, readlinkat, statat};
 use sha2::{Digest, Sha256};
@@ -358,7 +358,7 @@ fn receipt(bytes: &[u8], name: &str) -> Result<Vec<(String, PathBuf)>> {
             .get("name")
             .and_then(toml_edit::Value::as_str)
             .ok_or_else(unknown)?;
-        if !crate::policy::resources::component(n) || !seen.insert(n) {
+        if !crate::policy::catalog::resources::component(n) || !seen.insert(n) {
             return Err(unknown());
         }
         let path = table
@@ -620,7 +620,7 @@ fn adopted_resources(
                 .unwrap_or_else(|e| Observation::Unknown { reason: e.code });
         let mut resource = observed_resource(binding, &local.name, &observation)?;
         if let crate::domain::resource::Data::Application { baseline, .. } = &mut resource.data {
-            *baseline = Some(crate::policy::targets::baseline(
+            *baseline = Some(crate::policy::catalog::targets::baseline(
                 &receipt.observation,
                 observation,
             ));

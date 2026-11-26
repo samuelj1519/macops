@@ -33,7 +33,7 @@ def mutate(root, name):
         return ["--test", "cli", "valid_worker_journal_without_gate_never_executes"]
     if name == "cache-identity":
         path = directory / "catalog/cache.rs"
-        path.write_text(remove_block(path.read_text(), "        if !crate::policy::cache::candidate_matches("))
+        path.write_text(remove_block(path.read_text(), "        if !crate::policy::catalog::cache::candidate_matches("))
         return ["--lib", "catalog::cache::tests::changed_inode_is_quarantined_and_never_deleted"]
     if name == "home":
         path = directory / "operations/command.rs"

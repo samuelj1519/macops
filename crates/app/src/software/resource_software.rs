@@ -1,11 +1,13 @@
 use crate::{
     catalog::inventory,
     context::Context,
-    domain::resource::{self, Coverage, CoverageState, Data, Management, Release, Resource, State},
-    domain::{CommandSpec, Observation, Provider},
+    domain::{
+        CommandSpec, Observation, Provider,
+        resource::{self, Coverage, CoverageState, Data, Management, Release, Resource, State},
+    },
     error::Result,
     platform::fs as paths,
-    policy::resources as policy,
+    policy::catalog::resources as policy,
 };
 use std::{collections::BTreeSet, path::Path};
 
@@ -56,7 +58,7 @@ pub fn collect(
         reports.push(report);
     }
     reports.push(local_binaries(ctx, &mut resources)?);
-    let (mut resources, conflict) = crate::policy::targets::merge_views(resources);
+    let (mut resources, conflict) = crate::policy::catalog::targets::merge_views(resources);
     if conflict {
         reports.push(Coverage {
             source: "software-owner-mapping".into(),
@@ -106,7 +108,7 @@ fn baselines(
                 (binding.tool_dir.clone(), package.clone())
             }
             Provider::NpmObserved { prefix, name } => (prefix.clone(), name.clone()),
-            _ => match crate::policy::targets::descriptor(&receipt.package)? {
+            _ => match crate::policy::catalog::targets::descriptor(&receipt.package)? {
                 Some(target) => (target.prefix, target.name),
                 None => continue,
             },
@@ -122,7 +124,7 @@ fn baselines(
             .map(|version| Release {
                 version: version.into(),
                 path: Some(
-                    if crate::policy::uv_local::is_uv(&receipt.package.provider) {
+                    if crate::software::rules::uv_local::is_uv(&receipt.package.provider) {
                         prefix.join(&name)
                     } else {
                         prefix.join("lib/node_modules").join(&name)
@@ -132,7 +134,7 @@ fn baselines(
             })
             .into_iter()
             .collect();
-        let assessment = crate::policy::targets::baseline(&receipt.observation, current);
+        let assessment = crate::policy::catalog::targets::baseline(&receipt.observation, current);
         if assessment.comparison != resource::Comparison::Same {
             report.state = CoverageState::Invalid;
             report.issues.push(
@@ -236,7 +238,7 @@ fn declared_app_locations(
         if resources.iter().any(|r| r.id == id) {
             continue;
         }
-        if let Some(package) = crate::policy::catalogue::app_row(&row, &path)? {
+        if let Some(package) = crate::policy::catalog::catalogue::app_row(&row, &path)? {
             let observed = inventory::observe(ctx, &package);
             let state = match observed {
                 Observation::Present { evidence: None, .. } => State::Present,
@@ -705,7 +707,7 @@ fn conda_rows(
     report: &mut Coverage,
 ) -> Result<Vec<Resource>> {
     let mut resources = vec![];
-    let Ok(paths) = crate::policy::parsers::parse_conda(&output.stdout) else {
+    let Ok(paths) = crate::policy::operation::parsers::parse_conda(&output.stdout) else {
         report.state = CoverageState::Invalid;
         report.issues.push("invalid_conda_inventory".into());
         return Ok(vec![]);
@@ -808,38 +810,39 @@ fn declarations(
             native.clone_from(&package.id);
         }
         let aliases = declaration_aliases(ctx, package)?;
-        let identity =
-            if let Some((name, binding)) = crate::policy::uv_local::descriptor(&package.provider) {
-                native = crate::policy::uv_local::normalize_name(name)?;
-                scope = binding.tool_dir.display().to_string();
-                crate::policy::uv_local::tool_id(&binding.tool_dir, &native)?
-            } else if let Provider::NpmObserved { prefix, name } = &package.provider {
-                manager = "npm".into();
-                native.clone_from(name);
-                scope = prefix.display().to_string();
-                crate::policy::targets::npm_id(prefix, name)?
-            } else if let Some(target) = crate::policy::targets::descriptor(package)? {
-                manager = "npm".into();
-                native = target.name;
-                scope = target.prefix.display().to_string();
-                crate::policy::targets::npm_id(&target.prefix, &native)?
-            } else if let Provider::Npm {
-                package, prefix, ..
-            } = &package.provider
-            {
-                let prefix = paths::read_path(prefix)?;
-                scope = prefix.display().to_string();
-                crate::policy::targets::npm_id(&prefix, package)?
-            } else if let Provider::ObservedApp { path, .. } = &package.provider {
-                resource::id("application", &("app-path", path))?
-            } else if let Provider::BrewFormula { query, .. } = &package.provider {
-                resource::id(
-                    "application",
-                    &("brew", &query.key.canonical_prefix, &query.key.full_name),
-                )?
-            } else {
-                resource::id("application", &(&manager, &native, &scope))?
-            };
+        let identity = if let Some((name, binding)) =
+            crate::software::rules::uv_local::descriptor(&package.provider)
+        {
+            native = crate::software::rules::uv_local::normalize_name(name)?;
+            scope = binding.tool_dir.display().to_string();
+            crate::software::rules::uv_local::tool_id(&binding.tool_dir, &native)?
+        } else if let Provider::NpmObserved { prefix, name } = &package.provider {
+            manager = "npm".into();
+            native.clone_from(name);
+            scope = prefix.display().to_string();
+            crate::policy::catalog::targets::npm_id(prefix, name)?
+        } else if let Some(target) = crate::policy::catalog::targets::descriptor(package)? {
+            manager = "npm".into();
+            native = target.name;
+            scope = target.prefix.display().to_string();
+            crate::policy::catalog::targets::npm_id(&target.prefix, &native)?
+        } else if let Provider::Npm {
+            package, prefix, ..
+        } = &package.provider
+        {
+            let prefix = paths::read_path(prefix)?;
+            scope = prefix.display().to_string();
+            crate::policy::catalog::targets::npm_id(&prefix, package)?
+        } else if let Provider::ObservedApp { path, .. } = &package.provider {
+            resource::id("application", &("app-path", path))?
+        } else if let Provider::BrewFormula { query, .. } = &package.provider {
+            resource::id(
+                "application",
+                &("brew", &query.key.canonical_prefix, &query.key.full_name),
+            )?
+        } else {
+            resource::id("application", &(&manager, &native, &scope))?
+        };
         let observed = if matches!(package.provider, Provider::ObservedApp { .. }) {
             Some(inventory::observe(ctx, package))
         } else {

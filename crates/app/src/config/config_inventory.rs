@@ -1,10 +1,10 @@
 use crate::{
     cli::Cli,
+    config::rules::chezmoi::{self as policy, Budget, issue},
     context::Context,
     domain::resource::{Coverage, CoverageState, SourceRef},
     error::{Error, Result},
     platform::fs::{self as paths, Bindings, BoundTarget, Directory, EntryKind},
-    policy::chezmoi::{self as policy, Budget, issue},
 };
 use serde::Serialize;
 use std::{
@@ -12,7 +12,7 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-pub use crate::policy::config_tx::ConfigRootInputs as Inputs;
+pub use crate::config::rules::config_tx::ConfigRootInputs as Inputs;
 impl Inputs {
     pub fn capture(cli: &Cli, isolated: bool) -> Self {
         Self {

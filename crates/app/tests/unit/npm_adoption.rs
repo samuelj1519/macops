@@ -36,7 +36,7 @@ fn last_commit_check_fences_recipe_namespace_and_receipt_changes() -> TestResult
             "demo",
         ])?;
         let ctx = Context::from_cli(&cli, &mut vec![])?;
-        let id = crate::policy::targets::npm_id(&prefix, "demo")?;
+        let id = crate::policy::catalog::targets::npm_id(&prefix, "demo")?;
         let observed = Package {
             id: id.clone(),
             name: "demo".into(),

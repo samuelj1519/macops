@@ -53,7 +53,7 @@ flowchart LR
 
 两处已共享的功能随迁移归位。
 
-- `policy/public_source.rs` 保存推荐与技能诊断共用的 GitHub 仓库名解析，以及来源链接格式校验。保留现有输入和错误语义。`policy::delivery::github_repository` 的输入契约另有约束，沿用原入口。
+- `policy/public_source.rs` 保存推荐与技能诊断共用的 GitHub 仓库名解析，以及来源链接格式校验。保留现有输入和错误语义。`capability::rules::delivery::github_repository` 的输入契约另有约束，沿用原入口。
 - `terminal/plan.rs` 保存操作范围和来源标签的呈现。推荐、`operations` 和终端都从这里取文案。本模块直接使用 `output::sanitize`，沿用 URL 查询参数与片段的裁剪及 mise 范围解析。
 
 `profile_install` 继续负责已有配置的确认回调、目录复查、恢复、登记和批量停止。Codex、Claude Code 适配器继续核验原生安装，`plugin_target` 拥有目标写入与发布记录。`operations` 按原记录分派到客户端核对入口。推荐设置独立持有配置和钥匙串记录。第一批迁移保留这些调用及其顺序。

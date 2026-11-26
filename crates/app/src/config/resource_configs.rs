@@ -1,12 +1,14 @@
 use crate::{
-    config::config_inventory,
+    config::{
+        config_inventory,
+        rules::chezmoi::{Budget, issue},
+    },
     context::Context,
     domain::resource::{
         self, Coverage, CoverageState, Data, Management, Resource, SourceRef, State,
     },
     error::Result,
     platform::fs::{Bindings, BoundTarget, Directory, EntryKind, Metadata},
-    policy::chezmoi::{Budget, issue},
 };
 use std::{
     collections::BTreeMap,
@@ -181,7 +183,7 @@ fn apply_receipts(
             continue;
         };
         let current = crate::catalog::inventory::observe(ctx, &receipt.package);
-        let base = crate::policy::targets::baseline(&receipt.observation, current);
+        let base = crate::policy::catalog::targets::baseline(&receipt.observation, current);
         if base.comparison == crate::domain::resource::Comparison::Different {
             issue(fs, CoverageState::Invalid, "adopted_config_drift".into());
         }

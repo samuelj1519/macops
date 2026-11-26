@@ -242,7 +242,7 @@ fn install_channel(provider: &Provider) -> Option<&'static str> {
         Some("Homebrew")
     } else if matches!(provider, Provider::Mise { .. }) {
         Some("mise")
-    } else if crate::policy::manifest::supports_replay(provider) {
+    } else if crate::policy::operation::manifest::supports_replay(provider) {
         Some("npm")
     } else {
         None
@@ -536,7 +536,7 @@ fn search_repository_using(
 
 enum InstallChoice {
     Application(Box<Package>),
-    Skill(Box<crate::policy::native_skills::Recipe>),
+    Skill(Box<crate::skills::rules::native_skills::Recipe>),
     Plugin(plugin_install::Offer),
 }
 

@@ -196,10 +196,10 @@ fn codex_config_only_sync_retires_created_tables_and_preserves_raw_model_and_eof
     );
     let current = fs::read(&config)?;
     assert!(String::from_utf8(current.clone())?.contains("base_url = 'https://example.invalid'"));
-    let observed = crate::policy::codex_fields::observe(&current)?;
+    let observed = crate::policy::profile::codex_fields::observe(&current)?;
     assert_eq!(
         observed.entries[skill.to_str().ok_or("utf8")?].enabled,
-        crate::policy::profile_fields::Presence::Present(false)
+        crate::policy::profile::profile_fields::Presence::Present(false)
     );
     assert_eq!(
         sync(&ctx, &request("codex"), false, true)?["status"],
@@ -250,10 +250,9 @@ fn reviewer_absent_config_lookup_cannot_change_after_profile_assessment() -> Tes
     let (_temp, ctx, _rule) = fixture()?;
     fs::write(ctx.home.join(".claude-mi/settings.json"), b"{}")?;
     let governance = crate::operations::governance::capture(&ctx)?;
-    let selected =
-        crate::policy::profile_select::split(crate::policy::delivery::Selection::Explicit(vec![
-            "profile:mi".into(),
-        ]))?;
+    let selected = crate::policy::profile::profile_select::split(
+        crate::capability::rules::delivery::Selection::Explicit(vec!["profile:mi".into()]),
+    )?;
     let assessment = crate::agent::profile_inventory::assess(&ctx, &governance, &selected)?;
     assert_eq!(assessment.patches.len(), 1);
     let source = ctx.home.join("elsewhere-source");
@@ -282,7 +281,10 @@ fn reviewer_absent_config_lookup_cannot_change_after_profile_assessment() -> Tes
 
 #[test]
 fn reviewer_deny_retirement_does_not_return_unreadable_after() -> TestResult {
-    use crate::policy::{delivery::Profile, deny_fields as d, profile_fields as p};
+    use crate::{
+        capability::rules::delivery::Profile,
+        policy::profile::{deny_fields as d, profile_fields as p},
+    };
     use std::collections::BTreeMap;
     let owner = p::Owner {
         profile: p::ConfigProfile::Claude(Profile::Mi),
@@ -336,10 +338,9 @@ fn reviewer_new_chezmoi_lookup_blocks_frozen_profile_transaction_before_live_wri
     let target = ctx.home.join(".claude-mi/settings.json");
     fs::write(&target, b"{}")?;
     let governance = crate::operations::governance::capture(&ctx)?;
-    let selected =
-        crate::policy::profile_select::split(crate::policy::delivery::Selection::Explicit(vec![
-            "profile:mi".into(),
-        ]))?;
+    let selected = crate::policy::profile::profile_select::split(
+        crate::capability::rules::delivery::Selection::Explicit(vec!["profile:mi".into()]),
+    )?;
     let assessment = Assessment {
         links: None,
         configuration: crate::agent::profile_inventory::assess(&ctx, &governance, &selected)?,
@@ -397,7 +398,7 @@ fn reviewer_new_chezmoi_lookup_blocks_frozen_profile_transaction_before_live_wri
 
 #[test]
 fn reviewer_codex_existing_empty_config_key_comments_survive_table_creation() -> TestResult {
-    use crate::policy::{codex_fields as c, profile_fields::Presence};
+    use crate::policy::profile::{codex_fields as c, profile_fields::Presence};
     let raw=b"model='private-model'\n[skills]\n# user's empty list note\nconfig=[]\n[other]\ntoken='private'\n";
     let result = c::patch(
         raw,
@@ -422,7 +423,10 @@ fn reviewer_codex_existing_empty_config_key_comments_survive_table_creation() ->
 
 #[test]
 fn reviewer_deny_nested_records_require_object_shapes() -> TestResult {
-    use crate::policy::{claude_fields as c, delivery::Profile, invocation, profile_fields as p};
+    use crate::{
+        capability::rules::{delivery::Profile, invocation},
+        policy::profile::{claude_fields as c, profile_fields as p},
+    };
     let owner = p::Owner {
         profile: p::ConfigProfile::Claude(Profile::Mi),
         role: p::Role::Live,
@@ -495,10 +499,9 @@ fn reviewer_higher_priority_default_source_lookup_cannot_change_after_assessment
         ctx.home.join("absent-config-dirs"),
     );
     let governance = crate::operations::governance::capture(&ctx)?;
-    let selected =
-        crate::policy::profile_select::split(crate::policy::delivery::Selection::Explicit(vec![
-            "profile:mi".into(),
-        ]))?;
+    let selected = crate::policy::profile::profile_select::split(
+        crate::capability::rules::delivery::Selection::Explicit(vec!["profile:mi".into()]),
+    )?;
     let assessment = crate::agent::profile_inventory::assess(&ctx, &governance, &selected)?;
     assert_eq!(assessment.patches.len(), 2);
     let primary = ctx.home.join(".local/share/chezmoi");
@@ -533,8 +536,8 @@ fn reviewer_v4_live_source_recovery_preserves_before_after_and_unknown_boundarie
         ctx.chezmoi.source = Some(source);
         ctx.chezmoi.destination = Some(ctx.home.clone());
         let governance = crate::operations::governance::capture(&ctx)?;
-        let selected = crate::policy::profile_select::split(
-            crate::policy::delivery::Selection::Explicit(vec!["profile:mi".into()]),
+        let selected = crate::policy::profile::profile_select::split(
+            crate::capability::rules::delivery::Selection::Explicit(vec!["profile:mi".into()]),
         )?;
         let assessment = Assessment {
             links: None,
@@ -616,7 +619,7 @@ fn reviewer_v4_live_source_recovery_preserves_before_after_and_unknown_boundarie
 
 #[test]
 fn reviewer_bool_original_presence_requires_object_shape() -> TestResult {
-    use crate::policy::{invocation, profile_fields::Presence};
+    use crate::{capability::rules::invocation, policy::profile::profile_fields::Presence};
     let (_temp, ctx, _rule) = fixture()?;
     let target = ctx.home.join(".claude-mi/settings.json");
     fs::write(&target, br#"{"enabledPlugins":{"review@official":true}}"#)?;
@@ -626,7 +629,7 @@ fn reviewer_bool_original_presence_requires_object_shape() -> TestResult {
     );
     let raw = fs::read(ctx.home.join(".agents/invocation-overlays.json"))?;
     let baseline = invocation::record(&ctx.home, &raw)?;
-    let crate::policy::profile_registry::Fields::Claude { plugins, .. } =
+    let crate::policy::profile::profile_registry::Fields::Claude { plugins, .. } =
         &baseline.profiles.get(&target).ok_or("profile")?.fields
     else {
         return Err("claude profile".into());

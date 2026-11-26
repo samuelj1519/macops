@@ -49,7 +49,7 @@ pub fn command(spec: &CommandSpec, scope: &crate::domain::Scope) -> Result<Comma
     for (raw_key, _) in std::env::vars_os() {
         if raw_key
             .to_str()
-            .is_some_and(crate::policy::npm_local::sanitized_env_key)
+            .is_some_and(crate::software::rules::npm_local::sanitized_env_key)
         {
             c.env_remove(raw_key);
         }

@@ -21,8 +21,8 @@ fn overlay_fixture(
     base_agents: bool,
 ) -> Result<(
     UpgradedRoot,
-    crate::policy::invocation::OverlayRecord,
-    crate::policy::invocation::OverlayRecord,
+    crate::capability::rules::invocation::OverlayRecord,
+    crate::capability::rules::invocation::OverlayRecord,
 )> {
     let (live, private) = overlay_slots();
     let (old_payload, old_book) = old_overlay_payload(&live)?;
@@ -83,7 +83,7 @@ fn overlay_fixture(
             requested_ref: None,
             base_sha256,
             base_shape,
-            invocation: crate::policy::source_invocation::Intent::ExplicitManual,
+            invocation: crate::source::rules::source_invocation::Intent::ExplicitManual,
             native_before: None,
             native_after: None,
         },
@@ -99,7 +99,7 @@ fn overlay_projection_preserves_existing_base_directory_and_removes_mirrored_row
     let mut edits = vec![];
     project_overlay_root(&root, &old, &next, home, &mut edits)?;
     assert_eq!(edits.len(), 2);
-    root.invocation = crate::policy::source_invocation::Intent::Mirror {
+    root.invocation = crate::source::rules::source_invocation::Intent::Mirror {
         upstream_manual: false,
     };
     root.change.after.entries = root
@@ -130,7 +130,7 @@ fn overlay_projection_preserves_existing_base_directory_and_removes_mirrored_row
 #[test]
 fn pure_overlay_guards_reject_invalid_paths_rows_and_file_in_place_of_generated_parent()
 -> TestResult {
-    use crate::policy::invocation::MetadataKind;
+    use crate::capability::rules::invocation::MetadataKind;
     let home = Path::new("/home");
     let (root, old, next) = overlay_fixture(false)?;
     let mut invalid_path = old.clone();
@@ -206,13 +206,15 @@ fn pure_overlay_guards_reject_invalid_paths_rows_and_file_in_place_of_generated_
 }
 
 use crate::{
+    capability::rules::invocation::{self, MetadataKind},
     domain::FileId,
     policy::{
         governance::DirectoryBinding,
-        invocation::{self, MetadataKind},
+        source_tree::{Entry as TreeEntry, Slot, Tree},
+    },
+    source::rules::{
         source_baseline::Identity,
         source_payload::{Entry, Payload},
-        source_tree::{Entry as TreeEntry, Slot, Tree},
     },
 };
 
@@ -321,16 +323,17 @@ fn tree(payload: &Payload, inode: u64) -> Tree {
 fn legacy_overlay_fixture_row(
     payload: &mut Payload,
     path: &str,
-    old: &crate::policy::invocation::OverlayRow,
-) -> Result<crate::policy::invocation::OverlayRow> {
+    old: &crate::capability::rules::invocation::OverlayRow,
+) -> Result<crate::capability::rules::invocation::OverlayRow> {
     let (raw, mode) = match payload.entries.get(path) {
         Some(Entry::File { bytes, mode }) => (Some(bytes.as_slice()), Some(*mode)),
         None => (None, None),
         _ => return Err(invalid()),
     };
-    let proposed =
-        crate::policy::invocation::propose(old.kind, &old.label, &old.owner, raw, mode, None)?;
-    let bytes = crate::policy::invocation::transform(old.kind, raw)?;
+    let proposed = crate::capability::rules::invocation::propose(
+        old.kind, &old.label, &old.owner, raw, mode, None,
+    )?;
+    let bytes = crate::capability::rules::invocation::transform(old.kind, raw)?;
     if path.starts_with("agents/") && !payload.entries.contains_key("agents") {
         payload
             .entries

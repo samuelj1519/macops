@@ -4,7 +4,7 @@ use crate::test_support::TestResult;
 use std::os::unix::fs::PermissionsExt;
 
 fn recipe() -> Result<Recipe> {
-    crate::policy::native_skills::decode(&serde_json::to_vec(&serde_json::json!({
+    crate::skills::rules::native_skills::decode(&serde_json::to_vec(&serde_json::json!({
         "schemaVersion":1,"id":"alpha","owner":"skills-cli","cliVersion":"1.9.0",
         "source":{"repository":"owner/repo","commit":"a".repeat(40),"skillDirectory":"skills/alpha","memberName":"alpha","trackingRef":null},
         "installName":"alpha","scope":"global","clientScope":["codex"],"copy":true,
@@ -41,16 +41,16 @@ fn customization_replays_only_fixed_manual_metadata_and_missing_license_and_pres
             updated.validate(&native, &recipe, &licenses, false)
         })?;
         let saved = serde_json::to_vec(&steps)?;
-        steps = crate::policy::native_skills::decode(&saved)?;
+        steps = crate::skills::rules::native_skills::decode(&saved)?;
         steps.validate(&native, &recipe, &licenses, false)?;
     }
     assert!(steps.complete()?);
-    assert!(crate::policy::invocation::manual_frontmatter(
+    assert!(crate::capability::rules::invocation::manual_frontmatter(
         &std::fs::read(root.join("SKILL.md"))?
     )?);
     let codex = std::fs::read(root.join("agents/openai.yaml"))?;
     assert_eq!(
-        crate::policy::invocation::transform(MetadataKind::CodexPolicy, Some(&codex))?,
+        crate::capability::rules::invocation::transform(MetadataKind::CodexPolicy, Some(&codex))?,
         codex
     );
     assert_eq!(std::fs::read(root.join("LICENSE"))?, b"fixture license");

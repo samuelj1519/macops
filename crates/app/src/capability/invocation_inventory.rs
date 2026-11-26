@@ -1,12 +1,12 @@
 use crate::{
+    capability::rules::invocation::{
+        self, Declaration, MetadataAccess, MetadataKind, OverlayRecord, OverlayRow,
+    },
     context::Context,
     error::{Error, Result},
     operations::governance::Governance,
     platform::fs::{Bindings, BoundTarget, Directory, EntryKind, ObservedRegular},
-    policy::{
-        governance::Dataset,
-        invocation::{self, Declaration, MetadataAccess, MetadataKind, OverlayRecord, OverlayRow},
-    },
+    policy::governance::Dataset,
 };
 use serde_json::{Value, json};
 use std::os::unix::ffi::OsStringExt;
@@ -138,12 +138,12 @@ impl Reader {
     pub fn witnesses(
         &self,
     ) -> Result<(
-        Vec<crate::policy::capability_tx::Witness>,
-        Vec<crate::policy::capability_tx::DirectoryWitness>,
+        Vec<crate::capability::rules::capability_tx::Witness>,
+        Vec<crate::capability::rules::capability_tx::DirectoryWitness>,
     )> {
-        use crate::{
-            capability::capability_store as store,
-            policy::capability_tx::{DirectoryEntry, DirectoryWitness, State, Witness},
+        use crate::capability::{
+            capability_store as store,
+            rules::capability_tx::{DirectoryEntry, DirectoryWitness, State, Witness},
         };
         self.verify()?;
         let mut files = vec![];
@@ -338,7 +338,7 @@ impl FixedRecipes {
             &crate::skills::native_skills::book_path(ctx),
             16 * FILE_LIMIT,
         )?;
-        let names = crate::policy::native_skills::book(book.bytes.as_deref())?
+        let names = crate::skills::rules::native_skills::book(book.bytes.as_deref())?
             .recipes
             .into_iter()
             .map(|recipe| recipe.install_name)
@@ -562,7 +562,7 @@ fn plugins(
                 continue;
             };
             crate::policy::json::parse(bytes)?;
-            let registry = crate::policy::resources::plugin_book(bytes)?;
+            let registry = crate::policy::catalog::resources::plugin_book(bytes)?;
             for (id, records) in registry.plugins {
                 let (plugin, market) = id.rsplit_once('@').ok_or_else(stale)?;
                 if !decl.plugins.contains_key(plugin) {
@@ -598,7 +598,7 @@ fn plugins(
             let Some(bytes) = snapshot.bytes.as_deref() else {
                 continue;
             };
-            let registry = crate::policy::resources::codex_plugins(bytes)?;
+            let registry = crate::policy::catalog::resources::codex_plugins(bytes)?;
             for (id, _) in registry {
                 let (plugin, market) = id.rsplit_once('@').ok_or_else(stale)?;
                 if !decl.plugins.contains_key(plugin) {
