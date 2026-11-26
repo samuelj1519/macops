@@ -177,6 +177,43 @@ fn unconfigured_native_skills_keep_readonly_aliases_without_claiming_update_evid
 }
 
 #[test]
+fn configured_native_source_does_not_hide_an_unconfigured_source() -> TestResult {
+    let n = NativeFixture::new()?;
+    let (out, _) = n.install()?;
+    assert_code(&out, 0);
+    let lock = n.f.home.join(".agents/.skill-lock.json");
+    let mut installed: Value = serde_json::from_slice(&fs::read(&lock)?)?;
+    let mut unconfigured = installed["skills"]["alpha"].clone();
+    unconfigured["source"] = json!("other/repo");
+    unconfigured["sourceUrl"] = json!("https://github.com/other/repo");
+    unconfigured["skillPath"] = json!("skills/beta");
+    installed["skills"]["beta"] = unconfigured;
+    write_json(&lock, &installed)?;
+    let beta = n.f.home.join(".agents/skills/beta");
+    fs::create_dir_all(&beta)?;
+    fs::write(beta.join("SKILL.md"), "---\nname: beta\n---\nfixture\n")?;
+    let receipt = n.f.file("state/receipts.json");
+    let receipts = fs::read(&receipt)?;
+    let raw_lock = fs::read(&lock)?;
+
+    let (out, original) =
+        n.f.run(&["skill", "upgrade", "source:owner/repo", "--dry-run"])?;
+    assert_code(&out, 0);
+    assert_eq!(
+        original["data"]["results"][0]["recipe"]["installName"],
+        "alpha"
+    );
+    let (out, other) =
+        n.f.run(&["skill", "upgrade", "source:other/repo", "--dry-run"])?;
+    assert_code(&out, 3);
+    assert_eq!(other["error"]["code"], "native_skills_recipe_required");
+    assert_eq!(n.calls()?.len(), 1);
+    assert_eq!(fs::read(receipt)?, receipts);
+    assert_eq!(fs::read(lock)?, raw_lock);
+    Ok(())
+}
+
+#[test]
 fn native_recipe_default_write_exact_reinstall_and_remove_keep_one_owner_and_fixed_manual_metadata()
 -> TestResult {
     let n = NativeFixture::new()?;
