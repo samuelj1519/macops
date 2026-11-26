@@ -413,6 +413,26 @@ pub(crate) fn install_at_profile(
     }
 }
 
+pub(crate) fn install_at_profile_in_batch(
+    ctx: &Context,
+    choice: &Offer,
+    target: InstallTarget,
+) -> Result<Value> {
+    let offer = match choice {
+        Offer::Codex(offer, _) => crate::domain::fingerprint(offer)?,
+        Offer::Claude(offer, _) => crate::domain::fingerprint(offer)?,
+    };
+    {
+        let store = crate::operations::store::Store::lock(ctx)?;
+        store.check_pending()?;
+        if let Some(mut result) = super::plugin_target::previous(ctx, &store, &target, &offer)? {
+            result["status"] = json!("current");
+            return Ok(result);
+        }
+    }
+    install_at_profile(ctx, choice, InitialActivation::Enabled, target)
+}
+
 fn incompatible_profile_offer() -> Error {
     Error::new(
         "plugin_target_unsupported",

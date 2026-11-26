@@ -543,14 +543,19 @@ fn resource_item(resource: crate::domain::resource::Resource, show_scope: bool) 
             runtime,
         } => {
             let label = crate::agent::resource_agents::profile_label(&name, &config_dir);
+            let command = resource
+                .aliases
+                .first()
+                .cloned()
+                .unwrap_or_else(|| name.clone());
             let summary = if label == name {
-                name = resource.aliases.first().cloned().unwrap_or(name);
-                format!("{client} · {profile}")
+                format!("{command} · {client} · {profile}")
             } else {
                 name = label;
                 format!("{client} · 单独配置")
             };
             let details = vec![
+                format!("命令 {command}"),
                 format!("档案 {}", config_dir.display()),
                 format!("运行时 {}", runtime.selector),
                 format!("模型 {}", model.selected.as_deref().unwrap_or("未知")),

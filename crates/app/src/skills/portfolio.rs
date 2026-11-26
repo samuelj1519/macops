@@ -1,6 +1,6 @@
 use super::{native_skills, public_skill};
 use crate::{
-    agent::{plugin_install, profile_install::InitialActivation, resource_agents},
+    agent::{plugin_install, resource_agents},
     cli::{Cli, Command, SkillAgents, SkillCmd},
     context::Context,
     domain::resource::{CapabilityAction as Operation, Data, Resource, State},
@@ -814,12 +814,7 @@ fn perform(
             Work::Shared => shared_plan.take().ok_or_else(selector_error)?.run(ctx),
             Work::Install(index, target) => target.open().and_then(|_| {
                 crate::terminal::progress::with_install_progress(|| {
-                    plugin_install::install_at_profile(
-                        ctx,
-                        &offers[index],
-                        InitialActivation::Enabled,
-                        *target,
-                    )
+                    plugin_install::install_at_profile_in_batch(ctx, &offers[index], *target)
                 })
             }),
             Work::Native(intent) => intent.run(ctx),
