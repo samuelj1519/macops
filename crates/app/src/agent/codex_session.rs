@@ -243,9 +243,10 @@ fn verify_installation(item: &PublishedProfile, profile: &Directory) -> Result<(
         || expected.payload_digest != actual.payload_digest
         || expected.file_count != actual.file_count
         || expected.revision != actual.revision
-        || crate::capability::capability_local::codex_payload_files(&same_directory(
-            &item.prepared.market(),
-        )?)? != item.prepared.files
+        || crate::capability::capability_local::plugin_payload_files(
+            &same_directory(&item.prepared.market())?,
+            crate::domain::CapabilityKind::CodexPlugin,
+        )? != item.prepared.files
         || snapshot(profile, CONFIG, 1024 * 1024)?.1 != before
     {
         return Err(stale());

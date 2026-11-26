@@ -6,7 +6,7 @@ use crate::{
     operations::RecoveryState,
 };
 use serde::Serialize;
-use std::{io::IsTerminal, path::PathBuf};
+use std::{collections::BTreeSet, io::IsTerminal, path::PathBuf};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Kind {
@@ -55,6 +55,19 @@ pub(crate) struct Item {
     pub agents: Vec<String>,
     pub loaded: Option<bool>,
     pub details: Vec<String>,
+    #[serde(skip)]
+    pub inventory: Option<InventoryInfo>,
+}
+
+#[derive(Debug)]
+pub(crate) struct InventoryInfo {
+    pub manager: String,
+    pub groups: Vec<String>,
+    pub status: crate::domain::resource::State,
+    pub version: Option<String>,
+    pub aliases: Vec<String>,
+    pub repository: Option<crate::policy::source_git::Repository>,
+    pub native_record: Option<PathBuf>,
 }
 
 #[derive(Debug, Serialize)]
@@ -76,6 +89,7 @@ pub(crate) enum Session {
     Agents,
     History,
     Marketplaces,
+    Related { kind: Kind, ids: BTreeSet<String> },
 }
 
 impl Session {
@@ -122,6 +136,15 @@ impl Session {
                 "marketplace_snapshot",
                 "请重新运行 mo skill market 查看最新市场信息",
             )),
+            Self::Related { kind, ids } => {
+                let mut view = if *kind == Kind::Apps {
+                    local_applications(ctx)?
+                } else {
+                    Self::load(ctx, *kind)?.1
+                };
+                view.items.retain(|item| ids.contains(&item.id));
+                Ok(view)
+            }
         }
     }
 
@@ -135,6 +158,12 @@ impl Session {
             _ => Err(Error::attention("file_unavailable", "此入口不提供文件查看")),
         }
     }
+}
+
+pub(crate) fn browse_related(ctx: &Context, kind: Kind, view: View) -> Result<()> {
+    let ids = view.items.iter().map(|item| item.id.clone()).collect();
+    crate::terminal::browse(ctx, kind, &mut Session::Related { kind, ids }, view, false)?;
+    Ok(())
 }
 
 pub(crate) fn interactive_terminal() -> bool {
@@ -294,6 +323,7 @@ fn history_item(journal: crate::domain::Journal, recovery: RecoveryState) -> Ite
         agents: vec![],
         loaded: None,
         details,
+        inventory: None,
     }
 }
 
@@ -324,6 +354,23 @@ fn resource_view(ctx: &Context, filter: &str) -> Result<View> {
     ))
 }
 
+pub(crate) fn local_applications(ctx: &Context) -> Result<View> {
+    let mut items: Vec<_> = crate::software::resource_software::recorded(ctx)?
+        .into_iter()
+        .filter_map(|resource| resource_item(resource, false))
+        .collect();
+    items.sort_by(|a, b| a.name.cmp(&b.name).then(a.id.cmp(&b.id)));
+    Ok(View {
+        scope: "global".into(),
+        items,
+        coverage: "partial",
+        difference_coverage: "not_applicable",
+        observed_at: None,
+        note: "本机登记记录，状态待核验".into(),
+        incomplete: true,
+    })
+}
+
 fn agent_view(ctx: &Context) -> Result<View> {
     let mut view = resource_view(ctx, "agents")?;
     let tools = crate::agent::ai::list(ctx)?;
@@ -347,6 +394,7 @@ fn agent_view(ctx: &Context) -> Result<View> {
                     source: None,
                     agents: vec![],
                     loaded: None,
+                    inventory: None,
                     details: vec![
                         format!("程序 {binary}"),
                         format!("版本 {version}"),
@@ -437,6 +485,7 @@ fn view_from_snapshot(snapshot: crate::domain::resource::Snapshot, show_scope: b
 fn resource_item(resource: crate::domain::resource::Resource, show_scope: bool) -> Option<Item> {
     use crate::domain::resource::{Data, Management};
     let mut name = resource.name;
+    let mut inventory = None;
     let (summary, path, agents, details) = match resource.data {
         Data::Application {
             manager,
@@ -471,6 +520,18 @@ fn resource_item(resource: crate::domain::resource::Resource, show_scope: bool) 
             } else {
                 format!("{manager} · {} 个版本", releases.len())
             };
+            inventory = Some(InventoryInfo {
+                manager,
+                groups: vec![],
+                status: resource.status,
+                version: releases
+                    .iter()
+                    .find(|release| release.active)
+                    .map(|release| release.version.clone()),
+                aliases: resource.aliases,
+                repository: None,
+                native_record: None,
+            });
             let path = releases.into_iter().find_map(|release| release.path);
             (summary, path, vec![], details)
         }
@@ -510,6 +571,7 @@ fn resource_item(resource: crate::domain::resource::Resource, show_scope: bool) 
         agents,
         loaded: None,
         details,
+        inventory,
     })
 }
 

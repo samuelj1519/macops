@@ -59,6 +59,7 @@ pub(crate) fn sanitize(value: &str, multiline: bool) -> String {
 #[derive(Clone, Copy)]
 pub(crate) enum TerminalLine {
     Heading,
+    Section,
     Step,
     Done,
     Note,
@@ -67,6 +68,7 @@ pub(crate) enum TerminalLine {
 pub(crate) fn terminal_line(kind: TerminalLine, text: &str, color: bool) -> String {
     let (marker, code) = match kind {
         TerminalLine::Heading => ("mo", "1;36"),
+        TerminalLine::Section => ("──", "1;36"),
         TerminalLine::Step => ("›", "36"),
         TerminalLine::Done => ("✓", "32"),
         TerminalLine::Note => ("!", "33"),
@@ -697,20 +699,39 @@ fn skill_summary(command: &SkillCmd, data: &Value) -> Option<String> {
                 ("/reason", "原因"),
             ],
         )),
-        SkillCmd::Upgrade(_) if data["results"].is_array() => Some(batches(
-            "技能维护结果",
-            data,
-            &[
-                ("/journal/plan/package/name", "目标"),
-                ("/recipe", "配方"),
-                ("/recipe/install_name", "安装名"),
-                ("/recipe/source/commit", "来源提交"),
-                ("/mode", "动作"),
-                ("/journal/phase", "阶段"),
-                ("/status", "状态"),
-                ("/error/code", "原因"),
-            ],
-        )),
+        SkillCmd::Upgrade(_) if data["results"].is_array() => {
+            let rows = data["results"].as_array()?;
+            if rows.iter().all(|row| row["status"] == "fixed-version") && !rows.is_empty() {
+                let mut text = String::from("所选技能固定在当前版本。\n");
+                let repositories: std::collections::BTreeSet<_> = rows
+                    .iter()
+                    .filter_map(|row| row["repository"].as_str())
+                    .collect();
+                for source in repositories {
+                    let _ = writeln!(
+                        text,
+                        "更新　mo skill upgrade {}@版本",
+                        sanitize(source, false)
+                    );
+                }
+                return Some(text);
+            }
+            Some(batches(
+                "技能维护结果",
+                data,
+                &[
+                    ("/journal/plan/package/name", "目标"),
+                    ("/name", "技能"),
+                    ("/recipe", "配方"),
+                    ("/recipe/install_name", "安装名"),
+                    ("/recipe/source/commit", "来源提交"),
+                    ("/mode", "动作"),
+                    ("/journal/phase", "阶段"),
+                    ("/status", "状态"),
+                    ("/error/code", "原因"),
+                ],
+            ))
+        }
         SkillCmd::Sync(_) | SkillCmd::Policy { .. }
             if data.get("status").is_some() || data.get("plan").is_some() =>
         {
@@ -766,6 +787,9 @@ fn agent_summary(command: &AgentCmd, data: &Value) -> Option<String> {
 }
 
 pub(crate) fn command_human(command: &Command, data: &Value) -> String {
+    if let Some(text) = skill_journey(data) {
+        return text;
+    }
     let summary = specialized(command, data)
         .or_else(|| (data["mode"] == "dry-run").then(|| preview(data)).flatten())
         .or_else(|| data.get("resource").map(resource_detail))
@@ -829,7 +853,100 @@ pub(crate) fn command_human(command: &Command, data: &Value) -> String {
     text
 }
 
+pub(crate) fn skill_journey(data: &Value) -> Option<String> {
+    let (title, done) = match data["skillAction"].as_str()? {
+        "install" => ("安装技能", "已安装并接管"),
+        "adopt" => ("接管技能", "已接管，保留现有技能文件"),
+        _ => return None,
+    };
+    let mut text = String::new();
+    if data["status"] == "already-managed" {
+        return Some("这些技能已经接管。可以直接升级。\n".into());
+    }
+    if data["mode"] == "dry-run" {
+        let _ = writeln!(text, "{title} · 预览");
+        for (key, label) in [
+            ("available", "可安装"),
+            ("skills", "可接管"),
+            ("alreadyPresent", "已有"),
+        ] {
+            if let Some(values) = data[key].as_array().filter(|items| !items.is_empty()) {
+                let names = values
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(|name| sanitize(name, false))
+                    .collect::<Vec<_>>();
+                let _ = writeln!(text, "{label}　{}", names.join("、"));
+            }
+        }
+        if let Some(directory) = data["directory"].as_str() {
+            let _ = writeln!(text, "位置　{}", sanitize(directory, false));
+        }
+        return Some(text);
+    }
+    for result in data["results"].as_array().into_iter().flatten() {
+        if result["journal"]["phase"] == "succeeded" {
+            let name = field(&result["journal"]["plan"]["package"], "name");
+            let _ = writeln!(text, "✓  {} · {done}", sanitize(name, false));
+        } else {
+            let name = result["name"]
+                .as_str()
+                .or(result["journal"]["plan"]["package"]["name"].as_str())
+                .unwrap_or("技能");
+            let reason = result["error"]["message"]
+                .as_str()
+                .or(result["journal"]["message"].as_str())
+                .unwrap_or("结果待核对");
+            let _ = writeln!(
+                text,
+                "!  {} · {}",
+                sanitize(name, false),
+                sanitize(reason, false)
+            );
+        }
+    }
+    if data["incomplete"] == true {
+        if let Some(items) = data["unattempted"]
+            .as_array()
+            .filter(|items| !items.is_empty())
+        {
+            let names: Vec<_> = items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(|name| sanitize(name, false))
+                .collect();
+            let _ = writeln!(text, "尚未开始　{}", names.join("、"));
+        }
+        if data["results"].as_array().is_some_and(|items| {
+            items
+                .iter()
+                .any(|item| recovery_hint(&item["journal"]).is_some())
+        }) {
+            text.push_str("重试时会先核对上一次的结果。查看记录可运行 mo recover。\n");
+        }
+    }
+    if let Some(source) = data["source"].as_str().or(data["target"].as_str())
+        && data["incomplete"] == false
+    {
+        let _ = writeln!(
+            text,
+            "更新　{}",
+            sanitize(
+                data["next"]
+                    .as_str()
+                    .map_or_else(|| format!("mo skill upgrade {source}"), str::to_owned)
+                    .as_str(),
+                false
+            )
+        );
+    }
+    Some(text)
+}
+
 pub fn human(data: &Value) -> String {
+    if let Some(text) = skill_journey(data) {
+        return text;
+    }
     if data["mode"] == "cancelled" || data["status"] == "cancelled" {
         return "已取消。\n".into();
     }

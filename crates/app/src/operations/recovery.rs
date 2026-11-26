@@ -233,20 +233,13 @@ fn recover_before_write_with(
     } else {
         recover_locked(ctx, &store, current, false, false)
     }
-    .map_err(|error| blocked(&crate::output::sanitize(&error.message, true)))?;
+    .map_err(|error| automatic_recovery_error(error, blocked))?;
     store.verify_namespace()?;
     let active = Store::read::<Journal>(&store.root, "active.json")?
         .ok_or_else(|| blocked("没能确认上一次操作是否结束。请用 mo history 查看记录。"))?;
     store::validate_journal(&active)?;
     if crate::policy::operation::state::pending(active.phase) {
-        let reason = if result["recoveryBlocker"] == "claude_profile_changed" {
-            "Claude 设置后来有改动。请先确认要保留哪份设置。"
-        } else {
-            "现在还不能确认上一次操作是否完成。"
-        };
-        return Err(blocked(&format!(
-            "{reason}运行 mo recover 查看待检查的操作。"
-        )));
+        return Err(blocked(&automatic_recovery_hint(&original, &result)));
     }
     let settled = locked_journal(&store, id)?;
     Ok(Some(Recovered {
@@ -255,6 +248,39 @@ fn recover_before_write_with(
         succeeded: settled.phase == Phase::Succeeded,
         local_ai,
     }))
+}
+
+fn automatic_recovery_error(error: Error, blocked: impl FnOnce(&str) -> Error) -> Error {
+    if error.code == "plugin_target_changed" {
+        error.with_guidance(
+            "还没开始新操作。",
+            "运行 mo recover 查看上次安装的记录，再检查原安装位置。",
+        )
+    } else {
+        blocked(&crate::output::sanitize(&error.message, true))
+    }
+}
+
+fn automatic_recovery_hint(journal: &Journal, result: &Value) -> String {
+    let reason = if result["recoveryBlocker"] == "claude_profile_changed" {
+        "Claude 设置后来有改动。请先确认要保留哪份设置。"
+    } else if crate::agent::claude_install::is_install(journal)
+        && let Some(message) = result["journal"]["message"].as_str()
+    {
+        message
+    } else {
+        "现在还不能确认上一次操作是否完成。"
+    };
+    let destination = crate::agent::plugin_target::recovery_target(journal)
+        .ok()
+        .flatten()
+        .map_or_else(String::new, |target| {
+            format!(
+                "上次选的是 {}。",
+                crate::output::sanitize(&target.name, false)
+            )
+        });
+    format!("{destination}{reason}运行 mo recover 查看待检查的操作。")
 }
 
 pub(crate) struct RecoveryPreview {
@@ -451,9 +477,6 @@ fn pending_list_text(pending: &[Value], incomplete: bool) -> String {
         );
     } else if !pending.is_empty() {
         text.push_str("挑一个操作号，放在 mo recover 后面。加 --dry-run 只看计划。\n");
-    }
-    if !pending.is_empty() {
-        text.push_str("请带上原来的目录选项。\n");
     }
     text
 }

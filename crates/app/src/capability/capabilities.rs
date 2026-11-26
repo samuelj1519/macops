@@ -141,7 +141,10 @@ pub(crate) fn browse(
                     row.source.as_str(),
                     "skill-deployments" | "cursor-standalone-skills"
                 )
-                || (include_other_capabilities && row.source.starts_with("cursor-plugins:")))
+                || (include_other_capabilities
+                    && ["claude-plugins:", "codex-config:", "cursor-plugins:"]
+                        .iter()
+                        .any(|prefix| row.source.starts_with(prefix))))
                 && !matches!(row.state, CoverageState::Complete | CoverageState::Absent)
         });
         let mut items = Vec::new();
@@ -211,13 +214,6 @@ fn skill_item(
     let incomplete = matches!(resource.status, State::Unknown | State::Missing)
         || baseline.is_some_and(|b| b.comparison != crate::domain::resource::Comparison::Same);
     let version = revision.recorded.or(revision.declared).or(revision.source);
-    let manual = recipes
-        .and_then(|summary| summary["sources"].as_array())
-        .and_then(|rows| {
-            rows.iter()
-                .find(|row| row["id"].as_str() == Some(&resource.id))
-        })
-        .and_then(|row| row["recipe"]["manualOnly"].as_bool());
     let mut details = vec![
         format!("管理器 {}", origin.manager),
         format!("来源 {}", origin.label.as_deref().unwrap_or("待核对")),
@@ -234,7 +230,8 @@ fn skill_item(
         None => "未知",
     };
     let agents = if delivery_kind == "skill" {
-        details.push(format!("仅手动触发 {}", label_bool(manual)));
+        let manual = label_bool(manual_only(recipes, &resource.id));
+        details.push(format!("仅手动触发 {manual}"));
         add_skill_details(home, profiles, &contents, &deployments, &mut details)
     } else {
         let plugin = delivery_kind == "plugin";
@@ -254,13 +251,14 @@ fn skill_item(
             &mut details,
         )
     };
-    let display_version: String = version
-        .as_deref()
-        .unwrap_or("未知")
-        .chars()
-        .take(12)
-        .collect();
+    let version_label = version.as_deref().unwrap_or("未知");
+    let display_version: String = version_label.chars().take(12).collect();
     let agents: Vec<_> = agents.into_iter().collect();
+    let groups = if delivery_kind == "skill" {
+        skill_groups(home, profiles, &contents, &deployments)
+    } else {
+        agents.clone()
+    };
     let profiles = agents.join(", ");
     let summary = match delivery_kind.as_str() {
         "skill" if agents.is_empty() => format!("{display_version} · 未观察到可发现档案"),
@@ -282,9 +280,23 @@ fn skill_item(
             agents,
             loaded,
             details,
+            inventory: Some(crate::browser::InventoryInfo {
+                manager: origin.manager,
+                groups,
+                status: resource.status,
+                version,
+                aliases: resource.aliases,
+                repository: origin.repository,
+                native_record: Some(origin.record),
+            }),
         },
         incomplete,
     ))
+}
+
+fn manual_only(recipes: Option<&Value>, id: &str) -> Option<bool> {
+    let sources = recipes?["sources"].as_array()?;
+    sources.iter().find(|row| row["id"].as_str() == Some(id))?["recipe"]["manualOnly"].as_bool()
 }
 
 fn profile_name<'a>(profiles: &'a BTreeMap<String, String>, id: &str) -> &'a str {
@@ -359,6 +371,29 @@ fn skill_locations<'a>(
         locations.insert(deployment.path.as_path(), &State::Present);
     }
     locations
+}
+
+fn skill_groups(
+    home: &Path,
+    profiles: &BTreeMap<String, String>,
+    contents: &[Content],
+    deployments: &[Deployment],
+) -> Vec<String> {
+    let shared = home.join(".agents/skills");
+    let codex = home.join(".codex/skills");
+    let locations = skill_locations(contents, deployments);
+    let mut groups: BTreeSet<_> = deployments
+        .iter()
+        .filter(|deployment| deployment.path.parent() != Some(shared.as_path()))
+        .filter_map(|deployment| profiles.get(&deployment.harness).cloned())
+        .collect();
+    if locations.keys().any(|path| path.parent() == Some(&shared)) {
+        groups.insert("shared".into());
+    }
+    if locations.keys().any(|path| path.parent() == Some(&codex)) {
+        groups.insert("codex:default".into());
+    }
+    groups.into_iter().collect()
 }
 
 fn skill_visibility<'a>(

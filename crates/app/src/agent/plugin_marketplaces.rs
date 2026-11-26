@@ -5,6 +5,7 @@ use crate::{
     context::Context,
     domain::resource::{Data, Management},
     error::{Error, Result},
+    policy::source_git::Repository,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -176,6 +177,102 @@ pub(crate) fn public_repository(value: &str) -> Option<String> {
     let repo = repo.strip_suffix(".git").unwrap_or(repo);
     let (owner, name) = repo.split_once('/')?;
     (valid_name(owner) && valid_name(name)).then(|| format!("https://github.com/{repo}"))
+}
+
+pub(crate) fn registered_github_repository(
+    ctx: &Context,
+    manager: &str,
+    record: &Path,
+    native_id: &str,
+) -> Result<Option<Repository>> {
+    let Some((_, market)) = native_id
+        .rsplit_once('@')
+        .filter(|(_, market)| valid_name(market))
+    else {
+        return Ok(None);
+    };
+    let mut reader = Passive::new()?;
+    let repository = match manager {
+        "claude-plugin" => {
+            let book = object_file(
+                &mut reader,
+                &record.with_file_name("known_marketplaces.json"),
+            )?;
+            let entry = book.as_ref().and_then(|book| book.get(market));
+            entry
+                .map(|entry| claude_repository(ctx, record, native_id, entry))
+                .transpose()?
+                .flatten()
+        }
+        "codex-config" => reader
+            .file(record)?
+            .map(|raw| codex_repository(&raw, market))
+            .transpose()?
+            .flatten(),
+        _ => return Ok(None),
+    };
+    reader.verify()?;
+    Ok(repository)
+}
+
+fn codex_repository(raw: &[u8], market: &str) -> Result<Option<Repository>> {
+    let config = std::str::from_utf8(raw)
+        .map_err(|_| invalid())?
+        .parse::<toml_edit::DocumentMut>()
+        .map_err(|_| invalid())?;
+    let Some(markets) = config.get("marketplaces") else {
+        return Ok(None);
+    };
+    let Some(entry) = markets.as_table_like().ok_or_else(invalid)?.get(market) else {
+        return Ok(None);
+    };
+    let entry = entry.as_table_like().ok_or_else(invalid)?;
+    let field = |key| {
+        entry
+            .get(key)
+            .and_then(toml_edit::Item::as_str)
+            .ok_or_else(invalid)
+    };
+    if field("source_type")? != "git" {
+        return Ok(None);
+    }
+    github_url(field("source")?)
+}
+
+fn github_url(url: &str) -> Result<Option<Repository>> {
+    if !url.starts_with("https://github.com/") {
+        return Ok(None);
+    }
+    let name = crate::policy::public_source::repository_subject(url).ok_or_else(invalid)?;
+    Repository::parse(name).map(Some)
+}
+
+fn claude_repository(
+    ctx: &Context,
+    record: &Path,
+    native_id: &str,
+    entry: &Value,
+) -> Result<Option<Repository>> {
+    let source = &entry["source"];
+    let value = |key: &str| source[key].as_str().ok_or_else(invalid);
+    match value("source")? {
+        "github" => Repository::parse(value("repo")?).map(Some),
+        "git" | "url" => github_url(value("url")?),
+        "directory" => {
+            let checkout = value("path")?;
+            if entry["installLocation"].as_str() != Some(checkout) {
+                return Ok(None);
+            }
+            let profile = record.parent().and_then(Path::parent).ok_or_else(invalid)?;
+            crate::agent::claude_install::registered_checkout_repository(
+                ctx,
+                profile,
+                native_id,
+                Path::new(checkout),
+            )
+        }
+        _ => Ok(None),
+    }
 }
 
 fn codex_markets(root: &Path) -> Result<Vec<Market>> {
@@ -454,6 +551,7 @@ fn market_item(profile: &Value, market: Option<&Value>, index: usize) -> Item {
         agents: vec![],
         loaded: None,
         details,
+        inventory: None,
     }
 }
 

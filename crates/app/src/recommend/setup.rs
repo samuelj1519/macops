@@ -720,6 +720,23 @@ fn reject_single_pending(ctx: &RecommendSetupContext) -> Result<()> {
     Ok(())
 }
 
+fn interactive_answer(prompt: &str) -> Result<String> {
+    let (message, action) = match prompt {
+        "发送最小测试请求？[y/N]" => ("发送最小测试请求？", "发送测试"),
+        "连接成功。保存设置？[y/N]" => ("连接成功。保存设置？", "保存设置"),
+        "保留旧条目并结束清理，当前配置仍会生效。确认？[y/N]" => {
+            ("保留旧条目并结束清理，当前配置仍会生效。", "保留旧条目")
+        }
+        _ => return line(prompt),
+    };
+    eprintln!("{message}");
+    let selected =
+        crate::terminal::picker::select(&["取消".into(), action.into()], 0, false, |typed| {
+            matches!(typed, "y" | "yes").then_some(vec![1])
+        })?;
+    Ok(if selected == [1] { "y" } else { "" }.into())
+}
+
 fn line(prompt: &str) -> Result<String> {
     eprint!("{prompt} ");
     let mut value = String::new();
@@ -781,7 +798,7 @@ pub(crate) fn run(ctx: &RecommendSetupContext, json: bool, dry_run: bool) -> Res
         before.as_deref(),
         current,
         &keys,
-        line,
+        interactive_answer,
         password,
         |profile, token, until| {
             if ctx.isolated || !cfg!(target_os = "macos") {

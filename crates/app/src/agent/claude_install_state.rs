@@ -1,7 +1,7 @@
 use super::{Prepared, Step, invalid, physical};
 use crate::{
     agent::native_plugins_files::Passive,
-    domain::{FileId, fingerprint},
+    domain::{CapabilityKind, FileId, fingerprint},
     error::Result,
     platform::fs::Directory,
 };
@@ -96,7 +96,10 @@ pub(super) fn published(
     let payload = reader.directory(&p.payload())?.ok_or_else(invalid)?;
     reader.projected_tree(&p.payload(), None)?;
     if payload.identity() != expected_payload
-        || crate::capability::capability_local::codex_payload_files(&payload)? != p.files
+        || crate::capability::capability_local::plugin_payload_files(
+            &payload,
+            CapabilityKind::ClaudePlugin,
+        )? != p.files
     {
         return Err(invalid());
     }
@@ -158,7 +161,11 @@ pub(super) fn observe(p: &Prepared, step: &Step) -> Result<Projection> {
         return Err(invalid());
     }
     let payload = physical(&p.payload())?;
-    if crate::capability::capability_local::codex_payload_files(&payload)? != p.files {
+    if crate::capability::capability_local::plugin_payload_files(
+        &payload,
+        CapabilityKind::ClaudePlugin,
+    )? != p.files
+    {
         return Err(invalid());
     }
     profile.verify()?;

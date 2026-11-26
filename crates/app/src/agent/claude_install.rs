@@ -596,6 +596,13 @@ fn prepare(
     let config = physical(&root.path.join("home/.claude"))?;
     Store::atomic_bytes(config.file(), "settings.json", b"{}\n", true)?;
     let (checkout_slot, checkout_tree, files) = (native.checkout)(&offer, &root)?;
+    if crate::capability::capability_local::plugin_payload_files(
+        &physical(&root.path.join("checkout"))?,
+        CapabilityKind::ClaudePlugin,
+    )? != files
+    {
+        return Err(invalid());
+    }
     let prepared = Prepared {
         target: None,
         root: root.path.clone(),
@@ -654,7 +661,7 @@ fn stage(ctx: &Context, store: &Store, input: &Frozen, native: &NativeIo) -> Res
         Step::Activation { .. } => Stage::CheckActivation,
     });
     if let Ok(outcome) = (native.launch)(store, &mut journal, &argv) {
-        settle(store, &mut journal, input, &outcome, native)?;
+        settle(store, &mut journal, input, &outcome, native, false)?;
     } else {
         if journal.process_group.is_some() {
             journal.phase = Phase::Unknown;
@@ -674,6 +681,7 @@ fn settle(
     input: &Frozen,
     outcome: &NativeOutcome,
     native: &NativeIo,
+    recovering: bool,
 ) -> Result<()> {
     let state = physical(&store.path)?;
     let verified = || -> Result<()> {
@@ -685,11 +693,31 @@ fn settle(
         Ok(())
     };
     if verified().is_ok() {
+        if recovering
+            && !matches!(input.step, Step::Market)
+            && !crate::agent::plugin_target::publication_recorded(store, journal)?
+            && let Some(note) =
+                existing_install(&input.prepared.offer, input.prepared.target.as_ref())?
+        {
+            journal.phase = Phase::Failed;
+            journal.message = format!("本次安装未写入原配置。{note}");
+            return store.save(journal);
+        }
         journal.phase = Phase::Succeeded;
         journal.message = "Claude Code 原生阶段已核验".into();
     } else {
         journal.phase = Phase::Unknown;
-        journal.message = "Claude Code 原生阶段缺少完整证据，需核对原操作".into();
+        journal.message = match outcome {
+            NativeOutcome::Exited {
+                code: Some(0),
+                signal: None,
+            } => "Claude Code 已正常退出，但 mo 还不能确认临时目录里的安装结果。",
+            NativeOutcome::Exited { .. } => {
+                "Claude Code 安装命令失败。mo 保留了这次安装的临时文件。"
+            }
+            _ => "mo 还不能确认 Claude Code 安装命令是否执行完成。",
+        }
+        .into();
     }
     store.save(journal)
 }
@@ -993,6 +1021,12 @@ fn install_with_target(
         {
             return Ok(done);
         }
+        if let Some(note) = existing_install(&offer, Some(target))? {
+            return Ok(
+                json!({"skipped":true,"message":note,"targetName":target.name,
+                "profile": target.directory.canonical}),
+            );
+        }
         if let Some(previous) = crate::agent::plugin_target::previous_stage(ctx, |journal| {
             matching_activation(journal, &offer, Some(target)).map(|mode| mode.is_some())
         })? {
@@ -1025,6 +1059,21 @@ fn install_with_target(
         return Ok(json!({"journal":market,"stage":"marketplace"}));
     }
     install_after_market(ctx, &store, prepared, market.id, native)
+}
+
+fn existing_install(
+    offer: &Offer,
+    target: Option<&crate::agent::resource_agents::InstallTarget>,
+) -> Result<Option<String>> {
+    let Some(target) = target else {
+        return Ok(None);
+    };
+    crate::agent::plugin_target::claude_first_install_conflict(
+        target,
+        &offer.native_id(),
+        &offer.marketplace,
+        &offer.version,
+    )
 }
 
 fn install_after_market(
@@ -1225,6 +1274,60 @@ pub(crate) fn existing_target(
     Ok(frozen(journal, &physical(&journal.state)?)?.prepared.target)
 }
 
+pub(crate) fn registered_checkout_repository(
+    ctx: &Context,
+    profile: &Path,
+    native_id: &str,
+    checkout: &Path,
+) -> Result<Option<crate::policy::source_git::Repository>> {
+    if !checkout
+        .parent()
+        .is_some_and(|root| root.parent() == Some(ctx.state.as_path()) && label(root).is_some())
+        || checkout.file_name() != Some(OsStr::new("checkout"))
+    {
+        return Ok(None);
+    }
+    let package_id = format!("claude-first-install:{native_id}");
+    for journal in store::history(ctx)? {
+        if journal.phase != Phase::Succeeded
+            || !is_install(&journal)
+            || journal.plan.package.id != package_id
+            || !journal.plan.command.as_ref().is_some_and(|command| {
+                matches!(command.args.as_slice(), [.., market, add, path]
+                    if market == "marketplace" && add == "add" && Path::new(path) == checkout)
+            })
+        {
+            continue;
+        }
+        if ctx.home != journal.home || ctx.state != journal.state {
+            return Err(invalid());
+        }
+        let input = frozen(&journal, &physical(&ctx.state)?)?;
+        let installed = &input.prepared;
+        if !matches!(input.step, Step::Market)
+            || installed.checkout() != checkout
+            || installed.offer.native_id() != native_id
+        {
+            return Err(invalid());
+        }
+        let same_profile = if let Some(target) = &installed.target {
+            target.directory.canonical == profile && target.open()?.path == profile
+        } else {
+            installed.profile() == profile
+        };
+        if same_profile {
+            if crate::source::source_tree::observe(&installed.checkout_slot)?.as_ref()
+                != Some(&installed.checkout_tree)
+            {
+                return Err(invalid());
+            }
+            return crate::policy::source_git::Repository::parse(&installed.offer.repository)
+                .map(Some);
+        }
+    }
+    Ok(None)
+}
+
 fn recover_using(
     ctx: &Context,
     store: &Store,
@@ -1276,16 +1379,16 @@ fn finish_original(
     if outcome == NativeOutcome::Running {
         return Err(Error::attention("operation_in_flight", "原进程仍在运行"));
     }
+    let exited_failed = matches!(outcome, NativeOutcome::Exited { code: Some(code), .. } if code != 0)
+        || matches!(
+            outcome,
+            NativeOutcome::Exited {
+                signal: Some(_),
+                ..
+            }
+        );
     if resolve_failed {
-        if !matches!(outcome, NativeOutcome::Exited { code: Some(code), .. } if code != 0)
-            && !matches!(
-                outcome,
-                NativeOutcome::Exited {
-                    signal: Some(_),
-                    ..
-                }
-            )
-        {
+        if !exited_failed {
             return Err(Error::attention(
                 "claude_install_original_exit_unverified",
                 "需要原进程的失败退出证据",
@@ -1296,7 +1399,31 @@ fn finish_original(
         journal.message = "原 Claude Code 进程已失败退出".into();
         return store.save(journal);
     }
-    settle(store, journal, input, &outcome, native)
+    let state = physical(&store.path)?;
+    let absent_proof = state
+        .metadata(OsStr::new(&sidecar(journal, "after")))?
+        .is_none();
+    if exited_failed
+        && absent_proof
+        && journal.process_group.is_some()
+        && !crate::agent::plugin_target::publication_recorded(store, journal)?
+        && input.prepared.guard(&store.path, native).is_ok()
+    {
+        journal.phase = Phase::Failed;
+        journal.message = "上次 Claude Code 安装命令已失败退出，未写入目标配置。".into();
+        return store.save(journal);
+    }
+    if clean(&outcome) && journal.process_group.is_some() && absent_proof {
+        // The original worker may have exited between recording its status and
+        // verifying the private staging directory. Run the same verifier.
+        let argv = invocation(input, journal.plan.timeout_secs)?;
+        if record_after(journal, &argv, &outcome, native).is_err() {
+            journal.message = "Claude Code 已正常退出，但临时目录里的插件与安装计划对不上。".into();
+            journal.phase = Phase::Unknown;
+            return store.save(journal);
+        }
+    }
+    settle(store, journal, input, &outcome, native, true)
 }
 
 pub(crate) fn recover_publication(

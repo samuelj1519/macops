@@ -191,6 +191,68 @@ fn value(path: &Path) -> Result<(Option<Object>, Vec<u8>)> {
     Ok((before, bytes.unwrap_or_default()))
 }
 
+pub(super) fn claude_first_install_conflict(
+    target: &InstallTarget,
+    id: &str,
+    market: &str,
+    requested_version: &str,
+) -> Result<Option<String>> {
+    let profile = target.open()?;
+    let read = |name| -> Result<Value> {
+        let (stamp, raw) = value(&profile.path.join(name))?;
+        stamp.map_or_else(|| Ok(json!({})), |_| crate::policy::json::parse(&raw))
+    };
+    let installed = read("plugins/installed_plugins.json")?;
+    let settings = read("settings.json")?;
+    let markets = read("plugins/known_marketplaces.json")?;
+    profile.verify()?;
+    if let Some(entries) = installed["plugins"].get(id) {
+        let version = entries
+            .as_array()
+            .and_then(|rows| rows.first())
+            .and_then(|row| row["version"].as_str());
+        return Ok(Some(match version {
+            Some(version) if version == requested_version => format!("已装有 {id} {version}。"),
+            Some(version) if markets[market]["source"]["source"] == "directory" => {
+                format!("已装有 {id} {version}。请用原安装方式更新本地插件市场，再检查版本。")
+            }
+            Some(version) => {
+                format!("已装有 {id} {version}。请在该 Claude Code 的插件菜单中检查更新。")
+            }
+            None => format!("已有 {id} 的安装记录。请在该 Claude Code 的插件菜单中检查。"),
+        }));
+    }
+    if settings["enabledPlugins"].get(id).is_some() {
+        return Ok(Some(format!(
+            "已有 {id} 的启停设置。请在该 Claude Code 的插件菜单中检查。"
+        )));
+    }
+    if settings["extraKnownMarketplaces"].get(market).is_some() || markets.get(market).is_some() {
+        return Ok(Some(format!(
+            "已有同名插件市场 {market}。请在该 Claude Code 的插件菜单中检查来源。"
+        )));
+    }
+    Ok(None)
+}
+
+pub(super) fn publication_recorded(store: &Store, native: &Journal) -> Result<bool> {
+    let state = Directory::open(&store.path)?;
+    let operations = state.child(OsStr::new("operations"))?;
+    let id = &native.id;
+    Ok(state
+        .metadata(OsStr::new(&format!("plugin-target-{id}-receipt.json")))?
+        .is_some()
+        || state
+            .metadata(OsStr::new(&format!("plugin-target-{id}-staging.json")))?
+            .is_some()
+        || state
+            .metadata(OsStr::new(&format!("claude-{id}-adoption.json")))?
+            .is_some()
+        || operations
+            .metadata(OsStr::new(&format!("{id}-receipt.json")))?
+            .is_some())
+}
+
 fn make_child(parent: &Directory, name: &OsStr) -> Result<Directory> {
     parent.verify()?;
     if parent.metadata(name)?.is_none() {
@@ -823,6 +885,7 @@ pub(crate) fn recovery_target(journal: &Journal) -> Result<Option<InstallTarget>
     }
 }
 
+#[cfg(test)]
 pub(crate) fn recovery_matches(
     journal: &Journal,
     selected: Option<&InstallTarget>,

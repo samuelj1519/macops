@@ -2,12 +2,14 @@
 EXTENDS Naturals
 VARIABLE s
 Targets == {"one", "two"}
-EndStates == {"cancelled", "refused", "complete"}
-Init == \E enrolled \in {{}, {"one"}}, pending \in Targets \cup {"none"}:
+EndStates == {"cancelled", "refused", "complete", "skipped"}
+Init == \E enrolled \in {{}, {"one"}}, pending \in Targets \cup {"none"},
+           oldResult \in {"verified", "existing", "failed", "unknown", "running"}, existing \in {{}, {"one"}}:
   s = [phase |-> "list", selected |-> "none", initial |-> enrolled,
        enrolled |-> enrolled, agreed |-> FALSE, valid |-> TRUE, completed |-> 0,
        writes |-> {}, running |-> FALSE, frozen |-> FALSE, published |-> 0,
-       original |-> pending, pending |-> pending]
+       original |-> pending, pending |-> pending, oldResult |-> oldResult,
+       oldWrites |-> {}, existing |-> existing]
 Choose == s.phase = "list" /\ \E target \in Targets:
   s' = [s EXCEPT !.selected = target,
     !.phase = "confirm"]
@@ -17,15 +19,20 @@ Cancel == s.phase \in {"list", "confirm"} /\
   s' = [s EXCEPT !.phase = "cancelled"]
 Confirm == s.phase = "confirm" /\ s.valid /\
   s' = [s EXCEPT !.agreed = TRUE, !.phase = "reconcile"]
-Reconcile == s.phase = "reconcile" /\ s.valid /\ s.pending \in {"none", s.selected} /\
-  s' = [s EXCEPT !.pending = "none", !.phase = IF s.selected \in s.enrolled THEN "ready" ELSE "register"]
-Blocked == s.phase = "reconcile" /\ s.pending # "none" /\
+Reconcile == s.phase = "reconcile" /\ s.valid
+  /\ (s.pending = "none" \/ s.oldResult \in {"verified", "existing", "failed"})
+  /\ s' = [s EXCEPT !.pending = "none",
+    !.oldWrites = IF s.pending # "none" /\ s.oldResult = "verified" THEN {s.original} ELSE {},
+    !.phase = IF s.selected \in s.enrolled THEN "ready" ELSE "register"]
+Blocked == s.phase = "reconcile" /\ s.pending # "none" /\ s.oldResult \in {"unknown", "running"} /\
   s' = [s EXCEPT !.phase = "refused"]
 Drift == s.phase \in {"confirm", "reconcile", "register", "ready", "checking", "publishReady", "publishing", "publishPaused"} /\ s.valid /\
   s' = [s EXCEPT !.valid = FALSE]
 Refuse == s.phase \in {"confirm", "reconcile", "register", "ready", "checking", "publishReady", "publishing", "publishPaused"} /\ ~s.valid /\
   s' = [s EXCEPT !.phase = "refused"]
-Start == s.phase = "ready" /\ s.valid /\ s.completed < 3 /\
+SkipExisting == s.phase = "ready" /\ s.valid /\ s.selected \in s.existing /\
+  s' = [s EXCEPT !.phase = "skipped"]
+Start == s.phase = "ready" /\ s.valid /\ s.completed < 3 /\ s.selected \notin s.existing /\
   s' = [s EXCEPT !.phase = "native", !.running = TRUE]
 Exit == s.phase = "native" /\
   s' = [s EXCEPT !.phase = "checking", !.running = FALSE]
@@ -47,13 +54,15 @@ Interrupt == s.phase = "publishing" /\ s.valid
 Resume == s.phase = "publishPaused" /\ s.valid
   /\ s' = [s EXCEPT !.phase = "publishing"]
 Done == s.phase \in EndStates /\ UNCHANGED s
-Next == Choose \/ Register \/ Cancel \/ Confirm \/ Reconcile \/ Blocked \/ Drift \/ Refuse \/ Start \/ Exit \/
+Next == Choose \/ Register \/ Cancel \/ Confirm \/ Reconcile \/ Blocked \/ Drift \/ Refuse \/ SkipExisting \/ Start \/ Exit \/
   LoseAnswer \/ OriginalExit \/ Verify \/ Indeterminate \/ Freeze \/ Apply \/ Interrupt \/ Resume \/ Done
 OnlySelected == s.writes \subseteq {s.selected}
 ConfirmedWrites == s.writes # {} => s.agreed /\ s.selected \in s.enrolled
-ListAndCancelAreReadOnly == s.phase \in {"list", "cancelled"} => s.writes = {} /\ s.enrolled = s.initial
+ListAndCancelAreReadOnly == s.phase \in {"list", "cancelled"} => s.writes = {} /\ s.oldWrites = {} /\ s.enrolled = s.initial
 RegistrationIsExplicit == s.enrolled # s.initial => s.agreed /\ (s.enrolled \ s.initial) \subseteq {s.selected}
-RecoveryMatchesSelection == s.pending # s.original => s.agreed /\ s.original = s.selected
+RecoveryUsesOriginal == s.oldWrites # {} => s.agreed /\ s.oldWrites = {s.original} /\ s.oldResult = "verified"
+UncertainRecoveryBlocksWrites == s.pending # "none" => s.writes = {} /\ s.oldWrites = {}
+ExistingPluginPreserved == s.writes \intersect s.existing = {}
 EnrolledAfterRecovery == s.enrolled # s.initial => s.pending = "none"
 NoOverlap == s.running => s.phase \in {"native", "waiting"}
 ValidFinish == s.phase = "complete" => s.completed = 3 /\ s.published = 2 /\ s.valid /\ ~s.running

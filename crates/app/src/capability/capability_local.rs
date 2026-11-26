@@ -302,9 +302,22 @@ pub struct PayloadSnapshot {
     pub lineage: Vec<crate::domain::FileId>,
 }
 
-pub(crate) fn codex_payload_files(root: &Directory) -> Result<Vec<(String, bool, String)>> {
+const CLAUDE_PAYLOAD_ENTRY_LIMIT: usize = 10_000;
+
+fn payload_entry_limit(capability: CapabilityKind) -> usize {
+    if capability == CapabilityKind::ClaudePlugin {
+        CLAUDE_PAYLOAD_ENTRY_LIMIT
+    } else {
+        PAYLOAD_ENTRY_LIMIT
+    }
+}
+
+pub(crate) fn plugin_payload_files(
+    root: &Directory,
+    capability: CapabilityKind,
+) -> Result<Vec<(String, bool, String)>> {
     let mut entries = Vec::new();
-    let mut entry_limit = PAYLOAD_ENTRY_LIMIT;
+    let mut entry_limit = payload_entry_limit(capability);
     let mut byte_limit = PAYLOAD_BYTE_BUDGET;
     walk_payload(
         root,
@@ -313,7 +326,7 @@ pub(crate) fn codex_payload_files(root: &Directory) -> Result<Vec<(String, bool,
         &mut entry_limit,
         &mut byte_limit,
         &mut entries,
-        true,
+        capability == CapabilityKind::CodexPlugin,
     )?;
     root.verify()?;
     entries.sort_by(|a, b| a.0.cmp(&b.0));
@@ -348,7 +361,7 @@ pub fn snapshot_payload(
     parent.verify_child(leaf, &root)?;
     let lineage = root.lineage()?;
     let mut entries = Vec::new();
-    let mut remaining_entries = PAYLOAD_ENTRY_LIMIT;
+    let mut remaining_entries = payload_entry_limit(capability);
     walk_payload(
         &root,
         "",

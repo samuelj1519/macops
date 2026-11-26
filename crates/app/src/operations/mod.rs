@@ -25,7 +25,7 @@ use crate::{
 };
 use serde_json::{Value, json};
 use std::{
-    io::{IsTerminal, Read, Seek, SeekFrom, Write},
+    io::{Read, Seek, SeekFrom, Write},
     os::unix::process::CommandExt,
     path::Path,
     process::Stdio,
@@ -36,24 +36,7 @@ pub fn confirm(message: &str, yes: bool) -> Result<()> {
     if yes {
         return Ok(());
     }
-    if !std::io::stdin().is_terminal() {
-        return Err(Error::attention(
-            "confirmation_required",
-            "这里不能输入确认。请在终端里重新运行这条命令，先看清它会改什么。",
-        ));
-    }
-    let mut error = std::io::stderr().lock();
-    writeln!(
-        error,
-        "{message}\n同意就输入 yes，再按 Enter。直接按 Enter 可以取消。"
-    )?;
-    let mut value = String::new();
-    std::io::stdin().read_line(&mut value)?;
-    if value.trim() == "yes" {
-        Ok(())
-    } else {
-        Err(Error::attention("cancelled", "操作已取消"))
-    }
+    crate::terminal::confirm(message)
 }
 
 pub fn plan(

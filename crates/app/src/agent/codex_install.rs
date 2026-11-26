@@ -360,7 +360,10 @@ fn project_config(
         || field("source_type") != Some("git")
         || field("source") != Some(p.offer.url()?.as_str())
         || field("ref") != Some(p.offer.marketplace_commit.as_str())
-        || capability_local::codex_payload_files(&same_directory(&p.market())?)? != p.files
+        || capability_local::plugin_payload_files(
+            &same_directory(&p.market())?,
+            CapabilityKind::CodexPlugin,
+        )? != p.files
     {
         return Err(stale());
     }
@@ -376,7 +379,10 @@ fn project_config(
         if plugins.len() != 1
             || plugins.get(&id) != Some(&Some(true))
             || configured.is_none_or(|table| table.len() != 1)
-            || capability_local::codex_payload_files(&same_directory(&p.payload())?)? != p.files
+            || capability_local::plugin_payload_files(
+                &same_directory(&p.payload())?,
+                CapabilityKind::CodexPlugin,
+            )? != p.files
         {
             return Err(stale());
         }

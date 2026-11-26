@@ -1,4 +1,5 @@
 mod candidate;
+mod inventory_view;
 mod keychain;
 mod model;
 mod model_policy;
@@ -61,7 +62,7 @@ pub(crate) fn run(
         )?
     };
     if interactive {
-        choose(ctx, data)
+        choose(ctx, data, cli.verbose > 0)
     } else {
         Ok(data)
     }
@@ -266,65 +267,189 @@ pub(crate) fn interactive(cli: &crate::cli::Cli) -> bool {
         )
 }
 
-fn choose(ctx: &Context, data: Value) -> Result<Value> {
-    use crate::browser::sanitize;
-    let safe = |v: &Value| sanitize(v.as_str().unwrap_or(""), false);
+fn choose(ctx: &Context, data: Value, verbose: bool) -> Result<Value> {
     terminal(
         TerminalLine::Heading,
-        &format!("安装建议 · {}", safe(&data["query"])),
+        &format!("安装建议 · {}", safe_text(&data["query"])),
     );
-    if let Some(documents) = data["documents"].as_array() {
-        for doc in documents {
-            eprintln!("  {}  {}", safe(&doc["path"]), safe(&doc["url"]));
-        }
-        if let Some(candidates) = data["model"]["candidates"].as_array() {
-            for candidate in candidates {
-                eprintln!(
-                    "  {} · {} · {} · {} · 版本 {}",
-                    safe(&candidate["name"]),
-                    safe(&candidate["kind"]),
-                    safe(&candidate["adapter"]),
-                    safe(&candidate["scope"]),
-                    sanitize(candidate["version"].as_str().unwrap_or("待核对"), false)
-                );
-                eprintln!("    {}", safe(&candidate["summary"]));
-                if let Some(document) = candidate["document"]
-                    .as_u64()
-                    .and_then(|index| usize::try_from(index).ok())
-                    .and_then(|index| documents.get(index))
-                {
-                    eprintln!("    证据 {}", safe(&document["url"]));
-                }
-            }
-        }
-    }
-    if let Some(hint) = recommendation_model_hint(&data["model"]) {
-        terminal(TerminalLine::Note, hint);
-    }
-    plugin_install::show_codex_market(&data["codexMarketplace"]);
     let known = data["known"].as_array().map_or(&[][..], Vec::as_slice);
     let installs = install_choices(ctx, &data, known, || plugin_install::offers(ctx, &data))?;
-    if installs.is_empty() {
-        if let Some(repo) = search_repository(ctx, &data)? {
-            return choose(ctx, upstream::show_repository(ctx, &repo, false, true)?);
-        }
-        eprintln!("{}", manual_install_text(&data));
+    let local = inventory_view::Related::read(ctx, &data);
+    if installs.is_empty()
+        && local.views.is_empty()
+        && let Some(repo) = search_repository(ctx, &data)?
+    {
+        return choose(
+            ctx,
+            upstream::show_repository(ctx, &repo, false, true)?,
+            verbose,
+        );
+    }
+    terminal(TerminalLine::Section, "本机状态");
+    eprint!("{}", local.status());
+    eprintln!();
+    terminal(TerminalLine::Section, "安装方案");
+    for line in recommendation_sections(&data, &installs).lines() {
+        eprintln!("  {line}");
+    }
+    eprintln!();
+    terminal(TerminalLine::Section, "维护入口");
+    eprint!("{}", local.maintenance(installs.len() + 1));
+    if verbose {
+        show_model_details(&data);
+        plugin_install::show_codex_market(&data["codexMarketplace"]);
+    }
+    if (verbose || (installs.is_empty() && data["manualInstall"].is_null()))
+        && let Some(hint) = recommendation_model_hint(&data["model"])
+    {
+        terminal(TerminalLine::Note, hint);
+    }
+    if installs.is_empty() && local.views.is_empty() {
         return Ok(data);
     }
     if let Some(reason) = data["reason"].as_str() {
         terminal(TerminalLine::Note, &source_notice(reason));
     }
-    for (index, choice) in installs.iter().enumerate() {
-        eprintln!("  {} {}", index + 1, choice.label());
-    }
-    eprintln!("选择安装候选（Enter 返回）");
-    let Some(package) = choice_index(installs.len())?.and_then(|index| installs.get(index)) else {
+    let prompt = if installs.is_empty() {
+        "选择维护入口"
+    } else if local.views.is_empty() {
+        "选择安装候选"
+    } else {
+        "选择安装候选或维护入口"
+    };
+    eprintln!("{prompt}（Enter 返回）");
+    let labels = installs
+        .iter()
+        .map(InstallChoice::label)
+        .chain(local.views.iter().map(|(kind, _)| {
+            if *kind == crate::browser::Kind::Apps {
+                "查看和维护软件".into()
+            } else {
+                "查看技能与插件".into()
+            }
+        }))
+        .collect::<Vec<_>>();
+    let Some(index) = choose_label(labels)? else {
         return Ok(json!({"mode":"cancelled"}));
     };
-    install_choice(ctx, package)
+    if let Some(offer) = installs.get(index) {
+        return install_choice(ctx, offer);
+    }
+    if let Some((kind, view)) = local.views.into_iter().nth(index - installs.len()) {
+        crate::browser::browse_related(ctx, kind, view)?;
+    }
+    Ok(data)
 }
 
-fn manual_install_text(data: &Value) -> String {
+fn safe_text(value: &Value) -> String {
+    crate::browser::sanitize(value.as_str().unwrap_or_default(), false)
+}
+
+fn recommendation_sections(data: &Value, choices: &[InstallChoice]) -> String {
+    use std::fmt::Write as _;
+    let mut text = String::new();
+    if !choices.is_empty() {
+        text.push_str("可直接安装\n");
+        for (index, choice) in choices.iter().enumerate() {
+            let _ = writeln!(text, "  {} {}", index + 1, choice.label());
+        }
+    }
+    let has_claude = choices.iter().any(|choice| {
+        matches!(
+            choice,
+            InstallChoice::Plugin(plugin_install::Offer::Claude(..))
+        )
+    });
+    let manual = manual_commands(data, has_claude);
+    if !manual.is_empty() {
+        let _ = writeln!(text, "手动安装{manual}");
+    }
+    if let Some(documents) = data["documents"].as_array().filter(|rows| !rows.is_empty()) {
+        text.push_str("来源文档\n");
+        let mut seen = std::collections::BTreeSet::new();
+        for doc in documents {
+            if seen.insert(safe_text(&doc["url"])) {
+                let _ = writeln!(
+                    text,
+                    "  {}  {}",
+                    safe_text(&doc["path"]),
+                    safe_text(&doc["url"])
+                );
+            }
+        }
+    }
+    if choices.is_empty() && manual.is_empty() {
+        let _ = writeln!(text, "{}", no_install_plan(data));
+    }
+    text
+}
+
+fn show_model_details(data: &Value) {
+    let documents = data["documents"].as_array().map_or(&[][..], Vec::as_slice);
+    if let Some(candidates) = data["model"]["candidates"]
+        .as_array()
+        .filter(|rows| !rows.is_empty())
+    {
+        eprintln!("模型说明");
+        for candidate in candidates {
+            eprintln!(
+                "  {} · {} · {} · {} · 版本 {}",
+                safe_text(&candidate["name"]),
+                safe_text(&candidate["kind"]),
+                safe_text(&candidate["adapter"]),
+                safe_text(&candidate["scope"]),
+                crate::browser::sanitize(candidate["version"].as_str().unwrap_or("待核对"), false)
+            );
+            eprintln!("    {}", safe_text(&candidate["summary"]));
+            if let Some(document) = candidate["document"]
+                .as_u64()
+                .and_then(|index| usize::try_from(index).ok())
+                .and_then(|index| documents.get(index))
+            {
+                eprintln!("    证据 {}", safe_text(&document["url"]));
+            }
+        }
+    }
+}
+
+fn manual_commands(data: &Value, has_claude: bool) -> String {
+    use std::fmt::Write as _;
+    let documents = data["documents"].as_array().map_or(&[][..], Vec::as_slice);
+    let mut text = String::new();
+    for item in data["manualInstall"].as_array().into_iter().flatten() {
+        if let (Some(manager), Some(document), Some(commands)) = (
+            item["manager"].as_str(),
+            item["document"]
+                .as_u64()
+                .and_then(|i| usize::try_from(i).ok())
+                .and_then(|i| documents.get(i)),
+            item["commands"].as_array(),
+        ) && let Some(path) = document["path"].as_str()
+            && !(has_claude && manager == "Claude Code")
+        {
+            let _ = write!(
+                text,
+                "\n  {} · {}",
+                crate::browser::sanitize(manager, false),
+                crate::browser::sanitize(path, false)
+            );
+            for command in commands.iter().filter_map(Value::as_str) {
+                let _ = write!(text, "\n    {}", crate::browser::sanitize(command, false));
+            }
+            if manager == "Skills CLI"
+                && commands
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .any(|command| command.split_ascii_whitespace().count() == 4)
+            {
+                text.push_str("\n    按 Skills CLI 提示多选客户端，再确认安装范围。");
+            }
+        }
+    }
+    text
+}
+
+fn no_install_plan(data: &Value) -> String {
     use crate::browser::sanitize;
     use std::fmt::Write as _;
     let mut text = String::from("错误表现　当前没有可执行的已核验安装计划");
@@ -356,47 +481,17 @@ fn manual_install_text(data: &Value) -> String {
         return text;
     }
     text.push_str("\n错误原因　找到了项目的安装说明，但缺少 mo 可直接执行的配方或插件验证条件。");
-    if let Some(manual) = data["manualInstall"]
-        .as_array()
-        .filter(|rows| !rows.is_empty())
-    {
-        text.push_str(
-            "\n正确用法　按使用的安装工具选择。以下命令来自上面列出的固定提交文档，需手动执行。",
-        );
-        for item in manual {
-            if let (Some(manager), Some(document), Some(commands)) = (
-                item["manager"].as_str(),
-                item["document"]
-                    .as_u64()
-                    .and_then(|index| usize::try_from(index).ok())
-                    .and_then(|index| documents.get(index)),
-                item["commands"].as_array(),
-            ) && let Some(path) = document["path"].as_str()
-            {
-                let _ = write!(
-                    text,
-                    "\n  {} · {}",
-                    sanitize(manager, false),
-                    sanitize(path, false)
-                );
-                for command in commands.iter().filter_map(Value::as_str) {
-                    let _ = write!(text, "\n    {}", sanitize(command, false));
-                }
-            }
-        }
-    } else {
-        let path = documents
-            .iter()
-            .find(|document| document["path"] == "INSTALL.md")
-            .or_else(|| documents.first())
-            .and_then(|document| document["path"].as_str())
-            .unwrap_or("项目文档");
-        let _ = write!(
-            text,
-            "\n正确用法　打开上面的 {}，按你使用的客户端选择安装方式。",
-            sanitize(path, false)
-        );
-    }
+    let path = documents
+        .iter()
+        .find(|document| document["path"] == "INSTALL.md")
+        .or_else(|| documents.first())
+        .and_then(|document| document["path"].as_str())
+        .unwrap_or("项目文档");
+    let _ = write!(
+        text,
+        "\n正确用法　打开上面的 {}，按你使用的客户端选择安装方式。",
+        sanitize(path, false)
+    );
     text
 }
 
@@ -421,6 +516,13 @@ fn install_choice(ctx: &Context, choice: &InstallChoice) -> Result<Value> {
         InstallChoice::Skill(recipe) => Ok(report_install(
             crate::skills::native_skills::install_recommended(ctx, (**recipe).clone())?,
         )),
+        InstallChoice::PublicSkills(source) => {
+            let report = crate::skills::native_skills::install_repository(ctx, source)?;
+            if let Some(summary) = crate::output::skill_journey(&report) {
+                eprint!("{summary}");
+            }
+            Ok(report)
+        }
         InstallChoice::Plugin(offer) => plugin_install::run(ctx, offer),
     }
 }
@@ -465,22 +567,21 @@ fn recommendation_keychain_hint(status: Option<&str>) -> Option<&'static str> {
     }
 }
 
+fn choose_label(mut labels: Vec<String>) -> Result<Option<usize>> {
+    let back = labels.len();
+    labels.push("返回".into());
+    let chosen = crate::terminal::picker::select(&labels, back, false, |typed| {
+        typed
+            .parse::<usize>()
+            .ok()
+            .filter(|number| (1..=back).contains(number))
+            .map(|number| vec![number - 1])
+    })?;
+    Ok(chosen.into_iter().next().filter(|index| *index < back))
+}
+
 fn choice_index(count: usize) -> Result<Option<usize>> {
-    let mut input = String::new();
-    loop {
-        input.clear();
-        std::io::stdin().read_line(&mut input)?;
-        let value = input.trim();
-        if value.is_empty() {
-            return Ok(None);
-        }
-        if let Ok(number) = value.parse::<usize>()
-            && (1..=count).contains(&number)
-        {
-            return Ok(Some(number - 1));
-        }
-        eprintln!("请输入列表中的编号，或按 Enter 返回。");
-    }
+    choose_label((1..=count).map(|index| format!("仓库 {index}")).collect())
 }
 
 fn search_repository(ctx: &Context, data: &Value) -> Result<Option<String>> {
@@ -537,6 +638,7 @@ fn search_repository_using(
 enum InstallChoice {
     Application(Box<Package>),
     Skill(Box<crate::skills::rules::native_skills::Recipe>),
+    PublicSkills(String),
     Plugin(plugin_install::Offer),
 }
 
@@ -555,6 +657,7 @@ impl InstallChoice {
                 recipe.install_name, recipe.source.repository, recipe.source.commit
             ),
             Self::Plugin(offer) => offer.label(),
+            Self::PublicSkills(source) => format!("安装技能 · {source} · 用户共享目录"),
         }
     }
 }
@@ -590,8 +693,37 @@ fn install_choices(
         }
     }
 
+    if !choices
+        .iter()
+        .any(|choice| matches!(choice, InstallChoice::Skill(_)))
+        && crate::skills::native_skills::has_supported_runner(ctx)
+        && let Some(source) = documented_skill_source(data)
+    {
+        choices.push(InstallChoice::PublicSkills(source));
+    }
     choices.extend(plugin_offers().into_iter().map(InstallChoice::Plugin));
     Ok(choices)
+}
+
+fn documented_skill_source(data: &Value) -> Option<String> {
+    let repository = data["repository"]
+        .as_str()
+        .and_then(crate::policy::public_source::repository_subject)?;
+    data["manualInstall"]
+        .as_array()?
+        .iter()
+        .filter(|entry| entry["manager"] == "Skills CLI")
+        .flat_map(|entry| entry["commands"].as_array().into_iter().flatten())
+        .filter_map(Value::as_str)
+        .find_map(|command| {
+            let words: Vec<_> = command.split_ascii_whitespace().collect();
+            let ["npx", "skills", "add", source] = words.as_slice() else {
+                return None;
+            };
+            let repo = source.split_once('@').map_or(*source, |(repo, _)| repo);
+            repo.eq_ignore_ascii_case(repository)
+                .then(|| (*source).to_owned())
+        })
 }
 
 fn install_selected(ctx: &Context, package: &Package, version: Option<&str>) -> Result<Value> {

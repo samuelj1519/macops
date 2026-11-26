@@ -7,7 +7,7 @@
 | 找到对象并纳入管理 | 运行 `mo APP` 按名称搜索，或进入 `mo app` 浏览。搜索有多个结果时，按类型和 ID 选中目标。运行 `mo app adopt` 按安装范围选择，也可指定 `--id ID`。先预演，再确认。 | 对象详情显示安装范围、版本与登记配方。纳入管理记录已有安装和基线。后续写入资格取决于适配器、可用配方和来源证据。 |
 | 安装、升级、卸载或控制服务 | 用 `mo app APP` 或 `mo app doctor APP` 核对当前状态。用 `mo app refresh` 刷新索引，`mo app outdated` 查可用版本。给维护命令加 `--dry-run` 查看目标与计划版本。用 `mo app service list` 查已声明的服务，再选择 `start` 或 `stop`。 | 单项预演显示版本和已核验的渠道。批量升级需要精确版本的条目单列，结果还没确认时会列出未执行项。 |
 | 管理 chezmoi 配置 | 运行 `mo config enroll` 登记范围。用 `mo config list --refresh` 刷新受管路径，`mo config diff` 查看差异方向。打开 `mo config` 的对象详情可读实际文件和管理源。应用前运行 `mo config apply PATH --dry-run`，再按需应用并核验。 | 区分尚未登记、已登记待刷新、缓存证据和当前核验。预演只使用已有证据时显示目标尚待解析。需将现有普通文件纳入管理可用 `mo config adopt PATH`。停止管理用 `mo config forget ID`，保留实际文件。 |
-| 管理技能、插件或策略 | 用 `mo skill` 查看部署和来源。用 `mo skill market` 找到市场入口，`mo skill plugins list` 检查本地插件绑定。固定技能配方后预演、确认或纳入管理。同步前运行 `mo skill sync --all --dry-run`。 | 分别检查安装、配置启用和会话载入。技能版本检查显示索引证据，批量维护明确列出未执行项。策略的核对入口见 `mo skill policy --help`。 |
+| 管理技能、插件或策略 | 用 `mo skill` 查看部署和来源。用 `mo skill market` 找到市场入口，`mo skill plugins list` 检查本地插件绑定。用 `mo skill install OWNER/REPO` 选择并接管共享技能，或用 `mo skill adopt NAME` 接管已有安装。同步前运行 `mo skill sync --all --dry-run`。 | 分别检查安装、配置启用和会话载入。技能版本检查显示索引证据，批量维护明确列出未执行项。策略的核对入口见 `mo skill policy --help`。 |
 | 查看 Agent 或切换单独配置 | 用 `mo agent` 查看档案，用 `mo agent tools` 核对 CLI 版本、本机固定版本和管理源固定版本。用 `mo agent launch PROFILE --dry-run` 确认档案、工作目录和插件偏好。 | 档案和工具版本分别显示。凭据状态用 `mo agent credential list` 查看。添加或激活凭据时，按界面提供的命令使用原生凭据工具。 |
 | 核对历史，维护目录或搬迁状态 | 用 `mo history OP-ID` 查原操作。用 `mo recover ID --dry-run` 查看原计划摘要，再用 `mo recover ID` 核对结果。用 `mo dirs --roots` 核对目录，清理前先运行 `mo cleanup macops:cache --dry-run`。 | 清理预演区分可清理的自有文件与保留核对项。使用 `mo manifest plan FILE` 核对差异和可重放条件。搬迁旧状态前看 `mo migrate preflight` 的阻断项。沿用原环境和目录参数核对未决操作。 |
 
@@ -16,6 +16,23 @@
 配置刷新受原生过滤规则限制时，结果仍列出已观察路径，同时返回退出码 3 和 `incomplete: true`。批量升级中止后，结构化结果的 `unattempted` 列出后续未执行的目标。
 
 [Agent CLI 升级与核对](agent-upgrade-flow.md) 说明已有操作、配置漂移和升级结果未知时的处理顺序。
+
+## 命令、对象和选项
+
+| 我知道什么 | 对应操作 | 确认之前会看到什么 |
+| --- | --- | --- |
+| 软件名 | `mo app NAME`、`mo app install NAME`、`mo app upgrade NAME`、`mo app uninstall NAME` | 当前版本、位置、来源与维护目标。要接管已有实例，用 `mo app adopt NAME`。存在同名项时，从详情选择唯一实例。 |
+| 软件服务名 | `mo app service list`、`mo app service check NAME`、`mo app start NAME`、`mo app stop NAME` | 服务是否已声明及当前状态。 |
+| 技能名或 GitHub 仓库 | `mo skill install OWNER/REPO`、`mo skill adopt NAME`、`mo skill upgrade NAME`、`mo skill uninstall NAME` | 技能名称、位置和操作结果。仓库后加 `@版本` 可选择标签、分支或提交。 |
+| 插件或 Agent 名称 | `mo recommend OWNER/REPO`、`mo skill market PROFILE`、`mo agent launch PROFILE` | 插件来源、Agent 配置位置、安装后启用状态。多配置安装用空格选择，按回车确认。 |
+| Agent CLI 名称 | `mo agent tools`、`mo agent install codex`、`mo agent upgrade codex`、`mo agent uninstall PROFILE` | CLI 版本与独立配置归档分别说明。只改本机 mise 设置时，使用 Agent CLI 安装或升级命令上的 `--local`。 |
+| 配置文件路径 | `mo config list`、`mo config status PATH`、`mo config diff PATH`、`mo config apply PATH`、`mo config verify PATH` | 区分管理源、本机文件、来自缓存的观察和已核验的变化。 |
+| 需要接管或退出的配置 | `mo config enroll`、`mo config adopt /absolute/path`、`mo config forget PATH`、`mo config reconcile` | 提示写入哪份管理源，保留哪些本机文件，并指出本机或管理源的版本差异。 |
+| 原操作或记录编号 | `mo history NAME`、`mo recover`、`mo recover ID`、`mo config restore ID --dry-run`、`mo agent resume ID --dry-run` | 原操作范围、可否继续和下一步。只有核对或恢复历史才需要编号。 |
+
+日常用 `--dry-run` 查看影响范围，`--verbose` 展开原生工具输出。一次处理多个技能时，可重复 `--only NAME` 或用 `--all`，先预演核对目标。`--project PATH` 用于查项目里的资源。共享技能的安装位置是用户目录，项目安装请沿用来源提供的安装方式。`--json` 和 `--yes` 面向脚本。已有维护文件的操作人员可继续传 `--recipe FILE`，普通安装和接管只需要名称或仓库。
+
+需要确认的终端操作默认选中「取消」。用方向键选择，按 Enter 确定，按 Esc 返回。添加模型密钥、指定文件路径或版本号时，界面才要求输入相应内容。
 
 ## 命令没有完成时
 
@@ -104,3 +121,27 @@ stateDiagram-v2
 "$STATECHART" MainJourneys.tla --config MainJourneys.cfg \
   --view MainJourneys.view.mjs --out main-journeys
 ```
+
+## 共享技能的安装与接管
+
+```mermaid
+stateDiagram-v2
+  [*] --> 核对来源
+  核对来源 --> 核对早前操作: 写入前发现待核对操作
+  核对早前操作 --> 核对来源: 允许继续
+  核对来源 --> 选择技能: 找到可安装成员
+  核对来源 --> 接管预览: 找到兼容的已有安装
+  核对来源 --> 显示下一步: 来源或范围不支持
+  选择技能 --> 确认: 显示来源和实际目录
+  接管预览 --> 确认: 显示将登记的现有安装
+  确认 --> 退出: Esc 或取消
+  确认 --> 核对旧操作: 确认
+  核对旧操作 --> 显示下一步: 原结果还不确定
+  核对旧操作 --> 安装: 原操作已处理
+  核对旧操作 --> 登记: 接管现有技能
+  安装 --> 登记: 通过安装结果核验
+  安装 --> 显示下一步: 失败或结果待核对
+  登记 --> 可维护: 安装结果和维护记录齐全
+```
+
+安装成功后可按技能名或仓库更新。已有版本固定在具体标签或提交时，用 `mo skill upgrade OWNER/REPO@新版本` 指定目标。第一次维护在 mo 之外安装的技能时，可以先核对并接管当前版本。接管保留原文件。整个仓库有多个技能时，部分失败会保留已完成项，并报告未开始的成员。

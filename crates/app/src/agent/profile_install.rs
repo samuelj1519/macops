@@ -27,34 +27,42 @@ pub(crate) struct Selection {
 
 enum Outcome {
     Complete(Value),
+    Skipped(Value),
     Pending { raw: Value, continuation: bool },
 }
 
 impl Outcome {
     fn from_adapter(raw: Value, target: &InstallTarget) -> Self {
         let continuation = crate::policy::cli::continuation(&raw).is_some();
-        if raw["journal"]["phase"] == "succeeded"
-            && raw["targetName"].as_str() == Some(&target.name)
+        let same_target = raw["targetName"].as_str() == Some(&target.name)
             && raw["profile"].is_string()
-            && raw["profile"].as_str() == target.directory.canonical.to_str()
-            && !continuation
-        {
-            return Self::Complete(raw);
+            && raw["profile"].as_str() == target.directory.canonical.to_str();
+        if same_target && !continuation {
+            if raw["journal"]["phase"] == "succeeded" {
+                return Self::Complete(raw);
+            }
+            if raw["skipped"] == true {
+                return Self::Skipped(raw);
+            }
         }
         Self::Pending { raw, continuation }
     }
 }
 
 pub(crate) enum Event<'a> {
-    Reconciled,
+    Reconciled(&'a Value),
     Complete(&'a Value),
+    Skipped(&'a InstallTarget, &'a Value),
     Stopped {
         target: &'a InstallTarget,
         completed: usize,
         remaining: &'a [Selection],
         pending: Option<Pending<'a>>,
     },
-    BatchComplete(usize),
+    BatchComplete {
+        installed: usize,
+        skipped: usize,
+    },
 }
 
 pub(crate) struct Pending<'a> {
@@ -75,16 +83,14 @@ pub(crate) fn execute(
     check_targets(selected)?;
     let activation = confirm()?;
     check_targets(selected)?;
-    if crate::operations::recover_before_write_checked(ctx, None, |journal| {
-        Ok(crate::agent::plugin_target::recovery_target(journal)?
-            .is_some_and(|original| selected.iter().any(|item| *item.target == original)))
-    })?
-    .is_some()
-    {
-        observe(Event::Reconciled);
+    // The original journal owns its destination independently of this selection.
+    if let Some(recovered) = crate::operations::recover_before_write(ctx, None)? {
+        observe(Event::Reconciled(&recovered.result));
     }
 
     let mut results = Vec::new();
+    let mut completed = 0;
+    let mut skipped = 0;
     for (index, item) in selected.iter().enumerate() {
         let target = item.target.as_ref();
         let installed = (|| {
@@ -99,6 +105,12 @@ pub(crate) fn execute(
         match installed {
             Ok(Outcome::Complete(raw)) => {
                 observe(Event::Complete(&raw));
+                completed += 1;
+                results.push(raw);
+            }
+            Ok(Outcome::Skipped(raw)) => {
+                observe(Event::Skipped(target, &raw));
+                skipped += 1;
                 results.push(raw);
             }
             Ok(Outcome::Pending {
@@ -107,7 +119,7 @@ pub(crate) fn execute(
             }) => {
                 observe(Event::Stopped {
                     target,
-                    completed: results.len(),
+                    completed,
                     remaining,
                     pending: Some(Pending {
                         raw: &raw,
@@ -127,7 +139,7 @@ pub(crate) fn execute(
             Err(error) => {
                 observe(Event::Stopped {
                     target,
-                    completed: results.len(),
+                    completed,
                     remaining,
                     pending: None,
                 });
@@ -136,10 +148,17 @@ pub(crate) fn execute(
         }
     }
     if selected.len() == 1 {
-        return Ok(results.pop().unwrap_or_default());
+        let mut result = results.pop().unwrap_or_default();
+        if skipped != 0 {
+            result["incomplete"] = Value::Bool(true);
+        }
+        return Ok(result);
     }
-    observe(Event::BatchComplete(results.len()));
-    Ok(json!({"results":results}))
+    observe(Event::BatchComplete {
+        installed: completed,
+        skipped,
+    });
+    Ok(json!({"results":results, "incomplete":skipped != 0}))
 }
 
 fn check_targets(selected: &[Selection]) -> Result<()> {

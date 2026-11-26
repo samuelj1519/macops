@@ -122,7 +122,7 @@ When an interactive short-name lookup has no registered install candidate, macop
 
 When a name matches an eligible npm, Homebrew, or mise recipe, the interactive recommendation can offer a versioned installation plan. Homebrew confirms the exact formula, scope, and target version. A registered mise recipe confirms the requested version and its user configuration effect before invoking native global activation. macops checks possible configuration targets against chezmoi ownership before the native command starts.
 
-Eligible Codex and Claude Code marketplace recommendations can install into an existing or new profile after confirmation. The verified Apple Silicon versions are Codex 0.170.0 and Claude Code 2.1.328. The plan binds marketplace and plugin manifests to one public Git commit. At confirmation, enter `yes` to install and enable the plugin or `disabled` to install it and keep it disabled. The result shows the destination profile. Other proposals remain advisory.
+Eligible Codex and Claude Code marketplace recommendations can install into an existing or new profile after confirmation. The verified Apple Silicon versions are Codex 0.170.0 and Claude Code 2.1.328. The plan binds marketplace and plugin manifests to one public Git commit. At confirmation, choose whether to install and enable the plugin or install it disabled. The result shows the destination profile. Other proposals remain advisory.
 
 If a native stage needs attention, use `mo recover ID` to verify its original result or finish publishing its receipt. Recovery keeps the original operation identity and never starts an installer.
 
@@ -157,24 +157,19 @@ Explicit native apply and query operations use the owner's chezmoi configuration
 
 ## Skills and agent profiles
 
-For supported GitHub skills, macops stores a recipe and calls Skills CLI. The recipe specifies the repository, commit, member, client, installation name, and any manual-only or derived content policy.
-
-Use `--recipe` with the absolute path to a local macops recipe JSON file. For a GitHub repository such as a multi-skill kit, run `mo recommend OWNER/REPO` to find installation instructions for your client. When macops cannot build an executable plan, it can show recognized manual commands from the pinned repository documentation or point you to the instructions.
+Install public GitHub skills by repository name. Select the members, review the shared user directory, and confirm with the arrow keys and Enter. macops registers each installation after it verifies the result.
 
 ```sh
-mo --dry-run skill install --recipe /absolute/path/recipe.json
-mo skill install --recipe /absolute/path/recipe.json
-mo skill adopt NAME --recipe /absolute/path/recipe.json
-mo skill NAME
-mo skill refresh NAME
-mo skill outdated NAME
-mo --dry-run skill upgrade NAME
-mo skill uninstall NAME
+mo skill install owner/repo --dry-run
+mo skill install owner/repo
+mo skill install owner/repo@v1.2.0
+mo skill upgrade owner/repo
+mo skill upgrade owner/repo@v1.2.0
+mo skill adopt NAME
+mo skill uninstall NAME --dry-run
 ```
 
-Member and client selection use native installation arguments. Recipe transformations apply at installation or maintenance. Skills CLI owns the native installation record. macops owns its recipe and derived assets. Choose a unique inventory ID when a name has multiple sources. A batch upgrade records per-item results and lists remaining recipes in `unattempted` when an item fails or has an unknown outcome.
-
-Interactive `mo recommend NAME` can offer a matching, uninstalled Skills CLI recipe from the registered recipe book. Confirm the fixed source commit, Codex user scope, and manual-trigger setting. Skills CLI installs to a shared directory that other compatible agents may also discover.
+Use `mo skill adopt NAME` or a repository name to register a compatible existing Skills CLI installation without changing its files. Use `@version` to choose a tag or branch. Skills installed in the shared user directory can be read by compatible agents. Run `mo recommend OWNER/REPO` for native plugins and project installation instructions. Existing automation can still supply an absolute `--recipe` file.
 
 Use `mo skill plugins list` and `mo skill plugins check RECIPE` to inspect plugin evidence. Plugin writes follow the [native plugin contracts](docs/native-plugin-recipes.md). The verified reinstall path covers an enabled local Codex plugin with the same source and version. Claude profiles with different model settings appear as separate entries.
 

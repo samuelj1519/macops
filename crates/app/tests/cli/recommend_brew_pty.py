@@ -22,7 +22,7 @@ def read_until(phrase):
 try:
  if q.get('mode') == 'batch-discovery-cancel':
   read_until('首次信任此具体Native程序及查询范围')
-  read_until('输入 yes')
+  read_until('确认执行')
   os.write(master, b'n\n')
   read_until('已取消')
   assert p.wait(timeout=10) == 3
@@ -35,10 +35,10 @@ try:
   read_until('u 升级')
   os.write(master,key.encode())
   read_until('确认已核验的Native作用范围')
-  read_until('输入 yes')
+  read_until('确认执行')
   assert b'foo' in buf and b'native-cellar' in buf
   assert not pathlib.Path(q['mutated']).exists()
-  os.write(master,b'yes\n' if q['approved'] else b'n\n')
+  os.write(master,b'\x1b[B\r' if q['approved'] else b'\r')
   read_until(result)
   os.write(master,b'q')
   assert p.wait(timeout=10) in (0,3),buf.decode(errors='replace')
@@ -59,22 +59,22 @@ try:
  if q['mode'] in ('stale','trust-stale'):
   if q['mode']=='trust-stale':
    os.write(master,b'1\n')
-   read_until('输入 yes')
+   read_until('确认执行')
   path=pathlib.Path(q['catalog'])
   catalog=json.loads(path.read_text())
   catalog['packages'][0]['provider']['recipe_ref']='changed-after-selection'
   path.write_text(json.dumps(catalog))
-  os.write(master,b'yes\n' if q['mode']=='trust-stale' else b'1\n')
+  os.write(master,b'\x1b[B\r' if q['mode']=='trust-stale' else b'1\n')
   read_until('plan_stale')
   assert p.wait(timeout=10)==3
   assert not pathlib.Path(q['events']).exists()
   sys.exit(0)
  os.write(master,b'1\n')
- read_until('输入 yes')
+ read_until('确认执行')
  assert not pathlib.Path(q['mutated']).exists()
  events=pathlib.Path(q['events']).read_text().splitlines()
  assert len(events)==1 and json.loads(events[0])[0]=='ruby',events
- os.write(master,b'yes\n' if q['approved'] else b'n\n')
+ os.write(master,b'\x1b[B\r' if q['approved'] else b'\r')
  if q['approved']:
   read_until('fixture brew stdout progress')
   read_until('fixture brew stderr progress')

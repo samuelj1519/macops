@@ -853,6 +853,102 @@ fn repository_review_preserves_a_complete_claude_offer_and_drops_partial_evidenc
 }
 
 #[test]
+fn documented_quoted_claude_release_is_verified_at_its_immutable_commit() -> TestResult {
+    use crate::{
+        agent::claude_install_source::{MARKET, PLUGIN},
+        policy::source_git::ObjectId,
+    };
+    let content = concat!(
+        "```sh\nclaude plugin marketplace add \"example/fixture#v1.11.0\"\n",
+        "claude plugin install plugin@market\n```\n",
+    );
+    let docs = |content: &str| -> Result<RepositoryEvidence> {
+        Ok(RepositoryEvidence {
+            repository: "example/fixture".into(),
+            commit: ObjectId::parse(&"b".repeat(40))?,
+            default_branch: None,
+            documents: vec![
+                Document {
+                    path: "README.md".into(),
+                    content: content.into(),
+                },
+                Document {
+                    path: "INSTALL.md".into(),
+                    content: content.into(),
+                },
+            ],
+        })
+    };
+    let release_commit = "c".repeat(40);
+    let tag_object = "d".repeat(40);
+    for (annotated, issue, success) in [
+        (false, "", true),
+        (true, "", true),
+        (false, "wrong-ref", false),
+        (true, "wrong-tag-object", false),
+        (true, "non-commit", false),
+        (true, "other-plugin", false),
+    ] {
+        let evidence = docs(content)?;
+        let result = claude_marketplace(&evidence, &mut |url| {
+            if url.ends_with("/git/ref/tags/v1.11.0") {
+                return Ok(json!({
+                    "ref":if issue == "wrong-ref" {"refs/heads/v1.11.0"} else {"refs/tags/v1.11.0"},
+                    "object":{"type":if annotated {"tag"} else {"commit"},
+                              "sha":if annotated {&tag_object} else {&release_commit}}
+                }));
+            }
+            if url.ends_with(&format!("/git/tags/{tag_object}")) {
+                return Ok(json!({
+                    "sha":if issue == "wrong-tag-object" {&release_commit} else {&tag_object},
+                    "object":{"type":if issue == "non-commit" {"tree"} else {"commit"},"sha":release_commit}
+                }));
+            }
+            assert!(url.ends_with(&format!("?ref={release_commit}")), "{url}");
+            let plugin = if issue == "other-plugin" {
+                "other"
+            } else {
+                "plugin"
+            };
+            let (path, bytes) = if url.contains(MARKET) {
+                (
+                    MARKET,
+                    json!({"name":"market","plugins":[{"name":plugin,"source":"./"}]}),
+                )
+            } else {
+                assert!(url.contains(PLUGIN), "{url}");
+                (PLUGIN, json!({"name":plugin,"version":"1.11.0"}))
+            };
+            Ok(json!({"path":path,"type":"file","encoding":"base64",
+                "content":base64::engine::general_purpose::STANDARD.encode(bytes.to_string())}))
+        });
+        assert_eq!(result.is_some(), success, "{issue}");
+        if let Some(offer) = result {
+            assert_eq!(offer.commit, release_commit);
+            assert_eq!(offer.version, "1.11.0");
+        }
+    }
+    assert_eq!(
+        documented_install_options(&docs(content)?).options[0]["commands"][0],
+        "claude plugin marketplace add \"example/fixture#v1.11.0\""
+    );
+    for ambiguous in [
+        content.to_owned() + &content.replace("v1.11.0", "v1.10.0"),
+        content.to_owned() + "\nclaude plugin marketplace add example/fixture\n",
+        content.replace("v1.11.0", "v1.11.0;whoami"),
+        content.replace("plugin@market", "plugin@market --scope project"),
+        content.replace("example/fixture", "other/repo"),
+        content.replace("```sh", "```text"),
+    ] {
+        assert!(
+            claude_marketplace(&docs(&ambiguous)?, &mut |_| panic!("must not fetch")).is_none(),
+            "{ambiguous}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn a_repository_review_exposes_pinned_manual_commands_without_an_execution_plan() -> TestResult {
     use clap::Parser as _;
     let home = tempfile::tempdir_in("/private/tmp")?;
@@ -945,7 +1041,7 @@ fn documented_commands_stay_in_shell_fences_and_claude_steps_stay_together() -> 
         }],
     };
     assert_eq!(
-        documented_install_options(&evidence),
+        documented_install_options(&evidence).options,
         [json!({"manager":"Skills CLI","document":0,
                "commands":["npx skills add example/kit --agent codex --copy"]})]
     );

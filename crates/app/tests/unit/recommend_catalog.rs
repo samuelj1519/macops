@@ -23,9 +23,9 @@ fn advisory_recommendation_with_documented_model_suggestions_does_not_choose_a_t
             "scope":"user", "summary":"advisory suggestion", "document":0
         }]},
     });
-    assert_eq!(choose(&ctx, advice.clone())?, advice);
+    assert_eq!(choose(&ctx, advice.clone(), false)?, advice);
     let unavailable = json!({"query":"fixture","model":{"status":"keychain-unavailable"}});
-    assert_eq!(choose(&ctx, unavailable.clone())?, unavailable);
+    assert_eq!(choose(&ctx, unavailable.clone(), false)?, unavailable);
     assert!(!ctx.state.exists());
     Ok(())
 }
@@ -161,7 +161,7 @@ fn advisory_repository_candidates_keep_their_citations_and_grant_no_execution() 
         "reason":"fixture remains advisory",
         "canExecute":false,"persistentWrites":false,
     });
-    assert_eq!(choose(&ctx, data.clone())?, data);
+    assert_eq!(choose(&ctx, data.clone(), false)?, data);
     assert!(!ctx.state.exists());
     assert!(!ctx.config.exists());
     Ok(())
@@ -184,6 +184,7 @@ fn local_install_evidence_remains_available_when_silent_keychain_access_fails() 
         json!({"query":"owner/release","repository":"owner/release","evidenceStatus":"public-commit",
             "reason":"synthetic_partial_source","documents":[{"path":"README.md","url":"https://github.com/owner/release"}],
             "model":{"status":"keychain-unavailable","candidates":[]},"persistentWrites":false}),
+        false,
     )?;
     assert_eq!(result["model"]["status"], "keychain-unavailable");
     assert_eq!(result["documents"][0]["path"], "README.md");
@@ -193,7 +194,7 @@ fn local_install_evidence_remains_available_when_silent_keychain_access_fails() 
         {"name":"unlinked","kind":"plugin","adapter":"codex-plugin","scope":"global","version":null,"summary":"fixture","document":7},
         {"name":"unindexed","kind":"plugin","adapter":"claude-plugin","scope":"global","version":null,"summary":"fixture","document":null},
     ]});
-    assert_eq!(choose(&ctx, suggested.clone())?, suggested);
+    assert_eq!(choose(&ctx, suggested.clone(), true)?, suggested);
     assert!(!ctx.state.exists());
     assert!(dir.path().exists());
     Ok(())
@@ -219,21 +220,77 @@ fn recommendation_explains_manual_installation_when_no_plan_can_run() {
         "documents":[{"path":"README.md"}, {"path":"INSTALL.md"}],
         "manualInstall":[{"manager":"Skills CLI","document":0,"commands":["npx skills add example/kit"]}],
     });
-    let text = manual_install_text(&data);
-    assert!(text.starts_with("错误表现") && text.contains("错误原因") && text.contains("正确用法"));
+    let text = recommendation_sections(&data, &[]);
+    assert!(text.starts_with("手动安装") && !text.contains("错误表现"));
     assert!(text.contains("Skills CLI · README.md") && text.contains("npx skills add example/kit"));
     let fallback =
-        manual_install_text(&json!({"documents":[{"path":"README.md"}, {"path":"INSTALL.md"}]}));
+        no_install_plan(&json!({"documents":[{"path":"README.md"}, {"path":"INSTALL.md"}]}));
+    assert!(
+        fallback.starts_with("错误表现")
+            && fallback.contains("错误原因")
+            && fallback.contains("正确用法")
+    );
     assert!(fallback.contains("打开上面的 INSTALL.md"));
-    let limited = manual_install_text(&json!({"reason":"recommend_github_rate_limited"}));
+    let limited = no_install_plan(&json!({"reason":"recommend_github_rate_limited"}));
     assert!(
         limited.contains("GitHub 匿名 API 查询额度已用完")
             && limited.contains("等 GitHub 查询额度恢复后")
     );
-    let no_docs = manual_install_text(
+    let no_docs = no_install_plan(
         &json!({"repository":"example/kit","evidenceStatus":"documents-unavailable"}),
     );
     assert!(no_docs.contains("打开 https://github.com/example/kit"));
+}
+
+#[test]
+fn recommendations_group_verified_profiles_and_manual_agents_without_model_duplicates() -> TestResult
+{
+    let commit = crate::policy::source_git::ObjectId::parse(&"d".repeat(40))?;
+    let offer = crate::agent::claude_install_source::Offer::identify(
+        "example/kit",
+        &commit,
+        br#"{"name":"local","plugins":[{"name":"toolkit","source":"./"}]}"#,
+        br#"{"name":"toolkit","version":"1.11.0"}"#,
+    )?;
+    let data = json!({
+        "documents": [
+            {"path":"README.md","url":"https://github.com/example/kit/blob/fixed/README.md"},
+            {"path":"README.md","url":"https://github.com/example/kit/blob/fixed/README.md"},
+            {"path":"INSTALL.md","url":"https://github.com/example/kit/blob/fixed/INSTALL.md"}
+        ],
+        "model":{"candidates":[{"summary":"repeated model explanation"},{"summary":"repeated model explanation"}]},
+        "manualInstall":[
+            {"manager":"Skills CLI","document":0,"commands":["npx skills add example/kit@v1.11.0"]},
+            {"manager":"Claude Code","document":2,"commands":["claude plugin marketplace add example/kit#v1.11.0","claude plugin install toolkit@local"]}
+        ]
+    });
+    let summary = recommendation_sections(
+        &data,
+        &[InstallChoice::Plugin(plugin_install::Offer::Claude(
+            Box::new(offer),
+            "/fixture/claude".into(),
+        ))],
+    );
+    assert!(summary.starts_with("可直接安装\n  1 toolkit@local · Claude Code · 1.11.0"));
+    assert_eq!(
+        summary
+            .matches("https://github.com/example/kit/blob/fixed/README.md")
+            .count(),
+        1
+    );
+    assert_eq!(
+        summary
+            .matches("npx skills add example/kit@v1.11.0")
+            .count(),
+        1
+    );
+    assert!(summary.contains("多选客户端"));
+    assert!(!summary.contains("repeated model explanation"));
+    assert!(!summary.contains("claude plugin install"));
+    let fallback = recommendation_sections(&data, &[]);
+    assert!(fallback.contains("claude plugin install toolkit@local"));
+    assert!(!fallback.contains("可直接安装"));
+    Ok(())
 }
 
 #[test]

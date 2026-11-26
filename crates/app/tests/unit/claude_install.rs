@@ -68,6 +68,14 @@ fn mock_native(input: &Frozen) -> Result<()> {
                 fs::create_dir_all(path.parent().ok_or_else(invalid)?)?;
                 fs::write(path, bytes)?;
             }
+            if p.host_home.join("large-source").exists() {
+                for file in fs::read_dir(p.checkout().join("fixtures"))? {
+                    let file = file?;
+                    let parent = payload.join("fixtures").join(file.file_name());
+                    fs::create_dir_all(&parent)?;
+                    fs::copy(file.path().join("data"), parent.join("data"))?;
+                }
+            }
             let enabled = !p.host_home.join("default-disabled").exists();
             settings["enabledPlugins"] = json!({id.as_str():enabled});
             json_file(
@@ -126,7 +134,9 @@ const FIXTURE: NativeIo = NativeIo {
         let outcome = (FIXTURE.outcome)(journal)?;
         if clean(&outcome) {
             mock_native(&input)?;
-            if !host.join("missing-after").exists() {
+            if !host.join("missing-after").exists()
+                && !host.join(format!("missing-after-{step}")).exists()
+            {
                 record_after(journal, argv, &outcome, &FIXTURE)?;
             }
         }
@@ -270,6 +280,8 @@ fn choosing_another_profile_for_the_same_offer_does_not_reuse_the_first_installa
     )?;
     let first_settings = ctx.home.join(".claude-glm/settings.json");
     let unchanged = fs::read(&first_settings)?;
+    let native_id = offer.native_id();
+    let repository = crate::policy::source_git::Repository::parse(&offer.repository)?;
     let second = install_with_target(
         &ctx,
         offer,
@@ -291,6 +303,28 @@ fn choosing_another_profile_for_the_same_offer_does_not_reuse_the_first_installa
         fs::read_to_string(ctx.home.join("native-calls"))?,
         "market\nplugin\nmarket\nplugin\n"
     );
+    let first_dir = ctx.home.join(".claude-glm");
+    let mut reader = ctx;
+    reader.scope.paths.insert(
+        "NPM_CONFIG_PREFIX".into(),
+        Some(reader.home.join("unrelated-npm-prefix")),
+    );
+    let record = |profile: &Path| profile.join("plugins/installed_plugins.json");
+    let registered = |profile: &Path| {
+        crate::agent::plugin_marketplaces::registered_github_repository(
+            &reader,
+            "claude-plugin",
+            &record(profile),
+            &native_id,
+        )
+    };
+    assert_eq!(registered(&first_dir)?, Some(repository.clone()));
+    assert_eq!(registered(&second_dir)?, Some(repository));
+    fs::copy(
+        first_dir.join("plugins/known_marketplaces.json"),
+        second_dir.join("plugins/known_marketplaces.json"),
+    )?;
+    assert!(registered(&second_dir)?.is_none());
     Ok(())
 }
 
@@ -518,7 +552,6 @@ fn original_failure_can_be_closed_but_ambiguous_evidence_stays_pending() -> Test
     for (marker, expected) in [
         ("unknown-exit", Phase::Unknown),
         ("failed-exit", Phase::Failed),
-        ("missing-after", Phase::Unknown),
     ] {
         let (_temp, ctx, offer, binary) = fixture()?;
         fs::write(ctx.home.join(marker), b"")?;
@@ -541,6 +574,167 @@ fn original_failure_can_be_closed_but_ambiguous_evidence_stays_pending() -> Test
         );
         assert!(store.receipts()?.installations.is_empty());
     }
+    Ok(())
+}
+
+#[test]
+fn recovery_rebuilds_only_absent_evidence_for_an_unchanged_clean_stage() -> TestResult {
+    for issue in ["none", "changed-settings", "malformed-proof"] {
+        let (_temp, ctx, offer, binary) = fixture()?;
+        fs::write(ctx.home.join("missing-after"), b"")?;
+        let attempt = install_using(&ctx, offer, binary, true, &FIXTURE)?;
+        assert_eq!(attempt["journal"]["phase"], "unknown");
+        let store = Store::lock(&ctx)?;
+        let mut active: Journal = Store::read(&store.root, "active.json")?.ok_or("active")?;
+        let state = physical(&store.path)?;
+        let saved = frozen(&active, &state)?;
+        let after_path = store.path.join(sidecar(&active, "after"));
+        match issue {
+            "changed-settings" => fs::write(saved.prepared.profile().join("settings.json"), "{}")?,
+            "malformed-proof" => fs::write(&after_path, b"{}")?,
+            _ => (),
+        }
+        let report = recover_using(&ctx, &store, &mut active, false, false, &FIXTURE)?;
+        assert_eq!(
+            active.phase,
+            if issue == "none" {
+                Phase::Succeeded
+            } else {
+                Phase::Unknown
+            }
+        );
+        assert_eq!(report["continuationRequired"], issue == "none");
+        if issue == "malformed-proof" {
+            assert_eq!(fs::read(after_path)?, b"{}");
+        } else {
+            assert_eq!(after_path.exists(), issue == "none");
+        }
+        assert_eq!(
+            fs::read_to_string(ctx.home.join("native-calls"))?,
+            "market\n"
+        );
+        assert!(store.receipts()?.installations.is_empty());
+    }
+    Ok(())
+}
+
+#[test]
+fn recovery_closes_a_proven_private_native_failure_without_running_it_again() -> TestResult {
+    for reserved in [false, true] {
+        let (_temp, ctx, offer, binary) = fixture()?;
+        fs::write(ctx.home.join("failed-exit"), b"")?;
+        let result = install_using(&ctx, offer, binary, true, &FIXTURE)?;
+        assert_eq!(result["journal"]["phase"], "unknown");
+        let store = Store::lock(&ctx)?;
+        let mut original = Store::read(&store.root, "active.json")?.ok_or("active")?;
+        if reserved {
+            Store::atomic_new(&store.root, &sidecar(&original, "adoption"), &json!({}))?;
+        }
+        let report = recover_using(&ctx, &store, &mut original, false, false, &FIXTURE)?;
+        assert_eq!(
+            report["journal"]["phase"],
+            if reserved { "unknown" } else { "failed" }
+        );
+        assert_eq!(
+            fs::read_to_string(ctx.home.join("native-calls"))?,
+            "market\n"
+        );
+        assert!(store.receipts()?.installations.is_empty());
+    }
+    Ok(())
+}
+
+#[test]
+fn a_large_pinned_plugin_is_installable_into_a_separate_configuration() -> TestResult {
+    let (_temp, ctx, offer, binary) = fixture()?;
+    fs::write(ctx.home.join("large-source"), b"")?;
+    let native = NativeIo {
+        checkout: |offer, root| {
+            let paths: Vec<_> = (0..1001).map(|i| format!("fixtures/{i}/data")).collect();
+            let mut files = FILES.to_vec();
+            files.extend(paths.iter().map(|path| (path.as_str(), false, SKILL)));
+            source::materialize(offer, root, &files)
+        },
+        ..FIXTURE
+    };
+    let result = install_using(&ctx, offer, binary, true, &native)?;
+    assert_eq!(result["journal"]["phase"], "succeeded");
+    let capability = result["journal"]["plan"]["package"]["id"]
+        .as_str()
+        .ok_or("receipt package")?;
+    assert!(
+        crate::catalog::target::receipts(&ctx)?
+            .installations
+            .contains_key(capability)
+    );
+    assert!(
+        !crate::software::resource_software::recorded(&ctx)?
+            .iter()
+            .any(|app| app.aliases.iter().any(|alias| alias == capability))
+    );
+    let observed = managed_profiles(&ctx)?;
+    assert_eq!(observed.len(), 1);
+    assert_eq!(
+        fs::read_to_string(ctx.home.join("native-calls"))?,
+        "market\nplugin\n"
+    );
+    assert!(
+        observed[0]
+            .1
+            .join("plugins/cache/fixture-market/fixture-plugin/1.0.0/fixtures/1000/data")
+            .is_file()
+    );
+    Ok(())
+}
+
+#[test]
+fn recovers_an_old_install_conflict_and_leaves_the_existing_plugin_untouched() -> TestResult {
+    let (_temp, ctx, offer, binary) = fixture()?;
+    let profile = ctx.home.join(".claude-glm");
+    let target = crate::agent::resource_agents::profile_roots(&ctx)?
+        .first()
+        .map(|item| crate::agent::resource_agents::InstallTarget::capture(&ctx, item))
+        .ok_or("profile")??;
+    fs::write(ctx.home.join("missing-after-plugin"), b"")?;
+    let result = install_with_target(
+        &ctx,
+        offer.clone(),
+        binary.clone(),
+        true,
+        &FIXTURE,
+        Some(target.clone()),
+    )?;
+    assert_eq!(result["journal"]["phase"], "unknown");
+    let installed = profile.join("plugins/installed_plugins.json");
+    fs::create_dir(profile.join("plugins"))?;
+    json_file(
+        &installed,
+        &json!({"version":2,"plugins":{offer.native_id():[
+            {"version":"0.9.0","scope":"user"}
+        ]}}),
+    )?;
+    json_file(
+        &profile.join("plugins/known_marketplaces.json"),
+        &json!({offer.marketplace.clone():{"source":{"source":"directory","path":"/fixture/original-market"}}}),
+    )?;
+    let before = fs::read(&installed)?;
+    let settings = fs::read(profile.join("settings.json"))?;
+    {
+        let store = Store::lock(&ctx)?;
+        let mut original = Store::read(&store.root, "active.json")?.ok_or("active")?;
+        let report = recover_using(&ctx, &store, &mut original, false, false, &FIXTURE)?;
+        assert_eq!(report["journal"]["phase"], "failed");
+        assert!(original.message.contains("0.9.0"));
+        assert!(original.message.contains("原安装方式"));
+    }
+    let repeat = install_with_target(&ctx, offer, binary, true, &FIXTURE, Some(target))?;
+    assert_eq!(repeat["skipped"], true);
+    assert_eq!(fs::read(&installed)?, before);
+    assert_eq!(fs::read(profile.join("settings.json"))?, settings);
+    assert_eq!(
+        fs::read_to_string(ctx.home.join("native-calls"))?,
+        "market\nplugin\n"
+    );
     Ok(())
 }
 

@@ -373,16 +373,16 @@ fn existing_profile_picker_keeps_unregistered_rows_read_only_until_confirmation(
         crate::cli::Cli::try_parse_from(["macops", "--home", home.to_str().ok_or("home")?, "app"])?;
     let ctx = Context::from_cli(&args, &mut vec![])?;
     let choose = |index: Option<usize>| {
-        move |count| {
-            assert_eq!(count, 3);
+        move |labels: &[String]| {
+            assert_eq!(labels.len(), 4);
             Ok(index.into_iter().collect())
         }
     };
-    assert!(choose_plugin_targets_using(&ctx, "claude", choose(None))?.is_empty());
+    assert!(choose_plugin_targets_using(&ctx, "claude", None, choose(None))?.is_empty());
     let Some(Destination::Existing(Selection {
         target,
         registered: false,
-    })) = choose_plugin_targets_using(&ctx, "claude", choose(Some(1)))?.pop()
+    })) = choose_plugin_targets_using(&ctx, "claude", None, choose(Some(1)))?.pop()
     else {
         return Err("expected second existing profile".into());
     };
@@ -392,13 +392,13 @@ fn existing_profile_picker_keeps_unregistered_rows_read_only_until_confirmation(
     let Some(Destination::Existing(Selection {
         target: first,
         registered: true,
-    })) = choose_plugin_targets_using(&ctx, "claude", choose(Some(0)))?.pop()
+    })) = choose_plugin_targets_using(&ctx, "claude", None, choose(Some(0)))?.pop()
     else {
         return Err("registered profile missing".into());
     };
     assert_eq!(first, target);
     assert!(matches!(
-        choose_plugin_targets_using(&ctx, "claude", choose(Some(2)))?.pop(),
+        choose_plugin_targets_using(&ctx, "claude", None, choose(Some(2)))?.pop(),
         Some(Destination::Independent)
     ));
     assert!(!home.join(".claude-zen/plugins").exists());
@@ -623,7 +623,7 @@ fn multi_profile_install_preserves_a_pending_later_target_and_stops_after_incomp
 }
 
 #[test]
-fn multi_profile_install_checks_approvals_and_never_recovers_an_unselected_profile() -> TestResult {
+fn multi_profile_install_checks_approvals_then_recovers_original_profile() -> TestResult {
     let (_temporary, ctx, _, id) =
         crate::test_support::PluginTargetFixture::pending_for_recommendation(
             "claude",
@@ -642,18 +642,56 @@ fn multi_profile_install_checks_approvals_and_never_recovers_an_unselected_profi
         |_, _| panic!("unexpected write"),
     );
     assert_eq!(cancelled.err().ok_or("must cancel")?.code, "cancelled");
-    let blocked = install_profiles_using(
+    let journal = crate::operations::store::active(&ctx)?.ok_or("active")?;
+    assert_eq!(journal.id, id);
+    assert_eq!(journal.phase, crate::operations::store::Phase::Prepared);
+    assert!(!registry.exists());
+    let result = install_profiles_using(
         &ctx,
         &batch_offer()?,
         &selections,
         || Ok(InitialActivation::Enabled),
-        |_, _| panic!("unexpected write"),
-    );
-    assert_eq!(blocked.err().ok_or("must block")?.code, "recovery_required");
-    assert!(!registry.exists());
-    let journal = crate::operations::store::active(&ctx)?.ok_or("active")?;
+        |_, target| Ok(installed_fixture(&target)),
+    )?;
+    assert_eq!(result["results"].as_array().ok_or("batch")?.len(), 2);
+    let journal = crate::operations::validated_recovery_journal(&ctx, &id)?;
     assert_eq!(journal.id, id);
-    assert_eq!(journal.phase, crate::operations::store::Phase::Prepared);
+    assert_eq!(journal.phase, crate::operations::store::Phase::Succeeded);
+    Ok(())
+}
+
+#[test]
+fn a_skipped_profile_leaves_the_next_profile_installable() -> TestResult {
+    let (_temporary, ctx, _, _) =
+        crate::test_support::PluginTargetFixture::pending_for_recommendation(
+            "claude",
+            "old offer".into(),
+        )?;
+    let selections = [
+        add_batch_target(&ctx, "existing")?,
+        add_batch_target(&ctx, "new")?,
+    ];
+    let mut attempted = vec![];
+    let result = install_profiles_using(
+        &ctx,
+        &batch_offer()?,
+        &selections,
+        || Ok(InitialActivation::Enabled),
+        |_, target| {
+            attempted.push(target.name.clone());
+            if target.name == "claude:existing" {
+                return Ok(json!({
+                    "skipped":true,"targetName":target.name,"profile":target.directory.canonical,
+                    "message":"已安装原插件"
+                }));
+            }
+            Ok(installed_fixture(&target))
+        },
+    )?;
+    assert_eq!(attempted, ["claude:existing", "claude:new"]);
+    assert_eq!(result["incomplete"], true);
+    assert_eq!(result["results"][0]["skipped"], true);
+    assert_eq!(result["results"][1]["journal"]["phase"], "succeeded");
     Ok(())
 }
 
@@ -833,8 +871,9 @@ fn multi_selection_input_reprompts_for_invalid_numbers_and_cancels_on_empty_line
     if std::env::var_os(CHILD).is_some() {
         use clap::Parser as _;
 
-        assert_eq!(target_numbers(8)?, [2, 4]);
-        assert_eq!(target_numbers(8)?, [] as [usize; 0]);
+        let labels = vec![String::new(); 9];
+        assert_eq!(target_numbers(&labels)?, [2, 4]);
+        assert_eq!(target_numbers(&labels)?, [] as [usize; 0]);
         assert_eq!(confirm_initial_activation()?, InitialActivation::Enabled);
         assert_eq!(confirm_initial_activation()?, InitialActivation::Disabled);
         assert_eq!(
@@ -982,7 +1021,7 @@ fn a_batch_rechecks_each_directory_before_registering_it() -> TestResult {
 }
 
 #[test]
-fn choosing_a_new_configuration_cannot_recover_into_an_existing_one() -> TestResult {
+fn choosing_a_new_configuration_recovers_an_existing_one_only_after_confirmation() -> TestResult {
     let (_temporary, ctx, target, id) =
         crate::test_support::PluginTargetFixture::pending_for_recommendation(
             "claude",
@@ -1001,27 +1040,27 @@ fn choosing_a_new_configuration_cannot_recover_into_an_existing_one() -> TestRes
         unconfirmed.err().ok_or("must honor cancellation")?.code,
         "cancelled"
     );
-    let result = run_using(
+    assert_eq!(std::fs::read(&settings)?, original);
+    assert_eq!(
+        crate::operations::store::active(&ctx)?
+            .ok_or("active")?
+            .phase,
+        crate::operations::store::Phase::Prepared
+    );
+    let result = install_isolated_using(
         &ctx,
         &batch_offer()?,
-        |_| Ok(vec![Destination::Independent]),
         || Ok(InitialActivation::Enabled),
-        |_, _| panic!("cannot install into an existing configuration"),
-    );
-    assert_eq!(
-        result
-            .err()
-            .ok_or("cannot take over another operation")?
-            .code,
-        "recovery_required"
-    );
+        |_| Ok(json!({"mode":"fixture-new-isolated-install"})),
+    )?;
+    assert_eq!(result["mode"], "fixture-new-isolated-install");
     let pending =
         crate::operations::store::active(&ctx)?.ok_or("original operation must remain active")?;
     assert_eq!(pending.id, id);
-    assert_eq!(pending.phase, crate::operations::store::Phase::Prepared);
-    assert_eq!(std::fs::read(settings)?, original);
+    assert_eq!(pending.phase, crate::operations::store::Phase::Succeeded);
+    assert_ne!(std::fs::read(settings)?, original);
     assert!(
-        !target
+        target
             .directory
             .canonical
             .join("plugins/cache/fixture-market/item/1.0/SKILL.md")
@@ -1033,7 +1072,7 @@ fn choosing_a_new_configuration_cannot_recover_into_an_existing_one() -> TestRes
 #[test]
 fn selecting_a_new_offer_does_not_reuse_the_old_receipt() -> TestResult {
     use std::os::unix::fs::PermissionsExt as _;
-    let (_temporary, ctx, target, _) =
+    let (_temporary, ctx, target, original_id) =
         crate::test_support::PluginTargetFixture::pending_for_recommendation(
             "claude",
             "old offer".into(),
@@ -1051,16 +1090,16 @@ fn selecting_a_new_offer_does_not_reuse_the_old_receipt() -> TestResult {
         |_| Ok(vec![Destination::Existing(existing(&target, true))]),
         || Ok(InitialActivation::Enabled),
         |activation, target| install_at_profile(&ctx, &choice, activation, target),
-    );
-    assert_eq!(
-        result
-            .err()
-            .ok_or("new install must verify its binary")?
-            .code,
-        "claude_install_binary_unverified"
+    )?;
+    assert_eq!(result["skipped"], true);
+    assert_eq!(result["incomplete"], true);
+    assert!(
+        result["journal"].is_null(),
+        "the earlier receipt is not a success for the new offer"
     );
     let history = crate::operations::store::history(&ctx)?;
     assert_eq!(history.len(), 1);
+    assert_eq!(history[0].id, original_id);
     assert_eq!(history[0].phase, crate::operations::store::Phase::Succeeded);
     Ok(())
 }

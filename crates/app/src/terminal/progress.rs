@@ -1,7 +1,66 @@
 use std::{
+    cell::RefCell,
     io::{IsTerminal, Write},
     os::unix::fs::{FileExt, MetadataExt, OpenOptionsExt},
+    sync::mpsc::{self, RecvTimeoutError, Sender},
+    time::Duration,
 };
+
+thread_local! {
+    static INSTALL_PROGRESS: RefCell<Option<Sender<&'static str>>> = const { RefCell::new(None) };
+}
+
+pub(super) fn install_stage(text: &'static str) -> bool {
+    INSTALL_PROGRESS.with_borrow(|sender| {
+        sender
+            .as_ref()
+            .is_some_and(|sender| sender.send(text).is_ok())
+    })
+}
+
+pub(crate) fn with_install_progress<T>(work: impl FnOnce() -> T) -> T {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            INSTALL_PROGRESS.with_borrow_mut(Option::take);
+        }
+    }
+    if !std::io::stderr().is_terminal()
+        || std::env::var_os("TERM").is_none_or(|term| term == "dumb")
+        || std::env::args_os().any(|arg| arg == "--json" || arg == "--verbose")
+        || INSTALL_PROGRESS.with_borrow(Option::is_some)
+    {
+        return work();
+    }
+    let (sender, stages) = mpsc::channel();
+    std::thread::scope(|scope| {
+        scope.spawn(move || draw_install_progress(&stages));
+        INSTALL_PROGRESS.set(Some(sender));
+        let _reset = Reset;
+        work()
+    })
+}
+
+fn draw_install_progress(stages: &mpsc::Receiver<&'static str>) {
+    let Ok(mut label) = stages.recv() else { return };
+    let frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+    let mut frame = 0;
+    loop {
+        eprint!("\r\x1b[2K  {}  {label}", frames[frame]);
+        match stages.recv_timeout(Duration::from_millis(120)) {
+            Ok(next) => {
+                eprint!("\r\x1b[2K  ·  {label}\n");
+                label = next;
+                frame = 0;
+            }
+            Err(RecvTimeoutError::Timeout) => frame = (frame + 1) % frames.len(),
+            Err(RecvTimeoutError::Disconnected) => {
+                eprint!("\r\x1b[2K  ·  {label}\n");
+                return;
+            }
+        }
+    }
+}
 
 pub(crate) struct LiveProgress {
     terminal: std::fs::File,

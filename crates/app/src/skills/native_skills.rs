@@ -1,3 +1,6 @@
+#[path = "native_skills_journey.rs"]
+mod journey;
+
 use crate::capability::scoped_files;
 use crate::{
     capability::capability_local,
@@ -30,7 +33,7 @@ use std::{
 fn required() -> Error {
     Error::attention(
         "native_skills_recipe_required",
-        "已发现的原生技能需要先登记本机配方。运行 mo skill adopt --help 查看接管方式。",
+        "本机还没有接管这套技能。运行 mo skill adopt NAME，NAME 换成技能名称。",
     )
 }
 fn invalid() -> Error {
@@ -744,12 +747,22 @@ fn prior_step(
                 return Err(invalid());
             }
             if action == Action::Upgrade {
-                installed.source.commit.clone_from(&recipe.source.commit);
+                update_expected_version(&mut installed, recipe);
             }
             disk::same(&installed, recipe)?;
         }
     }
     Ok(step_witness)
+}
+
+fn update_expected_version(previous: &mut Recipe, next: &Recipe) {
+    previous.source.commit.clone_from(&next.source.commit);
+    if policy::generated(previous)
+        && previous.source.tracking_ref.as_deref() == Some("HEAD")
+        && next.source.tracking_ref.is_none()
+    {
+        previous.source.tracking_ref = None;
+    }
 }
 
 fn validate_action(
@@ -817,7 +830,7 @@ fn plan_with_origin(
             .cloned()
             .ok_or_else(required)?;
         if action == Action::Upgrade {
-            selected.source.commit.clone_from(&recipe.source.commit);
+            update_expected_version(&mut selected, &recipe);
         }
         disk::same(&selected, &recipe)?;
     }
@@ -1711,13 +1724,11 @@ fn missing_source_recipe(
     Some(
         Error::attention(
             "native_skills_recipe_required",
-            format!("已发现 {repo} 的 Skills CLI 安装记录，缺少 macops 维护配方。"),
+            format!("已发现 {repo} 的 Skills CLI 安装记录，本机维护条件尚未核对。"),
         )
         .with_guidance(
             "无法用 mo 维护这个来源。",
-            format!(
-                "沿用原安装的客户端与作用域，运行 npx skills add {repo}。想用配方接管时查看 mo skill adopt --help。"
-            ),
+            format!("运行 mo skill adopt {repo} --dry-run 检查这些安装，或用原安装工具更新。"),
         ),
     )
 }
@@ -1745,6 +1756,13 @@ pub(crate) fn matches_upgrade(
     if !is_native(journal) {
         return Ok(false);
     }
+    if selection
+        .name
+        .as_deref()
+        .is_some_and(|name| name.contains('@'))
+    {
+        return Ok(false);
+    }
     let recipes = selected_recipes(ctx, selection)?;
     let [recipe] = recipes.as_slice() else {
         return Ok(false);
@@ -1767,8 +1785,14 @@ pub(crate) fn validate_recipe_argument(command: &Command) -> Result<()> {
         return Ok(());
     };
     let (path, invocation) = match command {
-        SkillCmd::Install { recipe } => (recipe, "mo skill install"),
-        SkillCmd::Adopt { recipe, .. } => (recipe, "mo skill adopt NAME"),
+        SkillCmd::Install {
+            recipe: Some(recipe),
+            ..
+        } => (recipe, "mo skill install"),
+        SkillCmd::Adopt {
+            recipe: Some(recipe),
+            ..
+        } => (recipe, "mo skill adopt NAME"),
         _ => return Ok(()),
     };
     if path.is_absolute() {
@@ -1792,9 +1816,7 @@ pub(crate) fn validate_recipe_argument(command: &Command) -> Result<()> {
     let (reason, usage) = if let Some(repo) = repository {
         (
             "--recipe 需要本机技能配方 JSON 文件的绝对路径，收到的是 GitHub 仓库。",
-            format!(
-                "安装能力包请查看 https://github.com/{repo} 的安装说明。检查来源可运行 mo recommend {repo}。"
-            ),
+            format!("运行 mo skill install {repo}，或用 mo recommend {repo} 查看安装方式。"),
         )
     } else if qualified || value.contains("://") {
         (
@@ -1833,7 +1855,11 @@ fn explicit_recipe(
             project: _,
             details: _,
             only: _,
-            command: Some(SkillCmd::Install { recipe }),
+            command:
+                Some(SkillCmd::Install {
+                    source: None,
+                    recipe: Some(recipe),
+                }),
         } => {
             let (recipe, fence) = read_recipe(recipe)?;
             execute(ctx, recipe, Action::Install, dry, yes, fence)?
@@ -1842,7 +1868,11 @@ fn explicit_recipe(
             project: _,
             details: _,
             only: _,
-            command: Some(SkillCmd::Adopt { id, recipe }),
+            command:
+                Some(SkillCmd::Adopt {
+                    id,
+                    recipe: Some(recipe),
+                }),
         } => {
             let (recipe, fence) = read_recipe(recipe)?;
             let expected = policy::installation_id(&crate::platform::fs::read_path(
@@ -1859,10 +1889,31 @@ fn explicit_recipe(
             }
             execute(ctx, recipe, Action::Adopt, dry, yes, fence)?
         }
+        Command::Skill {
+            command:
+                Some(SkillCmd::Install {
+                    source: Some(source),
+                    ..
+                }),
+            ..
+        } => journey::install(ctx, source, dry, yes)?,
+        Command::Skill {
+            command: Some(SkillCmd::Adopt { id, recipe: None }),
+            ..
+        } => journey::adopt(ctx, id, dry, yes)?,
         _ => return Ok(None),
     };
     Ok(Some(value))
 }
+
+pub(crate) fn has_supported_runner(ctx: &Context) -> bool {
+    crate::skills::public_skill::runner(ctx).is_ok()
+}
+
+pub(crate) fn install_repository(ctx: &Context, source: &str) -> Result<Value> {
+    journey::install(ctx, source, false, false)
+}
+
 fn native_config_scope(ctx: &Context) -> Result<()> {
     if ctx.chezmoi.source.is_some()
         || ctx.chezmoi.destination.is_some()
@@ -1882,7 +1933,45 @@ fn upgrade(
     dry: bool,
     yes: bool,
 ) -> Result<Value> {
-    let mut recipes = selected_recipes(ctx, selection)?.into_iter();
+    let mut selection = selection.clone();
+    let explicit_source = selection
+        .name
+        .as_deref()
+        .and_then(|name| name.rsplit_once('@'));
+    if let Some((source, _)) = explicit_source {
+        if selection.revision.is_some() || selection.all || !selection.only.is_empty() {
+            return Err(Error::attention(
+                "source_revision_selection",
+                "指定 @版本时，请只选择这一个仓库。",
+            ));
+        }
+        let requested = crate::skills::public_skill::Request::parse(
+            selection.name.as_deref().unwrap_or_default(),
+        )?;
+        let repository = requested.repository.key().to_owned();
+        if let Some(mut report) = journey::try_adopt(ctx, &repository, dry, yes, true)? {
+            report["next"] = json!(format!(
+                "mo skill upgrade {}",
+                selection.name.as_deref().unwrap_or_default()
+            ));
+            return Ok(report);
+        }
+        let selected = crate::skills::public_skill::Request::parse(source)?;
+        if selected.repository != requested.repository {
+            return Err(invalid());
+        }
+        selection.revision = Some(requested.resolve()?.as_str().to_owned());
+        selection.name = Some(repository);
+    } else if let Some(target) = selection.name.as_deref()
+        && selection.only.is_empty()
+        && !selection.all
+        && selection.change_id.is_none()
+        && selection.revision.is_none()
+        && let Some(report) = journey::try_adopt(ctx, target, dry, yes, true)?
+    {
+        return Ok(report);
+    }
+    let mut recipes = selected_recipes(ctx, &selection)?.into_iter();
     let single = recipes.len() == 1;
     let mut results = vec![];
     let mut incomplete = false;
@@ -1890,7 +1979,12 @@ fn upgrade(
         let id = recipe.id.clone();
         match upgrade_recipe(ctx, recipe, selection.revision.as_deref(), dry, yes) {
             Ok(result) => {
-                incomplete = !dry && result["journal"]["phase"] != "succeeded";
+                incomplete = !dry
+                    && result["journal"]["phase"] != "succeeded"
+                    && !matches!(
+                        result["status"].as_str(),
+                        Some("up-to-date" | "fixed-version")
+                    );
                 results.push(result);
             }
             Err(error) if single => return Err(error),
@@ -1920,9 +2014,40 @@ fn upgrade_recipe(
     dry: bool,
     yes: bool,
 ) -> Result<Value> {
+    let old_commit = recipe.source.commit.clone();
+    let generated = policy::generated(&recipe);
+    if generated && revision.is_none() && recipe.source.tracking_ref.is_none() {
+        verify_managed_skill(ctx, &recipe)?;
+        return Ok(
+            json!({"name":recipe.install_name,"repository":recipe.source.repository,"status":"fixed-version"}),
+        );
+    }
+    let was_tracking = recipe.source.tracking_ref.is_some();
+    let mut recipe = resolve_upgrade(ctx, recipe, revision)?;
+    if generated && revision.is_some() {
+        recipe.source.tracking_ref = None;
+    }
+    if generated
+        && old_commit == recipe.source.commit
+        && was_tracking == recipe.source.tracking_ref.is_some()
+    {
+        verify_managed_skill(ctx, &recipe)?;
+        return Ok(json!({"name":recipe.install_name,"status":"up-to-date"}));
+    }
+    if generated && !dry {
+        crate::operations::confirm(
+            &format!(
+                "更新 {}\n来源：{}\n位置：{}",
+                recipe.install_name,
+                recipe.source.repository,
+                disk::payload(ctx, &recipe.install_name)?.display()
+            ),
+            yes,
+        )?;
+    }
     execute(
         ctx,
-        resolve_upgrade(ctx, recipe, revision)?,
+        recipe,
         Action::Upgrade,
         dry,
         yes,
@@ -1930,9 +2055,37 @@ fn upgrade_recipe(
     )
 }
 
+fn verify_managed_skill(ctx: &Context, recipe: &Recipe) -> Result<()> {
+    let rows = policy::registry(scoped_files::regular(&disk::lock_path(ctx))?.as_deref())?;
+    let Some(row) = rows.get(&recipe.install_name) else {
+        return Err(Error::attention(
+            "skill_not_installed",
+            format!("本机找不到 {} 的安装记录。", recipe.install_name),
+        )
+        .with_guidance(
+            "没有可以更新的安装。",
+            format!(
+                "运行 mo skill install {} 重新选择并安装。",
+                recipe.source.repository
+            ),
+        ));
+    };
+    let current = package(ctx, recipe, Some(row), None)?;
+    owners(ctx, &current.id, Action::Upgrade)?;
+    Ok(())
+}
+
 fn resolve_upgrade(ctx: &Context, mut recipe: Recipe, revision: Option<&str>) -> Result<Recipe> {
     if let Some(commit) = revision {
         recipe.source.commit = crate::skills::rules::skills::revision(commit)?;
+    } else if let Some(reference) = &recipe.source.tracking_ref
+        && policy::generated(&recipe)
+    {
+        let source = format!("{}@{reference}", recipe.source.repository);
+        crate::skills::public_skill::Request::parse(&source)?
+            .resolve()?
+            .as_str()
+            .clone_into(&mut recipe.source.commit);
     } else if recipe.source.tracking_ref.is_some() {
         let cache = check_cache(ctx)?;
         let id = policy::installation_id(&crate::platform::fs::read_path(&disk::payload(

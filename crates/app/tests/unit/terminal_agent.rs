@@ -1,6 +1,88 @@
 use super::*;
 
 #[test]
+fn inventory_filters_managers_and_actual_skill_locations() {
+    use crate::domain::resource::State;
+    let item = |name: &str, manager: &str, agents: &[&str]| Item {
+        id: name.into(),
+        name: name.into(),
+        summary: String::new(),
+        managed: true,
+        management: Management::Native,
+        directory: false,
+        path: None,
+        source: None,
+        agents: agents.iter().map(|x| (*x).into()).collect(),
+        loaded: None,
+        details: vec![],
+        inventory: Some(crate::browser::InventoryInfo {
+            manager: manager.into(),
+            groups: agents.iter().map(|x| (*x).into()).collect(),
+            status: State::Present,
+            version: None,
+            aliases: vec![],
+            repository: None,
+            native_record: None,
+        }),
+    };
+    let view = |items| View {
+        scope: "global".into(),
+        items,
+        coverage: "observed",
+        difference_coverage: "not_applicable",
+        observed_at: None,
+        note: String::new(),
+        incomplete: false,
+    };
+    let mut app = Browser::new(
+        view(vec![
+            item("brew-jq", "brew", &[]),
+            item("npm-jq", "npm", &[]),
+        ]),
+        Kind::Apps,
+    );
+    assert_eq!(app.visible().len(), 2);
+    app.switch_group(true);
+    assert!(
+        app.group_tabs(32)
+            .is_some_and(|tabs| tabs.contains("[Homebrew]"))
+    );
+    assert_eq!(app.selected().as_deref(), Some("brew-jq"));
+    app.switch_group(true);
+    assert_eq!(app.selected().as_deref(), Some("npm-jq"));
+    app.switch_group(true);
+    assert_eq!(app.selected().as_deref(), Some("npm-jq"));
+    assert_eq!(app.visible().len(), 2);
+
+    let mut skills = Browser::new(
+        view(vec![
+            item("claude-glm-skill", "skills-cli", &["claude:glm"]),
+            item("claude-mi-skill", "skills-cli", &["claude:mi"]),
+            item("shared", "skills-cli", &["shared"]),
+            item("cursor-only", "skills-cli", &["cursor:default"]),
+            item("unverified", "skills-cli", &[]),
+        ]),
+        Kind::Skills,
+    );
+    assert_eq!(skills.visible().len(), 5);
+    skills.switch_group(true);
+    assert_eq!(skills.group.as_deref(), Some("claude:glm"));
+    assert_eq!(skills.selected().as_deref(), Some("claude-glm-skill"));
+    skills.switch_group(true);
+    assert_eq!(skills.group.as_deref(), Some("claude:mi"));
+    assert_eq!(skills.selected().as_deref(), Some("claude-mi-skill"));
+    skills.switch_group(true);
+    assert_eq!(skills.group.as_deref(), Some("cursor:default"));
+    assert_eq!(skills.selected().as_deref(), Some("cursor-only"));
+    assert_eq!(skills.visible().len(), 1);
+    skills.switch_group(true);
+    assert_eq!(skills.selected().as_deref(), Some("shared"));
+    assert_eq!(skills.visible().len(), 1);
+    skills.switch_group(true);
+    assert_eq!(skills.selected().as_deref(), Some("unverified"));
+}
+
+#[test]
 fn install_progress_describes_the_stage_and_stays_quiet_for_machine_output() {
     for (stage, expected) in [
         (Stage::VerifySource, "核对固定提交与插件文件"),
@@ -63,6 +145,7 @@ fn agent_details_announce_the_managed_session_without_claiming_it_is_loaded() {
                 agents: vec![],
                 loaded: None,
                 details: vec!["档案 fixture".into()],
+                inventory: None,
             }],
             coverage: "observed",
             difference_coverage: "not_applicable",

@@ -727,7 +727,7 @@ while sel.get_map():
   data=os.read(key.fileobj.fileno(),65536)
   if not data:sel.unregister(key.fileobj);continue
   buf[key.data]+=data
-  prompts=buf['err'].decode('utf-8').count('同意就输入 yes')
+  prompts=buf['err'].decode('utf-8').count('确认操作')
   while handled<prompts:
    path=pathlib.Path(q['events']);counts.append(len(path.read_text().splitlines()) if path.exists() else 0)
    os.write(master,b'yes\n' if handled==0 else b'no\n');handled+=1
@@ -1050,7 +1050,7 @@ while sel.get_map():
   data=os.read(key.fileobj.fileno(),65536)
   if not data:sel.unregister(key.fileobj);continue
   buf[key.data]+=data
-  prompts=buf['err'].decode('utf-8').count('同意就输入 yes')
+  prompts=buf['err'].decode('utf-8').count('确认操作')
   while handled<prompts:
    path=pathlib.Path(q['events']);counts.append(len(path.read_text().splitlines()) if path.exists() else 0)
    os.write(master,b'yes\n' if handled==0 else b'no\n');handled+=1

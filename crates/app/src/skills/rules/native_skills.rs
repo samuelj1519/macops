@@ -5,6 +5,7 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub const CLI_VERSION: &str = "1.9.0";
 pub const RECIPE_BOOK_NAME: &str = "native-skills-recipes.json";
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -102,13 +103,17 @@ struct ParsedRecipe {
     rules: crate::source::rules::source_payload::Rules,
     reference: crate::policy::source_git::Reference,
 }
+pub(crate) fn generated(recipe: &Recipe) -> bool {
+    recipe.id.starts_with("github-")
+}
+
 pub fn validate(recipe: &Recipe) -> Result<()> {
     parse_recipe(recipe).map(|_| ())
 }
 fn parse_recipe(recipe: &Recipe) -> Result<ParsedRecipe> {
     if recipe.schema_version != 1
         || recipe.owner != "skills-cli"
-        || recipe.cli_version != "1.9.0"
+        || recipe.cli_version != CLI_VERSION
         || recipe.scope != "global"
         || recipe.client_scope != ["codex"]
         || !recipe.copy

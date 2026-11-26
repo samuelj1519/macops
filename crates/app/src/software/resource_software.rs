@@ -74,6 +74,19 @@ pub fn collect(
     Ok((resources, reports))
 }
 
+pub(crate) fn recorded(ctx: &Context) -> Result<Vec<Resource>> {
+    let catalog = inventory::load(ctx)?;
+    let receipts = crate::catalog::target::receipts(ctx)?;
+    let adopted = receipts.installations.keys().cloned().collect();
+    let mut items = declarations(ctx, &catalog, &adopted)?;
+    for item in &mut items {
+        if item.management == Management::Adopted && item.status == State::Declared {
+            item.status = State::Unknown;
+        }
+    }
+    Ok(items)
+}
+
 fn baselines(
     ctx: &Context,
     receipts: &crate::domain::Receipts,
@@ -797,12 +810,12 @@ fn declarations(
     let mut resources = vec![];
     for package in &catalog.packages {
         if matches!(
+            package.kind,
+            crate::domain::Kind::Skill | crate::domain::Kind::Plugin
+        ) || matches!(
             package.provider,
-            Provider::Manager { .. } | Provider::Macops
+            Provider::Manager { .. } | Provider::Macops | Provider::Legacy { .. }
         ) {
-            continue;
-        }
-        if matches!(package.provider, Provider::Legacy { .. }) {
             continue;
         }
         let (mut manager, mut native, mut scope) = provider_key(&package.provider, ctx);

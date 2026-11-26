@@ -206,7 +206,7 @@ fn configured_native_source_does_not_hide_an_unconfigured_source() -> TestResult
     let (out, other) =
         n.f.run(&["skill", "upgrade", "source:other/repo", "--dry-run"])?;
     assert_code(&out, 3);
-    assert_eq!(other["error"]["code"], "native_skills_recipe_required");
+    assert_eq!(other["error"]["code"], "skills_cli_unavailable");
     assert_eq!(n.calls()?.len(), 1);
     assert_eq!(fs::read(receipt)?, receipts);
     assert_eq!(fs::read(lock)?, raw_lock);

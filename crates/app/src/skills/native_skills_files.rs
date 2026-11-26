@@ -495,7 +495,11 @@ pub fn runner_stamp(recipe: &Recipe) -> Result<String> {
     }
     let mut evidence = crate::agent::ai_payload::Evidence::default();
     evidence.file(&recipe.runner.node)?;
-    evidence.tree(root)?;
+    if policy::generated(recipe) {
+        evidence.owned_tree(root)?;
+    } else {
+        evidence.tree(root)?;
+    }
     evidence.verify()?;
     evidence.digest()
 }

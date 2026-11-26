@@ -269,6 +269,34 @@ impl Evidence {
         self.trees.push(Tree::capture(path, &mut Budget::new())?);
         Ok(())
     }
+    pub(crate) fn owned_tree(&mut self, path: &Path) -> Result<()> {
+        let tree = Tree::capture(path, &mut Budget::new())?;
+        let owner = nix::unistd::geteuid().as_raw();
+        if tree.root.path != path {
+            return Err(changed());
+        }
+        for (relative, entry) in &tree.entries {
+            match entry {
+                Entry::Directory(stamp) | Entry::File(stamp, _)
+                    if stamp.uid == 0 || stamp.uid == owner =>
+                {
+                    if stamp.mode & 0o7022 != 0 {
+                        return Err(changed());
+                    }
+                }
+                Entry::Link(_, _, target) if Path::new(target).is_relative() => {
+                    let destination = paths::read_path(&path.join(relative))?;
+                    if !destination.starts_with(path) || !destination.is_file() {
+                        return Err(changed());
+                    }
+                }
+                _ => return Err(changed()),
+            }
+        }
+        self.trees.push(tree);
+        Ok(())
+    }
+
     pub fn file(&mut self, path: &Path) -> Result<()> {
         if !self.files.iter().any(|file| file.requested == path) {
             self.files.push(File::capture(path, &mut Budget::new())?);

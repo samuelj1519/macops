@@ -87,9 +87,13 @@ pub(crate) fn run(ctx: &Context, choice: &Offer) -> Result<Value> {
     run_using(
         ctx,
         choice,
-        |client| choose_plugin_targets_using(ctx, client, target_numbers),
+        |client| choose_plugin_targets_using(ctx, client, Some(choice), target_numbers),
         confirm_initial_activation,
-        |activation, target| install_at_profile(ctx, choice, activation, target),
+        |activation, target| {
+            crate::terminal::progress::with_install_progress(|| {
+                install_at_profile(ctx, choice, activation, target)
+            })
+        },
     )
 }
 
@@ -129,7 +133,8 @@ enum Destination {
 fn choose_plugin_targets_using(
     ctx: &Context,
     client: &str,
-    select: impl FnOnce(usize) -> Result<Vec<usize>>,
+    choice: Option<&Offer>,
+    select: impl FnOnce(&[String]) -> Result<Vec<usize>>,
 ) -> Result<Vec<Destination>> {
     use crate::{
         agent::resource_agents,
@@ -144,6 +149,7 @@ fn choose_plugin_targets_using(
             .then(a.id.cmp(&b.id))
     });
     let mut choices = vec![];
+    let mut labels = vec![];
     terminal(TerminalLine::Heading, "安装位置");
     for profile in profiles {
         let Data::Agent { config_dir, .. } = &profile.data else {
@@ -164,16 +170,33 @@ fn choose_plugin_targets_using(
             (true, false) => "已纳入管理",
             (false, _) => "可登记",
         };
+        let existing = match choice {
+            Some(Offer::Claude(offer, _)) => {
+                match super::plugin_target::claude_first_install_conflict(
+                    &target,
+                    &offer.native_id(),
+                    &offer.marketplace,
+                    &offer.version,
+                ) {
+                    Ok(Some(note)) => format!("\n    {}", sanitize(&note, false)),
+                    Ok(None) => String::new(),
+                    Err(_) => "\n    插件记录待读取".into(),
+                }
+            }
+            _ => String::new(),
+        };
         choices.push(Some(Destination::Existing(Selection {
             target: Box::new(target),
             registered,
         })));
-        eprintln!("  {} {name} · {path} · {status}", choices.len());
+        labels.push(name.clone());
+        eprintln!("  {} {name} · {path} · {status}{existing}", choices.len());
     }
     choices.push(Some(Destination::Independent));
     eprintln!("  {} 新建单独配置", choices.len());
-    eprintln!("输入一个或多个编号，用空格或逗号分隔（例如 3,5）。直接按 Enter 返回。");
-    Ok(select(choices.len())?
+    labels.push("新建单独配置".into());
+    labels.push("返回".into());
+    Ok(select(&labels)?
         .into_iter()
         .filter_map(|index| choices.get_mut(index).and_then(Option::take))
         .collect())
@@ -199,18 +222,32 @@ fn parse_target_numbers(input: &str, count: usize) -> Option<Vec<usize>> {
     Some(selected)
 }
 
-fn target_numbers(count: usize) -> Result<Vec<usize>> {
-    loop {
-        let mut input = String::new();
-        std::io::stdin().read_line(&mut input)?;
-        if input.trim().is_empty() {
-            return Ok(Vec::new());
+fn target_numbers(labels: &[String]) -> Result<Vec<usize>> {
+    use std::io::IsTerminal as _;
+    if !std::io::stdin().is_terminal() {
+        loop {
+            let mut input = String::new();
+            std::io::stdin().read_line(&mut input)?;
+            if input.trim().is_empty() {
+                return Ok(vec![]);
+            }
+            if let Some(selected) = parse_target_numbers(&input, labels.len() - 1) {
+                return Ok(selected);
+            }
+            eprintln!("请输入列表里的编号。「新建单独配置」需要单独选择。");
         }
-        if let Some(selected) = parse_target_numbers(&input, count) {
-            return Ok(selected);
-        }
-        eprintln!("请输入列表里的编号。「新建单独配置」需要单独选择。");
     }
+    let selected = crate::terminal::picker::select(labels, labels.len() - 1, true, |typed| {
+        parse_target_numbers(typed, labels.len() - 1)
+    })?;
+    if selected.contains(&(labels.len() - 1)) {
+        return Ok(vec![]);
+    }
+    if selected.len() > 1 && selected.contains(&(labels.len() - 2)) {
+        return Err(incompatible_profile_offer()
+            .with_guidance("请选择一种安装位置。", "新建单独配置需要单独选择。"));
+    }
+    Ok(selected)
 }
 
 fn target_label(target: &crate::agent::resource_agents::InstallTarget) -> String {
@@ -255,7 +292,11 @@ fn install_profiles_using(
                     &format!("确认后会登记并安装到 {}。", enroll.join("、")),
                 );
             }
-            eprintln!("已经装好的插件保留当前开关。");
+            if matches!(choice, Offer::Claude(..)) {
+                eprintln!("已有同名插件或插件市场的配置会跳过。");
+            } else {
+                eprintln!("已经装好的插件保留当前开关。");
+            }
             confirm_installation()
         },
         install,
@@ -265,8 +306,26 @@ fn install_profiles_using(
 
 fn show_profile_install_event(event: Event<'_>) {
     match event {
-        Event::Reconciled => terminal(TerminalLine::Note, "已检查上一次安装。"),
+        Event::Reconciled(result) => {
+            let previous = result.get("journal").unwrap_or(result);
+            if previous["phase"] == "failed"
+                && let Some(message) = previous["message"].as_str().filter(|text| !text.is_empty())
+            {
+                terminal(TerminalLine::Note, &format!("上次操作已核对。{message}"));
+            } else {
+                terminal(TerminalLine::Step, "已核对上次操作，继续本次安装。");
+            }
+        }
         Event::Complete(raw) => show_install_result(raw),
+        Event::Skipped(target, raw) => {
+            terminal(
+                TerminalLine::Note,
+                &format!("{} · 本次跳过", target_label(target)),
+            );
+            if let Some(message) = raw["message"].as_str() {
+                eprintln!("    {}", crate::output::sanitize(message, false));
+            }
+        }
         Event::Stopped {
             target,
             completed,
@@ -275,7 +334,7 @@ fn show_profile_install_event(event: Event<'_>) {
         } => {
             let label = target_label(target);
             if let Some(pending) = pending {
-                terminal(TerminalLine::Note, &format!("{label} 尚未完成。"));
+                terminal(TerminalLine::Note, &format!("{label} · 安装尚未完成"));
                 if pending.continuation {
                     eprintln!("上一步已核对。请用同样的安装选项重试。");
                 } else {
@@ -283,10 +342,10 @@ fn show_profile_install_event(event: Event<'_>) {
                     if let Some(message) =
                         journal["message"].as_str().filter(|text| !text.is_empty())
                     {
-                        eprintln!("{}", crate::browser::sanitize(message, false));
+                        eprintln!("  错误原因　{}", crate::browser::sanitize(message, false));
                     }
                     if let Some(hint) = crate::output::recovery_hint(journal) {
-                        eprintln!("{hint}");
+                        eprintln!("  正确用法　{hint}");
                     }
                 }
             } else {
@@ -303,10 +362,21 @@ fn show_profile_install_event(event: Event<'_>) {
                 eprintln!("尚未开始本次安装 {}", labels.join("、"));
             }
         }
-        Event::BatchComplete(count) => terminal(
-            TerminalLine::Done,
-            &format!("已完成 {count} 个配置的安装。"),
-        ),
+        Event::BatchComplete { installed, skipped } => {
+            let summary = if skipped == 0 {
+                format!("已完成 {installed} 个配置的安装。")
+            } else {
+                format!("安装完成 {installed} 个，跳过 {skipped} 个。")
+            };
+            terminal(
+                if skipped == 0 {
+                    TerminalLine::Done
+                } else {
+                    TerminalLine::Note
+                },
+                &summary,
+            );
+        }
     }
 }
 
@@ -385,9 +455,6 @@ fn install_isolated_using(
     let mut same_install = false;
     if let Some(recovered) =
         crate::operations::recover_before_write_checked(ctx, None, |journal| {
-            if !crate::agent::plugin_target::recovery_matches(journal, None)? {
-                return Ok(false);
-            }
             let previous = match choice {
                 Offer::Codex(offer, _) => {
                     crate::agent::codex_install::matching_activation(journal, offer, None)?
@@ -437,19 +504,34 @@ fn install_isolated_using(
         }
         terminal(TerminalLine::Note, "已检查上一次操作。现在准备本次安装。");
     }
-    Ok(report_install(install(activation)?))
+    let result = crate::terminal::progress::with_install_progress(|| install(activation))?;
+    Ok(report_install(result))
 }
 
 fn confirm_initial_activation() -> Result<InitialActivation> {
-    terminal(
-        TerminalLine::Note,
-        "输入 yes 安装并启用，输入 disabled 安装后保持停用，回车取消。",
-    );
-    let mut choice = String::new();
-    std::io::stdin().read_line(&mut choice)?;
-    match choice.trim() {
-        "yes" => Ok(InitialActivation::Enabled),
-        "disabled" => Ok(InitialActivation::Disabled),
+    use std::io::IsTerminal as _;
+    if !std::io::stdin().is_terminal() {
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input)?;
+        return activation(match input.trim() {
+            "yes" => &[1],
+            "disabled" => &[2],
+            _ => &[],
+        });
+    }
+    let labels = ["取消", "安装并启用", "安装后保持停用"].map(str::to_owned);
+    let selected = crate::terminal::picker::select(&labels, 0, false, |value| match value {
+        "yes" => Some(vec![1]),
+        "disabled" => Some(vec![2]),
+        _ => None,
+    })?;
+    activation(&selected)
+}
+
+fn activation(selected: &[usize]) -> Result<InitialActivation> {
+    match selected {
+        [1] => Ok(InitialActivation::Enabled),
+        [2] => Ok(InitialActivation::Disabled),
         _ => Err(Error::attention("cancelled", "已取消安装")),
     }
 }

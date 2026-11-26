@@ -618,6 +618,15 @@ pub fn retire(
     })
 }
 
+pub(crate) fn skill_name(bytes: &[u8]) -> Result<String> {
+    let text = std::str::from_utf8(bytes).map_err(|_| unsupported())?;
+    let frontmatter = parts(MetadataKind::Frontmatter, text)?;
+    mapping(yaml::parse(frontmatter.yaml.as_bytes())?)?
+        .remove("name")
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .ok_or_else(unsupported)
+}
+
 pub fn manual_frontmatter(bytes: &[u8]) -> Result<bool> {
     let text = std::str::from_utf8(bytes).map_err(|_| unsupported())?;
     let parts = parts(MetadataKind::Frontmatter, text)?;

@@ -15,7 +15,7 @@ os.close(tty)
 try:
     deadline = time.monotonic() + 12
     received = bytearray()
-    while b'yes' not in received:
+    while '确认执行'.encode() not in received:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise AssertionError('confirmation not observed')
@@ -27,7 +27,7 @@ try:
             raise AssertionError(f'child exited before confirmation: {child.poll()}')
         received.extend(block)
     catalog.write_text('{"schema_version":1,"packages":[]}')
-    os.write(master, b'yes\n')
+    os.write(master, b'\x1b[B\r')
     out, _err = child.communicate(timeout=10)
     data = json.loads(out)
     assert child.returncode == 3, data

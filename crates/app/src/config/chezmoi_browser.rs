@@ -406,6 +406,7 @@ fn config_item(id: &str, entry: &Managed, summary: &str, kind: &str, directory: 
         source: Some(entry.source_absolute.clone()),
         agents: vec![],
         loaded: None,
+        inventory: None,
         details: vec![
             "管理器 chezmoi".into(),
             format!("目标 {}", entry.absolute.display()),

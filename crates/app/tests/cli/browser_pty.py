@@ -178,6 +178,21 @@ try:
         assert b"API key" not in capture[offset:]
     elif scenario == "recommend-advice-only":
         expect("当前没有可执行的已核验安装计划")
+    elif scenario == "recommend-local-maintenance":
+        expect("本机状态")
+        expect("安装方案")
+        expect("维护入口")
+        expect("选择维护入口")
+        first, second, third = (capture.index(title.encode()) for title in ("本机状态", "安装方案", "维护入口"))
+        assert first < second < third
+        offset = type_key(b"\x1b[B\r")
+        expect("\x1b[?1049h", offset)
+        expect("fixture-alpha", offset)
+        type_key(b"r")
+        offset = type_key(b"\r")
+        expect("安装状态", offset)
+        assert b"fixture-beta" not in capture
+        type_key(b"q")
     elif scenario == "recommend-picker-cancel":
         expect("选择安装候选")
         offset = type_key(b"99\r")
@@ -195,7 +210,9 @@ try:
         type_key(b"1.2.3\r")
         expect("安装并纳入管理")
         expect("用户级配置" if scenario == "recommend-mise" else "安装范围")
-        offset = type_key(b"no\r" if scenario == "recommend-cancel" else b"yes\r")
+        expect("确认执行")
+        assert "输入 yes".encode() not in capture
+        offset = type_key(b"\r" if scenario == "recommend-cancel" else b"\x1b[B\r")
         outcome = {
             "recommend-cancel": "已取消",
             "recommend-install-unknown": "结果 还没确认",
@@ -211,7 +228,7 @@ try:
         expect("picker-left")
         assert b"picker-right" not in capture
         offset = type_key(b"\r")
-        expect("输入 yes", offset)
+        expect("确认执行", offset)
         expect(str(target), offset)
         offset = type_key(b"no\r")
         expect("已取消", offset)
@@ -229,9 +246,9 @@ try:
             expect("已取消", offset)
         else:
             offset = type_key(b"\r")
-            expect("输入 yes", offset)
+            expect("确认执行", offset)
             expect(str(target), offset)
-            offset = type_key(b"yes\r")
+            offset = type_key(b"\x1b[B\r")
             expect("已完成", offset)
     elif scenario == "market-json":
         expect('"kind": "plugin-marketplaces"')
@@ -406,7 +423,7 @@ try:
         type_key(b"1.0.0\r")
         expect("确认后只核对那次操作")
         assert "执行此安装计划".encode() not in capture
-        type_key(b"yes\r")
+        type_key(b"\x1b[B\r")
         expect("还没开始新操作")
         expect("运行 mo recover 查看待检查的操作")
         text = capture.decode(errors="replace")
@@ -426,7 +443,7 @@ try:
             type_key(b"2.0.0\r")
             expect("确认后只核对那次操作")
             assert "执行此安装计划".encode() not in capture
-            type_key(b"yes\r")
+            type_key(b"\x1b[B\r")
             expect("already_installed")
             assert "结果 已完成".encode() not in capture
     elif scenario in ("recommend-skill-cancel", "recommend-skill-stale"):
@@ -440,7 +457,7 @@ try:
             data = json.loads(book.read_text())
             data["recipes"][0]["source"]["commit"] = "b" * 40
             book.write_text(json.dumps(data))
-            offset = type_key(b"yes\r")
+            offset = type_key(b"\x1b[B\r")
             expect("plan_stale", offset)
         else:
             type_key(b"n\r")
@@ -526,6 +543,20 @@ try:
         if name == "claude-import":
             expect("可发现 claude:default", offset)
         type_key(b"q")
+    elif scenario == "skill-location-groups":
+        expect("安装位置")
+        expect("[全部]")
+        for label in ("Claude Code", "claude:glm", "claude:mi", "Codex", "Cursor", "共享技能"):
+            offset = type_key(b"\x1b[C")
+            expect(f"[{label}]", offset)
+            if label == "Cursor":
+                expect("cursor-only", offset)
+                assert all(name not in capture[offset:] for name in (b"claude-import", b"codex-import", b"fixture-skill"))
+            elif label == "claude:glm":
+                expect("glm-only", offset)
+            elif label in ("claude:mi", "共享技能"):
+                expect("fixture-skill", offset)
+        type_key(b"q")
     elif scenario == "skill-partial":
         expect("能力盘点不完整")
         offset = type_key(b"/fixture-skill\r\r")
@@ -542,14 +573,14 @@ try:
         if scenario != "skill-maintenance-cancel":
             expect("将无法再发现该技能", offset)
         expect("已登记提交", offset)
-        expect("输入 yes", offset)
+        expect("确认执行", offset)
         if scenario == "skill-maintenance-stale":
             import json
             book = Path(target)
             changed = json.loads(book.read_text())
             changed["recipes"][0]["source"]["commit"] = "b" * 40
             book.write_text(json.dumps(changed))
-        offset = type_key(b"n\r" if scenario == "skill-maintenance-cancel" else b"yes\r")
+        offset = type_key(b"\r" if scenario == "skill-maintenance-cancel" else b"\x1b[B\r")
         result = {
             "skill-maintenance-cancel": "已取消",
             "skill-maintenance-stale": "plan_stale",

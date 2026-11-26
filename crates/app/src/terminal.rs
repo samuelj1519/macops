@@ -1,4 +1,5 @@
 pub(crate) mod install;
+pub(crate) mod picker;
 pub(crate) mod plan;
 pub(crate) mod progress;
 
@@ -91,10 +92,30 @@ pub(crate) fn feedback(kind: crate::output::TerminalLine, text: &str) {
     eprintln!("{}", crate::output::terminal_line(kind, text, color));
 }
 
+pub(crate) fn confirm(message: &str) -> Result<()> {
+    use std::io::IsTerminal as _;
+    if std::io::stdin().is_terminal() {
+        eprintln!("◇  确认操作\n{}", crate::output::sanitize(message, true));
+    }
+    let selected = picker::select(
+        &["取消".into(), "确认执行".into()],
+        0,
+        false,
+        |typed| (typed == "yes").then_some(vec![1]),
+    )?;
+    if selected == [1] {
+        Ok(())
+    } else {
+        Err(Error::attention("cancelled", "操作已取消"))
+    }
+}
+
 pub(crate) fn report_install_stage(stage: Stage) {
     use std::io::IsTerminal as _;
     let human = std::io::stderr().is_terminal() && !std::env::args_os().any(|arg| arg == "--json");
-    if let Some(text) = install_stage_text(stage, human) {
+    if let Some(text) = install_stage_text(stage, human)
+        && !progress::install_stage(text)
+    {
         feedback(crate::output::TerminalLine::Step, text);
     }
 }
@@ -158,9 +179,41 @@ struct Browser {
     show_unregistered: bool,
     show_directories: bool,
     kind: Kind,
+    group: Option<String>,
     page: Page,
     notice: String,
     offset: usize,
+}
+
+fn group_keys(kind: Kind, item: &Item) -> Vec<&str> {
+    match kind {
+        Kind::Apps => vec![
+            item.inventory
+                .as_ref()
+                .map_or("来源未核验", |info| info.manager.as_str()),
+        ],
+        Kind::Skills | Kind::Capabilities => item
+            .inventory
+            .as_ref()
+            .filter(|info| !info.groups.is_empty())
+            .map_or_else(
+                || vec!["未核验"],
+                |info| info.groups.iter().map(String::as_str).collect(),
+            ),
+        _ => vec![],
+    }
+}
+
+pub(crate) fn group_label(key: &str) -> &str {
+    match key {
+        "brew" => "Homebrew",
+        "codex:default" => "Codex",
+        "claude:default" => "Claude Code",
+        "cursor:default" => "Cursor",
+        "shared" => "共享技能",
+        "declared-recipe" => "声明配方",
+        _ => key,
+    }
 }
 
 fn matches(item: &Item, search: &str, agent_filters: bool) -> bool {
@@ -189,10 +242,68 @@ impl Browser {
             show_unregistered: true,
             show_directories: false,
             kind,
+            group: None,
             page: Page::List,
             notice: String::new(),
             offset: 0,
         }
+    }
+
+    fn groups(&self) -> Vec<&str> {
+        self.view
+            .items
+            .iter()
+            .flat_map(|item| group_keys(self.kind, item))
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+
+    fn switch_group(&mut self, forward: bool) {
+        let groups = self.groups();
+        if groups.is_empty() {
+            return;
+        }
+        let active = groups
+            .iter()
+            .position(|key| Some(*key) == self.group.as_deref())
+            .map_or(0, |index| index + 1);
+        let count = groups.len() + 1;
+        let next = (active + if forward { 1 } else { count - 1 }) % count;
+        let group = next.checked_sub(1).map(|index| groups[index].to_owned());
+        let id = self.selected();
+        self.group = group;
+        self.preserve(id.as_deref());
+    }
+
+    fn group_tabs(&self, width: u16) -> Option<String> {
+        let groups = self.groups();
+        if groups.is_empty() {
+            return None;
+        }
+        let tabs = std::iter::once(None).chain(groups.into_iter().map(Some));
+        let mut labels = Vec::new();
+        let mut active = 0;
+        for (index, key) in tabs.enumerate() {
+            let label = key.map_or("全部", group_label);
+            let label = sanitize(label, false);
+            if key == self.group.as_deref() {
+                active = index;
+                labels.push(format!("[{label}]"));
+            } else {
+                labels.push(label);
+            }
+        }
+        let mode = if self.kind == Kind::Apps {
+            "来源"
+        } else {
+            "安装位置"
+        };
+        let heading = format!("←/→ {mode} · ");
+        if heading.len() + labels.iter().map(|s| s.len() + 2).sum::<usize>() > usize::from(width) {
+            labels.rotate_left(active);
+        }
+        Some(heading + &labels.join("  "))
     }
 
     fn visible(&self) -> Vec<&Item> {
@@ -204,6 +315,10 @@ impl Browser {
             .filter(|item| {
                 (self.show_unregistered || item.managed)
                     && (self.show_directories || !item.directory)
+                    && self
+                        .group
+                        .as_deref()
+                        .is_none_or(|key| group_keys(self.kind, item).contains(&key))
                     && (search.is_empty() || matches(item, &search, agent_filters))
             })
             .collect()
@@ -558,6 +673,13 @@ impl Browser {
                 self.notice = crate::output::error_text(&error);
             }
         }
+        if self
+            .group
+            .as_deref()
+            .is_some_and(|key| !self.groups().contains(&key))
+        {
+            self.group = None;
+        }
         self.preserve(id.as_deref());
     }
 
@@ -572,7 +694,9 @@ impl Browser {
     }
 
     fn draw(&mut self, ctx: &Context, frame: &mut Frame, kind: Kind, unified: bool) {
-        let [header, main, footer] = layout_with_notice(frame, &self.notice, unified);
+        let groups = self.group_tabs(frame.area().width);
+        let header_height = 1 + u16::from(unified) + u16::from(groups.is_some());
+        let [header, main, footer] = layout_with_notice(frame, &self.notice, header_height);
         let visible = self.visible();
         let search = if self.typing { "搜索 " } else { "" };
         let filter = match kind {
@@ -588,7 +712,7 @@ impl Browser {
             sanitize(&self.view.note, false),
             sanitize(&self.search, false)
         );
-        let text = if unified {
+        let mut text = if unified {
             let tabs = Kind::TABS.map(|tab| {
                 if tab == kind {
                     format!("[{}]", tab.title())
@@ -600,6 +724,9 @@ impl Browser {
         } else {
             title
         };
+        if let Some(groups) = groups {
+            let _ = write!(text, "\n{groups}");
+        }
         frame.render_widget(Paragraph::new(text), header);
         let mut offset = self.offset;
         match &self.page {
@@ -773,8 +900,7 @@ fn item_details(
     text
 }
 
-fn layout_with_notice(frame: &mut Frame, message: &str, unified: bool) -> [Rect; 3] {
-    let header_height = if unified { 2 } else { 1 };
+fn layout_with_notice(frame: &mut Frame, message: &str, header_height: u16) -> [Rect; 3] {
     let limit = frame.area().height.saturating_sub(header_height + 2).min(4);
     let notice = Paragraph::new(sanitize(message, true)).wrap(Wrap { trim: true });
     let height = if message.is_empty() {
@@ -954,6 +1080,9 @@ pub(crate) fn browse(
                 KeyCode::Char('q') => return Ok(browser.view),
                 KeyCode::Esc => browser.back(ctx, kind, session),
                 KeyCode::Char('/') if matches!(browser.page, Page::List) => browser.typing = true,
+                KeyCode::Left | KeyCode::Right if matches!(browser.page, Page::List) => {
+                    browser.switch_group(event.code == KeyCode::Right);
+                }
                 KeyCode::Enter if matches!(browser.page, Page::Operation(_)) => {
                     break After::FinishOperation;
                 }

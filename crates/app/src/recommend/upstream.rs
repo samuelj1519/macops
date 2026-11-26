@@ -97,20 +97,29 @@ fn claude_marketplace(
     fetch: &mut impl FnMut(&str) -> Result<Value>,
 ) -> Option<crate::agent::claude_install_source::Offer> {
     use crate::agent::claude_install_source::{MARKET, Offer, PLUGIN};
-    if !documents_claude_market(evidence) {
-        return None;
-    }
     let base = format!("https://api.github.com/repos/{}", evidence.repository);
-    let market = public_file(fetch, &base, MARKET, &evidence.commit)?;
-    let plugin = public_file(fetch, &base, PLUGIN, &evidence.commit)?;
+    let tagged = documented_install_options(evidence).tagged_claude;
+    let (commit, documented_id) = match tagged.len() {
+        1 if !documents_claude_market(evidence) => {
+            let &(tag, id) = tagged.first()?;
+            (tagged_commit(fetch, &base, tag)?, Some(id))
+        }
+        0 if documents_claude_market(evidence) => (evidence.commit.clone(), None),
+        _ => return None,
+    };
+    let market = public_file(fetch, &base, MARKET, &commit)?;
+    let plugin = public_file(fetch, &base, PLUGIN, &commit)?;
     let offer = Offer::identify(
         &evidence.repository,
-        &evidence.commit,
+        &commit,
         market.content.as_bytes(),
         plugin.content.as_bytes(),
     )
     .ok()?;
     let id = offer.native_id();
+    if let Some(expected) = documented_id {
+        return (id == expected).then_some(offer);
+    }
     evidence
         .documents
         .iter()
@@ -128,6 +137,34 @@ fn claude_marketplace(
             })
         })
         .then_some(offer)
+}
+
+fn tagged_commit(
+    fetch: &mut impl FnMut(&str) -> Result<Value>,
+    base: &str,
+    tag: &str,
+) -> Option<crate::policy::source_git::ObjectId> {
+    use crate::policy::source_git::ObjectId;
+    let reference = fetch(&format!("{base}/git/ref/tags/{tag}")).ok()?;
+    let expected = format!("refs/tags/{tag}");
+    if reference["ref"].as_str() != Some(expected.as_str()) {
+        return None;
+    }
+    let object = &reference["object"];
+    let sha = ObjectId::parse(object["sha"].as_str()?).ok()?;
+    match object["type"].as_str()? {
+        "commit" => Some(sha),
+        "tag" => {
+            let annotated = fetch(&format!("{base}/git/tags/{}", sha.as_str())).ok()?;
+            if annotated["sha"].as_str() != Some(sha.as_str())
+                || annotated["object"]["type"] != "commit"
+            {
+                return None;
+            }
+            ObjectId::parse(annotated["object"]["sha"].as_str()?).ok()
+        }
+        _ => None,
+    }
 }
 
 fn public_file(
@@ -370,9 +407,15 @@ fn markdown_fence(line: &str) -> Option<(u8, usize, &str)> {
     (length >= 3).then(|| (marker, length, line[length..].trim()))
 }
 
-fn documented_install_options(evidence: &RepositoryEvidence) -> Vec<Value> {
+struct DocumentedInstall<'a> {
+    options: Vec<Value>,
+    tagged_claude: std::collections::BTreeSet<(&'a str, &'a str)>,
+}
+
+fn documented_install_options(evidence: &RepositoryEvidence) -> DocumentedInstall<'_> {
     let mut skills = None;
     let mut claude = None;
+    let mut tagged_claude = std::collections::BTreeSet::new();
     for (index, document) in evidence.documents.iter().enumerate() {
         let mut block = None;
         let mut market = None;
@@ -409,14 +452,29 @@ fn documented_install_options(evidence: &RepositoryEvidence) -> Vec<Value> {
                     json!({"manager":"Skills CLI","document":index,"commands":[words.join(" ")]}),
                 );
             }
-            if claude.is_none() {
-                if let ["claude", "plugin", "marketplace", "add", source] = words.as_slice() {
-                    if matching_install_source(source, '#', &evidence.repository) {
-                        market = Some(words.join(" "));
-                    }
-                } else if claude_install_command(&words)
-                    && let Some(preceding) = preceding_market
+            if let ["claude", "plugin", "marketplace", "add", source] = words.as_slice() {
+                let source = source
+                    .strip_prefix('"')
+                    .and_then(|arg| arg.strip_suffix('"'))
+                    .or_else(|| {
+                        source
+                            .strip_prefix('\'')
+                            .and_then(|arg| arg.strip_suffix('\''))
+                    })
+                    .unwrap_or(source);
+                if matching_install_source(source, '#', &evidence.repository) {
+                    market = Some((words.join(" "), source.split_once('#').map(|(_, tag)| tag)));
+                }
+            } else if claude_install_command(&words)
+                && let Some((preceding, tag)) = preceding_market
+            {
+                if let Some(tag) = tag
+                    && !tag.contains("..")
+                    && (words.len() == 4 || words[5] == "user")
                 {
+                    tagged_claude.insert((tag, words[3]));
+                }
+                if claude.is_none() {
                     claude = Some(
                         json!({"manager":"Claude Code","document":index,"commands":[preceding,words.join(" ")]}),
                     );
@@ -424,7 +482,10 @@ fn documented_install_options(evidence: &RepositoryEvidence) -> Vec<Value> {
             }
         }
     }
-    [skills, claude].into_iter().flatten().collect()
+    DocumentedInstall {
+        options: [skills, claude].into_iter().flatten().collect(),
+        tagged_claude,
+    }
 }
 
 pub(super) fn show_repository(
@@ -479,7 +540,7 @@ fn repository_review(
                 "evidenceStatus":if documents.is_empty() {"documents-unavailable"} else {"public-commit"},
                 "canExecute":false,"persistentWrites":false
             });
-            let manual = documented_install_options(&evidence);
+            let manual = documented_install_options(&evidence).options;
             if !manual.is_empty() {
                 data["manualInstall"] = json!(manual);
             }

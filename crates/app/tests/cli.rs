@@ -61,11 +61,30 @@ fn plain(f: &Fixture, args: &[&str]) -> std::io::Result<std::process::Output> {
 }
 
 #[test]
+fn recommend_opens_only_matching_local_inventory_when_no_install_plan_exists() -> TestResult {
+    let f = Fixture::new()?;
+    native_skill_fixture(&f, &["fixture-alpha", "fixture-beta"])?;
+    let lock = f.home.join(".agents/.skill-lock.json");
+    let original = fs::read(&lock)?;
+    chezmoi_native::run_browser_pty(
+        &f,
+        &["recommend", "fixture-alpha"],
+        "recommend-local-maintenance",
+        &f.home,
+        "102",
+        "0",
+    )?;
+    assert_eq!(fs::read(lock)?, original);
+    assert!(!f.file("state").exists());
+    Ok(())
+}
+
+#[test]
 fn skill_help_prioritizes_examples_and_explains_selection() -> TestResult {
     let f = Fixture::new()?;
     for (command, example, parameter) in [
         ("install", "mo recommend owner/repo", "--recipe"),
-        ("adopt", "mo skill adopt NAME --recipe", "唯一安装 ID"),
+        ("adopt", "mo skill adopt NAME --dry-run", "唯一安装 ID"),
         (
             "refresh",
             "mo skill refresh source:owner/repo",
@@ -96,7 +115,7 @@ fn skill_help_prioritizes_examples_and_explains_selection() -> TestResult {
 }
 
 #[test]
-fn skill_install_positional_repository_redirects_to_recommend_without_writes() -> TestResult {
+fn skill_install_positional_repository_checks_runtime_without_writes() -> TestResult {
     let f = Fixture::new()?;
     for repo in [
         "owner/repo",
@@ -105,16 +124,19 @@ fn skill_install_positional_repository_redirects_to_recommend_without_writes() -
     ] {
         let args = ["skill", "install", repo];
         let out = plain(&f, &args)?;
-        assert_code(&out, 2);
+        assert_code(&out, 3);
         let stderr = String::from_utf8(out.stderr)?;
-        assert!(stderr.contains("mo recommend owner/repo"), "{stderr}");
+        assert!(
+            stderr.contains("npx --yes skills@1.9.0 --version"),
+            "{stderr}"
+        );
         let (out, json) = f.run(&args)?;
-        assert_code(&out, 2);
-        assert_eq!(json["error"]["code"], "usage");
+        assert_code(&out, 3);
+        assert_eq!(json["error"]["code"], "skills_cli_unavailable");
     }
     let out = plain(&f, &["skill", "install"])?;
     assert_code(&out, 2);
-    assert!(String::from_utf8(out.stderr)?.contains("mo skill install --help"));
+    assert!(String::from_utf8(out.stderr)?.contains("mo skill install owner/repo"));
     for args in [
         ["app", "install", "owner/repo", "--unrelated"],
         ["skill", "install", "--invalid", "owner/repo"],
@@ -138,12 +160,12 @@ fn skill_upgrade_distinguishes_installed_source_without_a_recipe_from_missing_so
         assert_code(&out, 3);
         let text = String::from_utf8(out.stderr)?;
         assert!(
-            text.contains("缺少 macops 维护配方") && text.contains("npx skills add owner/repo"),
+            text.contains("Skills CLI") && text.contains("npx --yes skills@1.9.0 --version"),
             "{text}"
         );
         let (out, result) = f.run(&args)?;
         assert_code(&out, 3);
-        assert_eq!(result["error"]["code"], "native_skills_recipe_required");
+        assert_eq!(result["error"]["code"], "skills_cli_unavailable");
     }
     for args in [
         &["skill", "upgrade", "other/repo", "--dry-run"][..],
@@ -166,6 +188,107 @@ fn skill_upgrade_distinguishes_installed_source_without_a_recipe_from_missing_so
         );
     }
     assert!(!f.file("state").exists());
+    Ok(())
+}
+
+#[test]
+fn skill_adoption_by_repository_uses_local_evidence_without_running_the_installer() -> TestResult {
+    let f = Fixture::new()?;
+    native_skill_fixture(&f, &["example", "extra"])?;
+    let lock = f.home.join(".agents/.skill-lock.json");
+    let before = fs::read(&lock)?;
+    let cache = public_skill_runner(&f)?;
+    let outside = f.file("outside-runner");
+    fs::write(&outside, b"external fixture")?;
+    symlink(&outside, cache.join("outside"))?;
+    let (out, rejected) = f.run(&["skill", "adopt", "owner/repo", "--yes"])?;
+    assert_code(&out, 3);
+    assert_eq!(rejected["error"]["code"], "ai_payload_changed");
+    assert!(!f.file("state").exists());
+    fs::remove_file(cache.join("outside"))?;
+    let (out, preview) = f.run(&["skill", "upgrade", "owner/repo", "--dry-run"])?;
+    assert_code(&out, 0);
+    assert_eq!(preview["data"]["skills"], json!(["example", "extra"]));
+    assert_eq!(preview["data"]["persistentWrites"], false);
+    assert!(!f.file("state").exists());
+    let (out, adopted) = f.run(&["skill", "adopt", "owner/repo", "--yes"])?;
+    assert_code(&out, 0);
+    assert_eq!(
+        adopted["data"]["results"]
+            .as_array()
+            .ok_or("results")?
+            .len(),
+        2
+    );
+    assert_eq!(adopted["data"]["results"][0]["nativeInvoked"], false);
+    assert_eq!(fs::read(&lock)?, before);
+    let (out, next) = f.run(&["skill", "upgrade", "owner/repo", "--dry-run"])?;
+    assert_code(&out, 0);
+    assert_eq!(next["data"]["results"][0]["status"], "fixed-version");
+    Ok(())
+}
+
+fn public_skill_runner(f: &Fixture) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    use std::os::unix::fs::PermissionsExt as _;
+    let cache = f.home.join(".npm/_npx/fixture/node_modules");
+    let entry = cache.join("skills/bin/cli.mjs");
+    let node = f
+        .home
+        .join(".local/share/mise/installs/node/latest/bin/node");
+    fs::create_dir_all(entry.parent().ok_or("entry parent")?)?;
+    fs::create_dir_all(node.parent().ok_or("node parent")?)?;
+    fs::write(&entry, include_bytes!("fixtures/native-skills/cli.py"))?;
+    fs::write(&node, b"#!/bin/sh\nif [ \"$1\" = --version ]; then printf 'v26.13.1\n'; exit 0; fi\nexec /usr/bin/python3 \"$@\"\n")?;
+    fs::set_permissions(&node, fs::Permissions::from_mode(0o700))?;
+    write_json(
+        &cache.join("skills/package.json"),
+        &json!({"name":"skills","version":"1.9.0","bin":{"skills":"./bin/cli.mjs"}}),
+    )?;
+    Ok(cache)
+}
+
+#[test]
+fn explicit_skill_upgrade_pins_the_new_version_and_checks_local_presence() -> TestResult {
+    let f = Fixture::new()?;
+    native_skill_fixture(&f, &["example"])?;
+    let lock = f.home.join(".agents/.skill-lock.json");
+    let mut native: serde_json::Value = serde_json::from_slice(&fs::read(&lock)?)?;
+    native["skills"]["example"]["ref"] = json!("HEAD");
+    write_json(&lock, &native)?;
+    public_skill_runner(&f)?;
+    let (out, adopted) = f.run(&["skill", "adopt", "owner/repo", "--yes"])?;
+    assert_code(&out, 0);
+    assert_eq!(adopted["data"]["results"][0]["nativeInvoked"], false);
+    let commit = "b".repeat(40);
+    let (out, result) = f.run(&[
+        "skill",
+        "upgrade",
+        "owner/repo",
+        "--revision",
+        &commit,
+        "--yes",
+    ])?;
+    assert_code(&out, 0);
+    assert_eq!(
+        result["data"]["results"][0]["journal"]["phase"],
+        "succeeded"
+    );
+    let (out, result) = f.run(&["skill", "upgrade", "owner/repo", "--dry-run"])?;
+    assert_code(&out, 0);
+    assert_eq!(result["data"]["results"][0]["status"], "fixed-version");
+    let record: serde_json::Value = serde_json::from_slice(&fs::read(&lock)?)?;
+    assert_eq!(record["skills"]["example"]["commit"], commit);
+    assert_eq!(
+        fs::read_to_string(f.home.join("native-calls.jsonl"))?
+            .lines()
+            .count(),
+        1
+    );
+    let (out, _) = f.run(&["skill", "uninstall", "example", "--yes"])?;
+    assert_code(&out, 0);
+    let (out, gone) = f.run(&["skill", "upgrade", "owner/repo", "--dry-run"])?;
+    assert_code(&out, 3);
+    assert_eq!(gone["error"]["code"], "skill_not_installed");
     Ok(())
 }
 
@@ -372,7 +495,9 @@ fn skill_browser_shows_installed_locations_and_shared_profile_visibility() -> Te
     for (root, name) in [
         (".claude-mi", "fixture-skill"),
         (".claude", "claude-import"),
+        (".claude-glm", "glm-only"),
         (".codex", "codex-import"),
+        (".cursor", "cursor-only"),
     ] {
         let folder = f.home.join(root).join("skills");
         fs::create_dir_all(&folder)?;
@@ -386,9 +511,6 @@ fn skill_browser_shows_installed_locations_and_shared_profile_visibility() -> Te
             fs::create_dir(&skill)?;
             fs::write(skill.join("SKILL.md"), format!("# {name}\n"))?;
         }
-    }
-    for root in [".claude-glm", ".cursor"] {
-        fs::create_dir(f.home.join(root))?;
     }
     let (out, v) = f.run(&["skill"])?;
     assert_code(&out, 0);
@@ -406,6 +528,7 @@ fn skill_browser_shows_installed_locations_and_shared_profile_visibility() -> Te
         "skill-visibility",
         "skill-claude-import",
         "skill-codex-import",
+        "skill-location-groups",
     ] {
         chezmoi_native::run_browser_pty(&f, &["skill"], scenario, &f.home, "140", "0")?;
     }
@@ -803,7 +926,7 @@ fn root_help_prioritizes_daily_tasks_and_advanced_help_keeps_recovery() -> TestR
         assert!(!help.contains("--resolve-failed"), "{help}");
         assert!(!help.contains("--chezmoi-source"), "{help}");
         for item in [
-            "mo [全局参数] <类型> [对象] [动作]",
+            "mo [命令] [参数]",
             "mo help <命令>",
             "mo app [应用]",
             "mo config",
@@ -838,8 +961,8 @@ fn root_help_prioritizes_daily_tasks_and_advanced_help_keeps_recovery() -> TestR
         );
     }
     for (category, example) in [
-        ("app", "mo app adopt [名称]"),
-        ("config", "mo config list --refresh"),
+        ("app", "mo app adopt NAME"),
+        ("config", "mo config apply PATH --dry-run"),
         ("agent", "mo agent launch"),
         ("skill", "mo skill plugins --help"),
     ] {

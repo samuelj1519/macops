@@ -188,6 +188,11 @@ fn may_request_confirmation(ctx: &context::Context, command: &cli::Command) -> b
             } | Command::Skill {
                 command: Some(
                     SkillCmd::Adopt { .. }
+                        | SkillCmd::Install {
+                            source: Some(_),
+                            ..
+                        }
+                        | SkillCmd::Upgrade(_)
                         | SkillCmd::Remove { .. }
                         | SkillCmd::Sync(_)
                         | SkillCmd::Policy {
@@ -314,6 +319,25 @@ fn repeats_recovered(
         && recovered.matches(Action::Upgrade, &format!("ai-native:{tool}"), version))
 }
 
+fn repeats_skill(
+    ctx: &context::Context,
+    original: &domain::Journal,
+    command: &cli::SkillCmd,
+) -> error::Result<bool> {
+    use domain::Action;
+    match command {
+        cli::SkillCmd::Install {
+            recipe: Some(path), ..
+        } if original.plan.action == Action::Install => {
+            native_skills::matches_recipe_file(original, path)
+        }
+        cli::SkillCmd::Upgrade(selection) if original.plan.action == Action::Upgrade => {
+            native_skills::matches_upgrade(ctx, original, selection)
+        }
+        _ => Ok(false),
+    }
+}
+
 fn repeats_resource(
     ctx: &context::Context,
     command: &cli::Command,
@@ -331,17 +355,9 @@ fn repeats_resource(
             return matches_resumed_stage(original, operation_id);
         }
         Command::Skill {
-            command: Some(SkillCmd::Install { recipe }),
+            command: Some(command @ (SkillCmd::Install { .. } | SkillCmd::Upgrade(_))),
             ..
-        } if original.plan.action == Action::Install => {
-            return native_skills::matches_recipe_file(original, recipe);
-        }
-        Command::Skill {
-            command: Some(SkillCmd::Upgrade(selection)),
-            ..
-        } if original.plan.action == Action::Upgrade => {
-            return native_skills::matches_upgrade(ctx, original, selection);
-        }
+        } => return repeats_skill(ctx, original, command),
         Command::App {
             command: Some(AppCmd::Install { id, version }),
             ..
@@ -510,7 +526,10 @@ fn run_scoped(
             if let Some(operation) = history.iter().position(|journal| journal.id == *query) {
                 return Ok(json!([history.swap_remove(operation)]));
             }
-            history.retain(|journal| journal.plan.package.id == *query);
+            history.retain(|journal| {
+                journal.plan.package.id == *query
+                    || journal.plan.package.name.eq_ignore_ascii_case(query)
+            });
         }
         return Ok(json!(history));
     }
@@ -1390,19 +1409,21 @@ fn root_help() -> String {
     use std::fmt::Write as _;
     let mut text = String::from(concat!(
         "本机软件、技能与配置\n\n",
-        "用法  mo [全局参数] <类型> [对象] [动作]\n\n",
+        "用法  mo [命令] [参数]\n\n",
         "四类入口\n",
         "  mo app [应用]         应用：安装、升级、卸载、纳入管理\n",
         "  mo config [子命令]    配置：chezmoi 归属与治理\n",
         "  mo skill [技能]       技能与插件：安装、升级、检查\n",
         "  mo agent [子命令]     Agent CLI、档案、凭据与启动\n\n",
-        "常用动作\n",
-        "  mo <名称>             跨类型查询对象\n",
-        "  mo recommend <目标>   查看来源和安装建议\n",
-        "  mo recommend --setup  设置推荐模型\n",
-        "  mo app adopt [名称]   将现有软件纳入管理\n",
-        "  mo skill market       浏览插件市场\n",
-        "  mo recover [操作号]   查看待核对操作或核对原结果\n\n",
+        "我想做什么\n",
+        "  查本机          mo 或 mo search <名称>\n",
+        "  找安装方式      mo recommend <目标>\n",
+        "  安装共享技能    mo skill install owner/repo\n",
+        "  更新本机技能    mo skill upgrade owner/repo\n",
+        "  接管已有软件    mo app adopt [名称]\n",
+        "  查看插件市场    mo skill market\n",
+        "  设置推荐模型    mo recommend --setup\n",
+        "  查看上次结果    mo recover 或 mo history\n\n",
         "其他入口\n",
         "  mo dirs --roots       查看当前目录与状态范围\n",
         "  mo manifest --help   导出清单、比较差异和预演重放\n",
@@ -1583,7 +1604,7 @@ pub fn main_entry() -> ExitCode {
 }
 
 fn skill_install_usage(error: &clap::Error) -> Option<String> {
-    use clap::error::{ContextKind, ContextValue, ErrorKind};
+    use clap::error::{ContextKind, ErrorKind};
     let usage = error.get(ContextKind::Usage)?.to_string();
     let usage = usage.strip_prefix("Usage:").unwrap_or(&usage);
     if !usage
@@ -1594,18 +1615,8 @@ fn skill_install_usage(error: &clap::Error) -> Option<String> {
         return None;
     }
     match error.kind() {
-        ErrorKind::UnknownArgument => {
-            let ContextValue::String(value) = error.get(ContextKind::InvalidArg)? else {
-                return None;
-            };
-            let github = value.strip_prefix("github.com/").unwrap_or(value);
-            let repo = policy::public_source::repository_subject(github)?;
-            Some(format!(
-                "GitHub 仓库请先用 mo recommend {repo} 查看安装方式。已有本机配方时，用 mo skill install --recipe /绝对路径/recipe.json。"
-            ))
-        }
         ErrorKind::MissingRequiredArgument => {
-            Some("请用 --recipe 指定本机配方的绝对路径。示例见 mo skill install --help。".into())
+            Some("运行 mo skill install owner/repo。已有本机配方才需要 --recipe。".into())
         }
         _ => None,
     }
