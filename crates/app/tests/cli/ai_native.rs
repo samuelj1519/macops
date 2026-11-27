@@ -1405,3 +1405,23 @@ fn ai_r3_healthy_payload_and_wrong_version_retain_public_recovery_behavior() -> 
     }
     Ok(())
 }
+
+#[test]
+fn cursor_upgrade_refuses_an_active_mise_environment_override_before_native_execution() -> TestResult
+{
+    let f = setup("cursor", "1.0.0")?;
+    let cfg = f.home.join(".config/mise/config.toml");
+    let before = fs::read(&cfg)?;
+    let output = f
+        .command()
+        .env("MISE_ENV", "fixture-environment")
+        .args(["agent", "upgrade", "cursor", "--local", "--yes"])
+        .output()?;
+    assert_code(&output, 3);
+    let report: Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(report["error"]["code"], "mise_env_override_active");
+    assert_eq!(fs::read(cfg)?, before);
+    assert!(!f.home.join("mise-calls").exists());
+    assert!(!f.file("state/active.json").exists());
+    Ok(())
+}

@@ -279,3 +279,58 @@ fn registered_market_without_a_verified_github_origin_never_supplies_repository_
     assert!(!ctx.state.exists());
     Ok(())
 }
+
+#[test]
+fn local_software_recommendation_uses_registered_app_without_showing_plugin_recipe_as_an_app()
+-> crate::test_support::TestResult {
+    use crate::domain::{Catalog, Kind as KindOfPackage, Observation, Receipt, Receipts};
+    use std::fs;
+    let root = tempfile::tempdir_in("/private/tmp")?;
+    let ctx = fixture_context(root.path())?;
+    let mut app = crate::test_support::package();
+    app.name = "widget".into();
+    let mut plugin = app.clone();
+    plugin.id = "fixture:plugin".into();
+    plugin.kind = KindOfPackage::Plugin;
+    fs::create_dir_all(ctx.catalog.parent().ok_or("catalog parent")?)?;
+    let catalog = Catalog {
+        schema_version: 1,
+        packages: vec![app.clone(), plugin],
+    };
+    fs::write(&ctx.catalog, serde_json::to_vec(&catalog)?)?;
+    fs::create_dir_all(&ctx.state)?;
+    let receipts = Receipts {
+        schema_version: 1,
+        installations: std::collections::BTreeMap::from([(
+            app.id.clone(),
+            Receipt {
+                scope: Some(ctx.scope.clone()),
+                query: None,
+                package: app,
+                observation: Observation::Present {
+                    version: "1.0.0".into(),
+                    evidence: None,
+                },
+                operation_id: "OP-fixture".into(),
+                updated_at: 1,
+            },
+        )]),
+    };
+    let receipt_path = ctx.state.join("receipts.json");
+    let bytes = serde_json::to_vec(&receipts)?;
+    fs::write(&receipt_path, &bytes)?;
+    let related = Related::read(&ctx, &serde_json::json!({"query":"widget"}));
+    let (kind, view) = related.views.first().ok_or("local application match")?;
+    assert!(matches!(kind, Kind::Apps));
+    assert_eq!(view.items.len(), 1);
+    assert!(
+        view.items[0]
+            .inventory
+            .as_ref()
+            .is_some_and(|info| info.status == State::Unknown)
+    );
+    assert!(related.status().contains("待核验"));
+    assert!(related.maintenance(1).contains("查看和维护软件"));
+    assert_eq!(fs::read(receipt_path)?, bytes);
+    Ok(())
+}

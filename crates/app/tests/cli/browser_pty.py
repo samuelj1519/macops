@@ -662,6 +662,13 @@ try:
             offset = type_key(b"r")
             expect("受管配置清单", offset)
         type_key(b"q")
+    elif scenario == "agent-refresh":
+        expect("Agent")
+        offset = type_key(b"r")
+        expect("1.2.3", offset)
+        expect("codex", offset)
+        expect("Agent CLI 版本或档案证据不完整", offset)
+        type_key(b"q")
     elif scenario == "archived":
         expect("绑定已变化")
         offset = type_key(b"\r")

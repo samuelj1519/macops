@@ -535,3 +535,36 @@ fn fixed_slot_can_reference_an_external_key_without_copying_it() -> TestResult {
     assert_eq!(result, token.as_bytes());
     Ok(())
 }
+
+#[test]
+fn borrowed_credential_read_rejects_file_identity_swap_even_after_a_valid_lookup() -> TestResult {
+    let folder = tempfile::tempdir_in("/private/tmp")?;
+    let path = folder.path().join("fixture.keychain");
+    let displaced = folder.path().join("displaced");
+    std::fs::write(&path, b"original fixture")?;
+    let item = ExternalItem::bind(&path, "fixture service".into(), "fixture account".into())?;
+    assert_eq!(
+        external_from(&item, |_, _, _| Ok(None))
+            .err()
+            .ok_or("missing lookup")?
+            .code,
+        "model_keychain_item_missing"
+    );
+    let swapped = external_from(&item, |location, service, account| {
+        assert_eq!(location, Some(path.as_path()));
+        assert_eq!(service, "fixture service");
+        assert_eq!(account, "fixture account");
+        std::fs::rename(&path, &displaced)?;
+        std::fs::write(&path, b"replacement fixture")?;
+        Ok(Some(FIXTURE_TOKEN.to_vec()))
+    });
+    assert_eq!(
+        swapped
+            .err()
+            .ok_or("changed keychain identity accepted")?
+            .code,
+        "model_keychain_unavailable"
+    );
+    assert_eq!(std::fs::read(displaced)?, b"original fixture");
+    Ok(())
+}

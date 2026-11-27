@@ -189,3 +189,79 @@ fn retained_missing_directory_and_shared_descriptor_budget_do_not_fall_back() ->
     assert!(bindings.relative(&base, Path::new("../escape")).is_err());
     Ok(())
 }
+
+#[test]
+fn bounded_input_and_config_writers_refuse_directories_and_preserve_their_contents() -> TestResult {
+    let temp = tempfile::tempdir_in("/private/tmp")?;
+    let folder = temp.path().join("settings");
+    fs::create_dir(&folder)?;
+    fs::write(folder.join("nested"), b"preserve")?;
+    let root = Directory::open(temp.path())?;
+    let leaf = OsStr::new("settings");
+    assert_eq!(
+        regular_bytes(&folder)
+            .err()
+            .ok_or("directory read accepted")?
+            .code,
+        "invalid_input_file"
+    );
+    assert_eq!(
+        root.read_regular(leaf, 128)
+            .err()
+            .ok_or("configuration directory read accepted")?
+            .code,
+        "invalid_config_input"
+    );
+    assert_eq!(
+        root.atomic_replace_regular(leaf, b"wrong", 0o600, |_| Ok(()))
+            .err()
+            .ok_or("directory replaced")?
+            .code,
+        "unsupported_config_file"
+    );
+    assert_eq!(
+        root.unlink_regular(leaf, |_| Ok(()))
+            .err()
+            .ok_or("directory removed")?
+            .code,
+        "unsupported_config_file"
+    );
+    assert_eq!(fs::read(folder.join("nested"))?, b"preserve");
+    assert_eq!(fs::read_dir(temp.path())?.count(), 1);
+
+    let excess = temp.path().join("oversized");
+    fs::File::create(&excess)?.set_len(16 * 1024 * 1024 + 1)?;
+    assert_eq!(
+        regular_bytes(&excess)
+            .err()
+            .ok_or("oversized input was read")?
+            .code,
+        "invalid_input_file"
+    );
+    Ok(())
+}
+
+#[test]
+fn descriptor_parent_is_the_bound_physical_directory_and_invalid_metadata_stays_unknown()
+-> TestResult {
+    let fixture = tempfile::tempdir_in("/private/tmp")?;
+    let root = Directory::open(fixture.path())?;
+    fs::create_dir(fixture.path().join("child"))?;
+    let mut bindings = Bindings::new(4);
+    let leaf = bindings.relative(&root, Path::new("child/config.toml"))?;
+    assert_eq!(leaf.parent_directory()?.path, fixture.path().join("child"));
+    assert!(leaf.metadata()?.is_none());
+    let outside = bindings.relative(&root, Path::new("../config.toml"));
+    assert_eq!(
+        outside.err().ok_or("parent traversal accepted")?.code,
+        "invalid_config_target"
+    );
+    assert_eq!(
+        number(-1_i64)
+            .err()
+            .ok_or("negative metadata accepted")?
+            .code,
+        "invalid_file_metadata"
+    );
+    Ok(())
+}

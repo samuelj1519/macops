@@ -1494,3 +1494,42 @@ fn recovery_rejects_a_changed_settings_root_or_used_native_source_scope() -> Tes
 fn clear_pending(manifest: &Manifest, pending: &Pending) -> Result<()> {
     clear_pending_checked(manifest, pending, || guard::verify(manifest, pending))
 }
+
+#[test]
+fn recovery_removes_its_new_link_when_another_link_in_the_batch_was_never_published() -> TestResult
+{
+    let f = Fixture::new()?;
+    link_profile(&f, false)?;
+    let sibling = f.ctx.home.join(".agents/skills/sibling");
+    fs::create_dir(&sibling)?;
+    fs::write(sibling.join("SKILL.md"), b"---\nname: sibling\n---\nBody\n")?;
+    fs::write(
+        f.ctx.settings.join("manifests/skill-profiles.json"),
+        br#"{"claude":{"mi":{"links":["example","sibling"]}}}"#,
+    )?;
+    let configuration = f.ctx.home.join(".claude-mi/settings.json");
+    let before = fs::read(&configuration)?;
+    let mut batch = link_batch(&f, "LINK-CREATE-PARTIAL")?;
+    assert_eq!(batch.manifest.files.len(), 2);
+    for parent in &batch.pending.parents {
+        files::publish_parent(parent)?;
+    }
+    let first = &batch.manifest.files[0];
+    let candidate = candidate_for(&batch.pending.files[0], &batch.pending)?;
+    files::publish_link(&f.ctx.home, &first.namespace, &first.before, &candidate)?;
+    assert!(fs::symlink_metadata(&first.path)?.file_type().is_symlink());
+    assert!(!batch.manifest.files[1].path.exists());
+    recover_journal(&f.ctx, &batch.store, &mut batch.journal, false, true)?;
+    assert_eq!(batch.journal.phase, Phase::Failed);
+    assert!(
+        batch
+            .manifest
+            .files
+            .iter()
+            .all(|entry| !entry.path.exists())
+    );
+    assert!(!batch.manifest.pending.exists());
+    assert_eq!(fs::read(configuration)?, before);
+    assert!(f.skill.is_file() && sibling.join("SKILL.md").is_file());
+    Ok(())
+}

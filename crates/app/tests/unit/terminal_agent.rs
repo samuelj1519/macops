@@ -224,3 +224,63 @@ fn agent_action_losing_its_owner_returns_to_inventory_without_saving()
     }
     Ok(())
 }
+
+#[test]
+fn agent_browser_actions_use_highlighted_identity_and_archive_only_managed_configuration()
+-> crate::test_support::TestResult {
+    let id = "agent:claude:fixture";
+    let view = View {
+        scope: "global".into(),
+        items: vec![Item {
+            id: id.into(),
+            name: "fixture".into(),
+            summary: String::new(),
+            managed: true,
+            management: Management::Adopted,
+            directory: false,
+            path: None,
+            source: None,
+            agents: vec![],
+            loaded: None,
+            details: vec![],
+            list: crate::browser::ListDetail::Plain,
+            inventory: None,
+        }],
+        coverage: "observed",
+        difference_coverage: "not_applicable",
+        observed_at: None,
+        note: String::new(),
+        incomplete: false,
+    };
+    let mut browser = Browser::new(view, Kind::Agents);
+    assert!(browser.agent_action('x').is_none());
+    browser.page = Page::Detail(Box::new(Details {
+        actual: None,
+        source: None,
+        recovery: None,
+        agent_session: None,
+        agent_removable: false,
+        skills_native: false,
+    }));
+    assert!(browser.agent_action('x').is_none());
+    assert!(browser.agent_action('l').is_none());
+    let Page::Detail(details) = &mut browser.page else {
+        return Err("Agent details page was not opened".into());
+    };
+    details.agent_removable = true;
+    details.agent_session = Some(crate::agent::codex_install::session::Details {
+        plugin: "fixture@market".into(),
+        preference: "已启用",
+        observed_model: Some("fixture".into()),
+    });
+    assert!(
+        matches!(browser.agent_action('x'),Some(NativeAction::AgentUninstall(target)) if target==id)
+    );
+    assert!(
+        matches!(browser.agent_action('e'),Some(NativeAction::AgentPreference(target)) if target==id)
+    );
+    assert!(
+        matches!(browser.agent_action('l'),Some(NativeAction::AgentLaunch(target)) if target==id)
+    );
+    Ok(())
+}

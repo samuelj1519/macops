@@ -506,3 +506,193 @@ fn tagged_upgrade_first_records_current_shared_skill_and_preserves_requested_tag
     assert_eq!(lock["skills"]["widget"]["commit"], "a".repeat(40));
     Ok(())
 }
+
+#[test]
+fn app_previews_accept_name_first_syntax_and_reject_project_writes() -> TestResult {
+    let f = Fixture::new()?;
+    let (out, first) = f.run(&["app", "demo", "install", "--version", "2.0.0", "--dry-run"])?;
+    assert_code(&out, 0);
+    let (out, second) = f.run(&["app", "install", "demo", "--version", "2.0.0", "--dry-run"])?;
+    assert_code(&out, 0);
+    assert_eq!(first, second);
+    assert_eq!(first["data"]["plan"]["target"], "2.0.0");
+
+    fs::write(f.file("version"), "1.0.0")?;
+    let (out, unregistered) =
+        f.run(&["app", "demo", "upgrade", "--version", "2.0.0", "--dry-run"])?;
+    assert_code(&out, 3);
+    assert_eq!(unregistered["error"]["code"], "adoption_required");
+
+    let project = f.file("project");
+    fs::create_dir(&project)?;
+    let (out, denied) = f.run(&[
+        "app",
+        "upgrade",
+        "demo",
+        "--version",
+        "2.0.0",
+        "--project",
+        project.to_str().ok_or("project")?,
+    ])?;
+    assert_code(&out, 1);
+    assert_eq!(denied["error"]["code"], "project_scope_unsupported");
+    assert_eq!(fs::read_to_string(f.file("version"))?, "1.0.0");
+    assert!(!f.file("calls").exists() && !f.file("state").exists());
+    Ok(())
+}
+
+#[test]
+fn shared_skill_prefers_existing_supported_runner_and_keeps_scope_on_preview() -> TestResult {
+    let f = Fixture::new()?;
+    native_skill_fixture(&f, &["widget"])?;
+    let cache = super::public_skill_runner(&f)?;
+    let entry = cache.join("skills/bin/cli.mjs");
+    std::os::unix::fs::symlink(&entry, f.home.join("bin/skills"))?;
+    let (out, preview) = f.run(&["skill", "adopt", "widget", "--dry-run"])?;
+    assert_code(&out, 0);
+    assert_eq!(preview["data"]["skills"], json!(["widget"]));
+    assert_eq!(
+        preview["data"]["directory"],
+        json!(f.home.join(".agents/skills"))
+    );
+    assert!(!f.file("state").exists() && !f.home.join("native-calls.jsonl").exists());
+    Ok(())
+}
+
+#[test]
+fn refresh_of_discovered_source_reports_the_required_next_step_without_writing() -> TestResult {
+    let f = Fixture::new()?;
+    native_skill_fixture(&f, &["widget"])?;
+    let (out, report) = f.run(&["skill", "refresh", "source:owner/repo", "--dry-run"])?;
+    assert_code(&out, 3);
+    assert_eq!(report["error"]["code"], "native_skills_recipe_required");
+    let plain = super::plain(&f, &["skill", "refresh", "source:owner/repo", "--dry-run"])?;
+    assert_code(&plain, 3);
+    assert!(String::from_utf8(plain.stderr)?.contains("mo skill adopt owner/repo --dry-run"));
+    assert!(!f.file("state").exists() && !f.file("cache").exists());
+    Ok(())
+}
+
+#[test]
+fn config_target_first_preview_matches_the_action_first_form() -> TestResult {
+    let f = Fixture::new()?;
+    let target = f.home.join(".fixture-config");
+    fs::write(&target, b"unchanged")?;
+    let path = target.to_str().ok_or("config target")?;
+    let (out, target_first) = f.run(&["config", path, "apply", "--dry-run"])?;
+    assert_code(&out, 0);
+    let (out, action_first) = f.run(&["config", "apply", path, "--dry-run"])?;
+    assert_code(&out, 0);
+    assert_eq!(target_first, action_first);
+    assert_eq!(action_first["data"]["persistentWrites"], false);
+    assert_eq!(fs::read(target)?, b"unchanged");
+    assert!(!f.file("state").exists());
+    Ok(())
+}
+
+#[test]
+fn agent_browser_refresh_preserves_known_version_when_another_tool_probe_fails() -> TestResult {
+    let f = Fixture::new()?;
+    fs::create_dir(f.home.join(".claude-mi"))?;
+    f.script(
+        "claude",
+        r#"test "$*" = --version; printf 'claude 1.2.3\n'"#,
+    )?;
+    f.script("codex", "exit 19")?;
+    super::chezmoi_native::run_browser_pty(&f, &["agent"], "agent-refresh", &f.home, "160", "3")?;
+    assert!(!f.file("state").exists());
+    Ok(())
+}
+
+#[test]
+fn declared_skill_source_requires_matching_native_repository_before_sync() -> TestResult {
+    let f = Fixture::new()?;
+    native_skill_fixture(&f, &["alpha"])?;
+    write_json(
+        &f.file("settings/manifests/managed-agent-assets.json"),
+        &json!({
+            "schema_version":1,"assets":{"alpha":{
+                "kind":"github-skill","repository":"owner/repo","revision":"a".repeat(40),"path":"skills/alpha"
+            }}
+        }),
+    )?;
+    write_json(
+        &f.file("settings/manifests/skill-profiles.json"),
+        &json!({
+            "claude":{"mi":{"links":["alpha"]}}
+        }),
+    )?;
+    fs::create_dir_all(f.home.join(".claude-mi/skills"))?;
+    let lock = f.home.join(".agents/.skill-lock.json");
+    let mut native: Value = serde_json::from_slice(&fs::read(&lock)?)?;
+    let args = ["skill", "sync", "--only", "source:alpha", "--dry-run"];
+    let (out, plan) = f.run(&args)?;
+    assert_code(&out, 0);
+    assert_eq!(plan["data"]["planned_changes"], 1);
+    assert!(plan.to_string().contains(".claude-mi/skills/alpha"));
+
+    native["skills"]["alpha"]["source"] = json!("other/repo");
+    native["skills"]["alpha"]["sourceUrl"] = json!("https://github.com/other/repo");
+    write_json(&lock, &native)?;
+    let (out, mismatch) = f.run(&args)?;
+    assert_code(&out, 3);
+    assert_eq!(mismatch["error"]["code"], "declared_link_source_mismatch");
+    assert!(!f.file("state").exists());
+    assert!(!f.home.join(".claude-mi/skills/alpha").exists());
+    Ok(())
+}
+
+#[test]
+fn filtered_skill_inventory_reports_unverifiable_declarations_without_treating_them_as_installed()
+-> TestResult {
+    let f = Fixture::new()?;
+    let manifest = f.file("settings/manifests/managed-agent-assets.json");
+    let mut declaration = json!({"schema_version":1,"assets":{
+        "alpha":{"kind":"github-skill","repository":"owner/repo","revision":"a".repeat(40),"path":"skills/alpha"},
+        "future":{"kind":"future-kind"}
+    }});
+    write_json(&manifest, &declaration)?;
+    let (out, filtered) = f.run(&["skill", "--details", "--only", "alpha"])?;
+    assert_code(&out, 3);
+    let entries = filtered["data"]["declared"]
+        .as_array()
+        .ok_or("declared assets")?;
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["id"], "asset:alpha");
+    let (out, all) = f.run(&["skill", "--details"])?;
+    assert_code(&out, 3);
+    assert!(
+        all["data"]["declared"]
+            .as_array()
+            .ok_or("declared assets")?
+            .iter()
+            .any(|row| row["id"] == "asset:future"
+                && row["kind"] == "unsupported"
+                && row["status"] == "declared")
+    );
+
+    declaration["assets"]["future"] = json!({});
+    write_json(&manifest, &declaration)?;
+    let (out, invalid) = f.run(&["skill", "--details"])?;
+    assert_code(&out, 1);
+    assert_eq!(invalid["error"]["code"], "invalid_assets");
+    assert!(!f.file("state").exists());
+    Ok(())
+}
+
+#[test]
+fn resource_query_refuses_a_file_in_place_of_project_directory() -> TestResult {
+    let f = Fixture::new()?;
+    let project = f.file("not-a-project");
+    fs::write(&project, "fixture")?;
+    let (out, result) = f.run(&[
+        "agent",
+        "--project",
+        project.to_str().ok_or("project fixture")?,
+    ])?;
+    assert_code(&out, 1);
+    assert_eq!(result["error"]["code"], "invalid_project_root");
+    assert_eq!(fs::read_to_string(project)?, "fixture");
+    assert!(!f.file("state").exists());
+    Ok(())
+}

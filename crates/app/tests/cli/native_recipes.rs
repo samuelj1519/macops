@@ -522,3 +522,48 @@ fn legacy_app_upgrade_uses_exact_skill_installation_without_writing_on_preview()
     assert_eq!(fs::read(native.f.file("state/active.json"))?, before);
     Ok(())
 }
+
+#[test]
+fn legacy_app_uninstall_preview_keeps_native_skill_and_its_frozen_receipt() -> TestResult {
+    let native = NativeFixture::new()?;
+    let (out, installed) = native.install()?;
+    assert_code(&out, 0);
+    let id = installed["data"]["journal"]["plan"]["package"]["id"]
+        .as_str()
+        .ok_or("skill identity")?;
+    let receipt = native.f.file("state/receipts.json");
+    let before = fs::read(&receipt)?;
+    let payload = native.f.home.join(".agents/skills/alpha/SKILL.md");
+    let content = fs::read(&payload)?;
+    let (out, result) = native.f.run(&["app", "uninstall", id, "--dry-run"])?;
+    assert_code(&out, 0);
+    assert_eq!(result["data"]["mode"], "dry-run");
+    assert_eq!(result["data"]["persistentWrites"], false);
+    assert_eq!(native.calls()?.len(), 1);
+    assert_eq!(fs::read(receipt)?, before);
+    assert_eq!(fs::read(payload)?, content);
+    Ok(())
+}
+
+#[test]
+fn manual_failure_resolution_preserves_the_original_partial_native_install() -> TestResult {
+    let native = NativeFixture::new()?;
+    native.mode("partial")?;
+    let (out, result) = native.install()?;
+    assert_code(&out, 3);
+    let original = &result["data"]["journal"];
+    assert_eq!(original["phase"], "unknown");
+    let id = original["id"].as_str().ok_or("original operation")?;
+    let payload = native.f.home.join(".agents/skills/alpha/SKILL.md");
+    let before = fs::read(&payload)?;
+    let lock = native.f.home.join(".agents/.skill-lock.json");
+    let state = fs::read(&lock)?;
+    let (out, result) = native.f.run(&["recover", id, "--mark-failed", "--yes"])?;
+    assert_code(&out, 3);
+    assert_eq!(result["data"]["journal"]["phase"], "failed");
+    assert_eq!(result["data"]["journal"]["id"], id);
+    assert_eq!(native.calls()?.len(), 1);
+    assert_eq!(fs::read(payload)?, before);
+    assert_eq!(fs::read(lock)?, state);
+    Ok(())
+}

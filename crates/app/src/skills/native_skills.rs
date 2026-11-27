@@ -98,6 +98,14 @@ pub(crate) fn recommended_recipes(ctx: &Context, subject: &str) -> Result<Vec<Re
 }
 
 pub(crate) fn install_recommended(ctx: &Context, recipe: Recipe) -> Result<Value> {
+    install_recommended_using(ctx, recipe, crate::operations::confirm)
+}
+
+fn install_recommended_using(
+    ctx: &Context,
+    recipe: Recipe,
+    confirm: impl FnOnce(&str, bool) -> Result<()>,
+) -> Result<Value> {
     native_config_scope(ctx)?;
     let scope = format!(
         "安装并纳入管理 {} · Skills CLI\n来源 https://github.com/{} · {}\n目标 Codex 用户级 · 仅手动触发 {}\n安装到共享技能目录，其他支持的 Agent 也可能发现",
@@ -106,7 +114,7 @@ pub(crate) fn install_recommended(ctx: &Context, recipe: Recipe) -> Result<Value
         recipe.source.commit,
         if recipe.manual_only { "是" } else { "否" }
     );
-    crate::operations::confirm(&scope, false)?;
+    confirm(&scope, false)?;
     if let Some(previous) = crate::operations::recover_before_write(ctx, None)?
         && previous.succeeded
         && previous.original.plan.action == Action::Install
@@ -1839,46 +1847,26 @@ pub(crate) fn validate_recipe_argument(command: &Command) -> Result<()> {
 
 fn explicit_recipe(
     ctx: &Context,
-    command: &Command,
+    command: &SkillCmd,
     dry: bool,
     yes: bool,
 ) -> Result<Option<Value>> {
-    if !matches!(
-        command,
-        Command::Skill {
-            project: _,
-            details: _,
-            only: _,
-            command: Some(SkillCmd::Install { .. } | SkillCmd::Adopt { .. })
-        }
-    ) {
+    if !matches!(command, SkillCmd::Install { .. } | SkillCmd::Adopt { .. }) {
         return Ok(None);
     }
     native_config_scope(ctx)?;
     let value = match command {
-        Command::Skill {
-            project: _,
-            details: _,
-            only: _,
-            command:
-                Some(SkillCmd::Install {
-                    source: None,
-                    recipe: Some(recipe),
-                    ..
-                }),
+        SkillCmd::Install {
+            source: None,
+            recipe: Some(recipe),
+            ..
         } => {
             let (recipe, fence) = read_recipe(recipe)?;
             execute(ctx, recipe, Action::Install, dry, yes, fence)?
         }
-        Command::Skill {
-            project: _,
-            details: _,
-            only: _,
-            command:
-                Some(SkillCmd::Adopt {
-                    id,
-                    recipe: Some(recipe),
-                }),
+        SkillCmd::Adopt {
+            id,
+            recipe: Some(recipe),
         } => {
             let (recipe, fence) = read_recipe(recipe)?;
             let expected = policy::installation_id(&crate::platform::fs::read_path(
@@ -1895,18 +1883,11 @@ fn explicit_recipe(
             }
             execute(ctx, recipe, Action::Adopt, dry, yes, fence)?
         }
-        Command::Skill {
-            command:
-                Some(SkillCmd::Install {
-                    source: Some(source),
-                    ..
-                }),
+        SkillCmd::Install {
+            source: Some(source),
             ..
         } => journey::install(ctx, source, dry, yes)?,
-        Command::Skill {
-            command: Some(SkillCmd::Adopt { id, recipe: None }),
-            ..
-        } => journey::adopt(ctx, id, dry, yes)?,
+        SkillCmd::Adopt { id, recipe: None } => journey::adopt(ctx, id, dry, yes)?,
         _ => return Ok(None),
     };
     Ok(Some(value))
@@ -2075,7 +2056,7 @@ fn upgrade(
         .name
         .as_deref()
         .and_then(|name| name.rsplit_once('@'));
-    if let Some((source, _)) = explicit_source {
+    if explicit_source.is_some() {
         if selection.revision.is_some() || selection.all || !selection.only.is_empty() {
             return Err(Error::attention(
                 "source_revision_selection",
@@ -2092,10 +2073,6 @@ fn upgrade(
                 selection.name.as_deref().unwrap_or_default()
             ));
             return Ok(report);
-        }
-        let selected = crate::skills::public_skill::Request::parse(source)?;
-        if selected.repository != requested.repository {
-            return Err(invalid());
         }
         selection.revision = Some(requested.resolve()?.as_str().to_owned());
         selection.name = Some(repository);
@@ -2259,15 +2236,19 @@ fn resolve_upgrade(ctx: &Context, mut recipe: Recipe, revision: Option<&str>) ->
 }
 
 pub fn run(ctx: &Context, command: &Command, dry: bool, yes: bool) -> Result<Option<Value>> {
+    let Command::Skill {
+        project,
+        command: Some(command),
+        ..
+    } = command
+    else {
+        return Ok(None);
+    };
     if let Some(value) = explicit_recipe(ctx, command, dry, yes)? {
         return Ok(Some(value));
     }
     let value = match command {
-        Command::Skill {
-            project: None,
-            command: Some(SkillCmd::Detail(detail)),
-            ..
-        } => {
+        SkillCmd::Detail(detail) if project.is_none() => {
             let term = &detail.target;
             let key = if term.contains(':') {
                 term.clone()
@@ -2276,12 +2257,7 @@ pub fn run(ctx: &Context, command: &Command, dry: bool, yes: bool) -> Result<Opt
             };
             return native_info(ctx, &key);
         }
-        Command::Skill {
-            project: _,
-            details: _,
-            only: _,
-            command: Some(SkillCmd::Remove { id, .. }),
-        } => execute(
+        SkillCmd::Remove { id, .. } => execute(
             ctx,
             select(ctx, id)?,
             Action::Uninstall,
@@ -2289,24 +2265,9 @@ pub fn run(ctx: &Context, command: &Command, dry: bool, yes: bool) -> Result<Opt
             yes,
             InputFence::default(),
         )?,
-        Command::Skill {
-            project: _,
-            details: _,
-            only: _,
-            command: Some(SkillCmd::Upgrade(selection)),
-        } => upgrade(ctx, selection, dry, yes)?,
-        Command::Skill {
-            project: _,
-            details: _,
-            only: _,
-            command: Some(SkillCmd::Refresh(selection)),
-        } => refresh(ctx, selection, dry)?,
-        Command::Skill {
-            project: _,
-            details: _,
-            only: _,
-            command: Some(SkillCmd::Outdated { name, only }),
-        } => outdated(ctx, name.as_deref(), only)?,
+        SkillCmd::Upgrade(selection) => upgrade(ctx, selection, dry, yes)?,
+        SkillCmd::Refresh(selection) => refresh(ctx, selection, dry)?,
+        SkillCmd::Outdated { name, only } => outdated(ctx, name.as_deref(), only)?,
         _ => return Ok(None),
     };
     Ok(Some(value))

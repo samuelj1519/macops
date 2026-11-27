@@ -748,3 +748,59 @@ fn installed_skill_supplies_a_read_only_outdated_hint_before_recipe_registration
     assert!(!ctx.state.exists() && !ctx.cache.exists() && !ctx.home.join("check-called").exists());
     Ok(())
 }
+
+#[test]
+fn recommendation_cancel_and_recipe_drift_never_launch_the_original_installer() -> TestResult {
+    let (_temp, ctx, recipe) = fixture()?;
+    adopt(&ctx, &recipe)?;
+    let requested = load_book(&ctx)?.1.recipes.remove(0);
+    let payload = disk::payload(&ctx, "alpha")?.join("SKILL.md");
+    let original = fs::read(&payload)?;
+    let active = fs::read(ctx.state.join("active.json"))?;
+    let cancelled = install_recommended_using(&ctx, requested.clone(), |message, explicit| {
+        assert!(!explicit);
+        assert!(message.contains("alpha") && message.contains("共享技能目录"));
+        Err(Error::attention("cancelled", "fixture cancellation"))
+    });
+    assert_eq!(
+        cancelled.err().ok_or("confirmation did not cancel")?.code,
+        "cancelled"
+    );
+    let stale = install_recommended_using(&ctx, requested, |_, _| {
+        let mut book = load_book(&ctx)?.1;
+        book.recipes[0].source.commit = "b".repeat(40);
+        fs::write(book_path(&ctx), disk::encode(&book)?)?;
+        Ok(())
+    });
+    assert!(stale.is_err());
+    assert_eq!(fs::read(&payload)?, original);
+    assert_eq!(fs::read(ctx.state.join("active.json"))?, active);
+    assert!(!ctx.home.join("check-called").exists());
+    Ok(())
+}
+
+#[test]
+fn inventory_preview_uses_fixed_recipe_and_rechecks_the_original_lock_after_confirmation()
+-> TestResult {
+    let (_temp, ctx, recipe) = fixture()?;
+    adopt(&ctx, &recipe)?;
+    let active = fs::read(ctx.state.join("active.json"))?;
+    let lock = disk::lock_path(&ctx);
+    let data = fs::read(&lock)?;
+    let changed = inventory_maintenance(&ctx, "alpha", Action::Uninstall, |prompt, confirmed| {
+        assert!(!confirmed);
+        assert!(prompt.contains("卸载 alpha") && prompt.contains("共享载荷"));
+        let temporary_lock = lock.with_extension("replaced");
+        fs::write(&temporary_lock, &data)?;
+        fs::rename(temporary_lock, &lock)?;
+        Ok(())
+    });
+    assert_eq!(
+        changed.err().ok_or("changed lock was accepted")?.code,
+        "plan_stale"
+    );
+    assert!(disk::payload(&ctx, "alpha")?.join("SKILL.md").is_file());
+    assert_eq!(fs::read(ctx.state.join("active.json"))?, active);
+    assert!(!ctx.home.join("check-called").exists());
+    Ok(())
+}

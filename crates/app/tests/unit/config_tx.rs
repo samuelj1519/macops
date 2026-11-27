@@ -1206,3 +1206,61 @@ fn legacy_restore_preview_and_commit_use_the_original_backup_with_current_source
     );
     Ok(())
 }
+
+#[test]
+fn cursor_reconcile_preserves_http_options_and_writes_only_the_confirmed_version() -> TestResult {
+    let (f, live, source, _, _) = mise_fixture()?;
+    let original = r#"# installed through an HTTP package
+[tools]
+"http:cursor-agent" = { version = "1.0.0", url = "https://example.test/cursor/{{ version }}.tgz" }
+node = "26.13.1"
+"#;
+    let wanted = original.replace("1.0.0", "2.0.0");
+    fs::write(&source, original)?;
+    fs::write(&live, wanted.replace("cursor/{{", "foreign/{{"))?;
+    let blocked = reconcile(&f.ctx, Some("cursor"), false, true)?;
+    assert_eq!(blocked["reason"], "tool_options_drifted");
+    assert_eq!(fs::read_to_string(&source)?, original);
+    assert!(!f.ctx.state.exists());
+
+    fs::write(&live, &wanted)?;
+    let preview = reconcile(&f.ctx, Some("cursor"), true, true)?;
+    assert_eq!(preview["reconcile_state"], "would_reconcile");
+    assert_eq!(preview["persistentWrites"], false);
+    assert_eq!(fs::read_to_string(&source)?, original);
+    let result = reconcile(&f.ctx, Some("cursor"), false, true)?;
+    assert_eq!(result["reconcile_state"], "reconciled");
+    assert_eq!(fs::read_to_string(source)?, wanted);
+    assert_eq!(fs::read_to_string(live)?, wanted);
+    Ok(())
+}
+
+#[test]
+fn layered_mise_detection_handles_conf_d_and_nonconfiguration_files() -> TestResult {
+    let temp = tempfile::tempdir_in("/private/tmp")?;
+    let root = temp.path().join("mise");
+    check_mise_layers(&root)?;
+    let includes = root.join("conf.d");
+    fs::create_dir_all(&includes)?;
+    fs::write(root.join("config.toml"), b"[tools]\n")?;
+    fs::write(root.join("config.backup"), b"old")?;
+    fs::write(includes.join("README"), b"not loaded")?;
+    check_mise_layers(&root)?;
+    let config = includes.join("override.TOML");
+    fs::write(&config, b"[tools]\n")?;
+    assert_eq!(
+        check_mise_layers(&root).err().ok_or("layer accepted")?.code,
+        "mise_layered_config_present"
+    );
+    fs::remove_file(config)?;
+    fs::write(root.join("config.team.toml"), b"[tools]\n")?;
+    assert_eq!(
+        check_mise_layers(&root).err().ok_or("layer accepted")?.code,
+        "mise_layered_config_present"
+    );
+    fs::remove_file(root.join("config.team.toml"))?;
+    fs::remove_dir_all(&includes)?;
+    fs::write(includes, b"not a directory")?;
+    assert!(check_mise_layers(&root).is_err());
+    Ok(())
+}

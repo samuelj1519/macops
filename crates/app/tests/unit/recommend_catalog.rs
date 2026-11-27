@@ -539,3 +539,95 @@ fn recommendation_model_fallback_explains_each_recovery_action() {
     );
     assert!(recommendation_model_hint(&json!({})).is_none());
 }
+
+#[test]
+fn recommendation_confirms_a_concrete_plan_and_rechecks_installation_before_launch() -> TestResult {
+    use crate::domain::{Catalog, CommandSpec, Provider};
+    use clap::Parser as _;
+    use std::{fs, os::unix::fs::PermissionsExt as _};
+    let root = tempfile::tempdir_in("/private/tmp")?;
+    let cli = crate::cli::Cli::try_parse_from([
+        "mo",
+        "--home",
+        root.path().to_str().ok_or("fixture home")?,
+        "recommend",
+        "widget",
+    ])?;
+    let ctx = Context::from_cli(&cli, &mut vec![])?;
+    let program = ctx.home.join("fixture-manager");
+    let version = ctx.home.join("version");
+    fs::write(&program,br#"#!/bin/sh
+set -eu
+case "$1" in
+query)
+  if [ -f "$2" ]; then printf '{"status":"present","version":"1.0.0"}\n'; else printf '{"status":"missing"}\n'; fi ;;
+install) printf 'unexpected native write' > "$3" ;;
+*) exit 9 ;;
+esac
+"#)?;
+    fs::set_permissions(&program, fs::Permissions::from_mode(0o700))?;
+    let launched = ctx.home.join("launched");
+    let mut package = crate::test_support::package();
+    package.name = "widget".into();
+    package.provider = Provider::Command {
+        query: CommandSpec {
+            program: program.clone(),
+            args: vec!["query".into(), version.display().to_string()],
+        },
+        available: None,
+        install: Some(CommandSpec {
+            program,
+            args: vec![
+                "install".into(),
+                version.display().to_string(),
+                launched.display().to_string(),
+            ],
+        }),
+        upgrade: None,
+        uninstall: None,
+        synchronous: true,
+    };
+    fs::create_dir_all(ctx.catalog.parent().ok_or("catalog parent")?)?;
+    fs::write(
+        &ctx.catalog,
+        serde_json::to_vec(&Catalog {
+            schema_version: 1,
+            packages: vec![package.clone()],
+        })?,
+    )?;
+    let cancelled = install_selected_using(&ctx, &package, Some("2.0.0"), |prompt, explicit| {
+        assert_eq!(prompt, "执行此安装计划");
+        assert!(!explicit);
+        Err(Error::attention("cancelled", "fixture cancelled"))
+    });
+    assert_eq!(
+        cancelled.err().ok_or("cancelled plan accepted")?.code,
+        "cancelled"
+    );
+    assert!(!version.exists() && !launched.exists());
+
+    let mut confirmed = false;
+    let changed = install_selected_using(&ctx, &package, Some("2.0.0"), |_, _| {
+        confirmed = true;
+        fs::write(&version, "1.0.0")?;
+        Ok(())
+    });
+    assert!(confirmed && changed.is_err());
+    assert_eq!(fs::read_to_string(version)?, "1.0.0");
+    assert!(!launched.exists());
+    Ok(())
+}
+
+#[test]
+fn recommendation_evidence_requires_a_file_and_never_treats_a_directory_as_input() -> TestResult {
+    let root_error = from_evidence("widget", Path::new("/"))
+        .err()
+        .ok_or("root accepted")?;
+    assert_eq!(root_error.code, "recommend_evidence_invalid");
+    let dir = tempfile::tempdir_in("/private/tmp")?;
+    assert!(from_evidence("widget", dir.path()).is_err());
+    let document = dir.path().join("evidence.json");
+    std::fs::File::create(&document)?.set_len(EVIDENCE_LIMIT + 1)?;
+    assert!(from_evidence("widget", &document).is_err());
+    Ok(())
+}

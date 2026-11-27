@@ -1831,3 +1831,7 @@ mod native_plugins_test_fixture;
 #[cfg(test)]
 #[path = "../tests/unit/profile_codec_regressions.rs"]
 mod profile_codec_regressions;
+
+#[cfg(test)]
+#[path = "../tests/unit/command_replay.rs"]
+mod command_replay_tests;

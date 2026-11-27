@@ -304,3 +304,57 @@ fn claude_write_verification_allows_only_an_empty_root_lease_directory() -> Test
     assert!(claude_updated_files(&root).is_err());
     Ok(())
 }
+
+#[test]
+fn capability_observation_rejects_non_regular_registry_and_exhausted_payload_evidence() -> TestResult
+{
+    let temp = tempfile::tempdir_in("/private/tmp")?;
+    let home = temp.path().join("home");
+    let payload = home.join(".agents/skills/demo");
+    fs::create_dir_all(&payload)?;
+    fs::write(payload.join("SKILL.md"), b"---\nname: demo\n---\nBody\n")?;
+    let record = home.join(".agents/.skill-lock.json");
+    fs::write(
+        &record,
+        serde_json::to_vec(&json!({
+            "version":3,"skills":{"demo":{"source":"owner/repo","sourceType":"github","ref":"a".repeat(40),"skillFolderHash":"fixture"}}
+        }))?,
+    )?;
+    let ctx = test_context(&home)?;
+    let package = resolve_package(&ctx, "skill:demo", false, false)?.ok_or("skill")?;
+    let query = capture(&package)?;
+    for budget in [0, 1] {
+        let mut remaining = budget;
+        assert!(read_anchored_file(&query.record, &mut remaining).is_err());
+        assert_eq!(remaining, 0);
+    }
+    let bytes = fs::read(&record)?;
+    fs::remove_file(&record)?;
+    fs::create_dir(&record)?;
+    let bad = read_anchored_file(&query.record, &mut 1024)
+        .err()
+        .ok_or("directory registry accepted")?;
+    assert_eq!(bad.code, "unsupported_capability_record");
+    fs::remove_dir(&record)?;
+    fs::write(&record, bytes)?;
+
+    fs::remove_file(payload.join("SKILL.md"))?;
+    assert_eq!(
+        snapshot_payload(CapabilityKind::ClaudePlugin, &query.payload, &mut 8192)
+            .err()
+            .ok_or("empty plugin cache accepted")?
+            .code,
+        "capability_payload_empty"
+    );
+    fs::remove_dir(&payload)?;
+    fs::write(&payload, b"not a directory")?;
+    assert_eq!(
+        snapshot_payload(CapabilityKind::SkillsCli, &query.payload, &mut 8192)
+            .err()
+            .ok_or("non-directory payload accepted")?
+            .code,
+        "unsupported_capability_payload"
+    );
+    assert!(!ctx.state.exists());
+    Ok(())
+}

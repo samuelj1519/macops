@@ -257,3 +257,82 @@ fn controls_external_edits_and_unsupported_file_types_block_assessment_without_w
     assert!(!f.ctx.state.exists());
     Ok(())
 }
+
+#[test]
+fn invocation_witnesses_bind_existing_files_directories_and_missing_roots() -> TestResult {
+    let f = PolicyFixture::new()?;
+    let skill = f.skill("fixture", false)?;
+    let parent = skill.parent().ok_or("skill parent")?;
+    let missing = f.ctx.home.join(".cursor/skills");
+    let mut reader = Reader::new();
+    let expected = fs::read(&skill)?;
+    assert_eq!(
+        reader.file(&skill)?.bytes.as_deref(),
+        Some(expected.as_slice())
+    );
+    assert!(reader.directory(parent)?.is_some());
+    assert!(reader.directory(&missing)?.is_none());
+    let (files, directories) = reader.witnesses()?;
+    assert_eq!(files.len(), 2);
+    assert!(files.iter().any(|w| w.path == skill));
+    assert!(
+        files.iter().any(|w| w.path == missing
+            && w.state == crate::capability::rules::capability_tx::State::Missing)
+    );
+    assert_eq!(directories[0].entries["SKILL.md"].kind, "file");
+
+    fs::write(parent.join("added.md"), "concurrent fixture")?;
+    assert_eq!(
+        reader
+            .witnesses()
+            .err()
+            .ok_or("changed directory accepted")?
+            .code,
+        "invocation_plan_stale"
+    );
+    assert_eq!(fs::read(skill)?, expected);
+    assert!(!f.ctx.state.exists());
+    Ok(())
+}
+
+#[test]
+fn invocation_owner_selection_preserves_first_owner_and_rejects_cursor_cache_writes() -> TestResult
+{
+    let f = PolicyFixture::new()?;
+    let skill = f.skill("fixture", false)?;
+    let mut known = BTreeMap::new();
+    let first = Target {
+        path: skill.clone(),
+        kind: MetadataKind::Frontmatter,
+        label: "fixture".into(),
+        owner: "one".into(),
+    };
+    register(&f.ctx, &mut known, first.clone())?;
+    register(&f.ctx, &mut known, first.clone())?;
+    let conflicting = Target {
+        owner: "two".into(),
+        ..first.clone()
+    };
+    assert_eq!(
+        register(&f.ctx, &mut known, conflicting)
+            .err()
+            .ok_or("different owner accepted")?
+            .code,
+        "invocation_owner_conflict"
+    );
+    assert_eq!(known[&skill].owner, "one");
+    let cursor = Target {
+        path: f.ctx.home.join(".cursor/skills/fixture/SKILL.md"),
+        ..first
+    };
+    assert_eq!(
+        register(&f.ctx, &mut known, cursor)
+            .err()
+            .ok_or("read-only target accepted")?
+            .code,
+        "read_only_invocation_target"
+    );
+    assert_eq!(known.len(), 1);
+    assert!(!f.ctx.state.exists());
+    Ok(())
+}

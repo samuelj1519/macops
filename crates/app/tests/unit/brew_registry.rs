@@ -100,3 +100,68 @@ fn registry_permission_change_is_not_silently_repaired() -> TestResult {
     );
     Ok(())
 }
+
+#[test]
+fn stale_brew_binding_requires_explicit_adoption_before_the_registry_can_change() -> TestResult {
+    let (_temp, ctx, mut query) = fixture()?;
+    let store = Store::lock(&ctx)?;
+    register_context(&ctx, &store, query.binding.clone(), BTreeMap::new())?;
+    let registry = ctx.state.join(REGISTRY);
+    let original = std::fs::read(&registry)?;
+    query.binding.invocation = "/fixture/new-bin/brew".into();
+    for (doctor, action) in [
+        (true, crate::domain::Action::Adopt),
+        (false, crate::domain::Action::Upgrade),
+        (false, crate::domain::Action::Uninstall),
+    ] {
+        let unavailable = current_context(&ctx, &store, &query, doctor, action, true)
+            .err()
+            .ok_or("stale binding was accepted")?;
+        assert_eq!(unavailable.code, "brew_query_stale");
+        assert_eq!(std::fs::read(&registry)?, original);
+    }
+    let (bound, first) = current_context(
+        &ctx,
+        &store,
+        &query,
+        false,
+        crate::domain::Action::Adopt,
+        true,
+    )?;
+    assert!(first);
+    let record = &bound.contexts[&query.binding.context_id];
+    assert_eq!(record.epoch, 1);
+    assert_eq!(record.binding, query.binding);
+    assert!(!record.observation_valid && !record.writer_scope_confirmed);
+    Ok(())
+}
+
+#[test]
+fn brew_helper_rejects_broader_permissions_and_does_not_overwrite_stale_bytes() -> TestResult {
+    let (_temp, ctx, _query) = fixture()?;
+    let store = Store::lock(&ctx)?;
+    let published = materialize_script(&store)?;
+    let helper = published.absolute_path;
+    let directory = helper.parent().ok_or("helper parent")?;
+    assert_eq!(std::fs::read(&helper)?, policy::QUERY_SCRIPT);
+    std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o755))?;
+    assert_eq!(
+        materialize_script(&store)
+            .err()
+            .ok_or("public helper directory")?
+            .code,
+        "brew_helper_not_private"
+    );
+    std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))?;
+    std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o600))?;
+    std::fs::write(&helper, b"unexpected fixture bytes")?;
+    assert_eq!(
+        materialize_script(&store)
+            .err()
+            .ok_or("different helper accepted")?
+            .code,
+        "brew_query_script_changed"
+    );
+    assert_eq!(std::fs::read(helper)?, b"unexpected fixture bytes");
+    Ok(())
+}

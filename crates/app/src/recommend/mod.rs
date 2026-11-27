@@ -827,6 +827,15 @@ fn documented_skill_source(data: &Value) -> Option<String> {
 }
 
 fn install_selected(ctx: &Context, package: &Package, version: Option<&str>) -> Result<Value> {
+    install_selected_using(ctx, package, version, crate::operations::confirm)
+}
+
+fn install_selected_using(
+    ctx: &Context,
+    package: &Package,
+    version: Option<&str>,
+    confirm: impl FnOnce(&str, bool) -> Result<()>,
+) -> Result<Value> {
     use crate::{browser::sanitize, domain::Action, operations};
     if matches!(package.provider, Provider::BrewFormula { .. }) {
         return Ok(report_install(crate::software::brew::execute_selected(
@@ -855,7 +864,7 @@ fn install_selected(ctx: &Context, package: &Package, version: Option<&str>) -> 
         install_channel(&package.provider).unwrap_or_default(),
     );
     eprintln!("{}", plan_scope(ctx, &plan));
-    operations::confirm("执行此安装计划", false)?;
+    confirm("执行此安装计划", false)?;
     Ok(report_install(operations::execute(ctx, plan, false, true)?))
 }
 
