@@ -16,7 +16,8 @@ import unicodedata
 
 scenario, target, width, exit_code, *command = sys.argv[1:]
 reader, writer = pty.openpty()
-fcntl.ioctl(writer, termios.TIOCSWINSZ, struct.pack("HHHH", 28, int(width), 0, 0))
+height = 9 if scenario == "skill-short-location-groups" else 28
+fcntl.ioctl(writer, termios.TIOCSWINSZ, struct.pack("HHHH", height, int(width), 0, 0))
 original = termios.tcgetattr(writer)
 capture = bytearray()
 
@@ -133,9 +134,10 @@ try:
         expect("● 取消")
         expect("○ 确认执行")
         plain = re.sub(rb"\x1b\[[0-?]*[ -/]*[@-~]", b"", bytes(capture)).decode(errors="replace")
-        progress = [line for line in plain.splitlines() if line.startswith("│ ○  ")]
-        assert any(line.endswith(("  ·", "  ··", "  ···")) for line in progress), progress
+        progress = [line for line in plain.splitlines() if line.startswith("│ ○ ")]
+        assert any(line.startswith(("│ ○ ·  ", "│ ○ •  ")) for line in progress), progress
         assert any(line.endswith("  已完成") for line in progress), progress
+        assert re.search(rb"\x1b\[\?25l\r\x1b\[2K[^\x0d]*?\x1b\[\?25h", capture)
         if scenario == "skill-adopt-style":
             expect("\x1b[1;36m●")
             expect("\x1b[1;36m○")
@@ -157,6 +159,8 @@ try:
         Path(target).touch()
         expect("已完成")
     elif scenario == "native-progress":
+        expect("原生命令")
+        expect("原工具输出 · 本机安装器")
         expect("fixture stdout progress")
         expect("fixture stderr progress")
         assert process.poll() is None
@@ -176,6 +180,8 @@ try:
         expect('"phase": "succeeded"')
         assert b"fixture stdout progress" not in capture
         assert b"fixture stderr progress" not in capture
+        assert "原生命令".encode() not in capture
+        assert "原工具输出".encode() not in capture
     elif scenario == "migration-blocked":
         expect("migration_recovery_required")
         assert b"\x1b[?1049h" not in capture
@@ -394,7 +400,7 @@ try:
         offset = type_key(b"a")
         expect("config_scope_unsupported", offset)
         type_key(b"q")
-    elif scenario in ("detail-app-readonly", "detail-declared-upgrade", "detail-version-upgrade"):
+    elif scenario in ("detail-app-readonly", "detail-declared-upgrade", "detail-version-upgrade", "detail-declared-install"):
         expect("软件")
         offset = type_key(b"/" + target.encode() + b"\r")
         expect(target, offset)
@@ -405,6 +411,13 @@ try:
             expect("暂无已核验的维护入口", offset)
             type_key(b"a")
             expect_screen_row(27, "这份安装暂无可登记的维护入口。请查看详情中的渠道和安装范围。")
+        elif scenario == "detail-declared-install":
+            expect("i 安装", offset)
+            offset = type_key(b"i")
+            expect("目标版本 2.0.0", offset)
+            expect("Enter 确认安装", offset)
+            offset = type_key(b"\r")
+            expect("安装结果 已完成", offset)
         else:
             expect("u 升级", offset)
             offset = type_key(b"u")
@@ -419,6 +432,22 @@ try:
             expect("Enter 确认升级", offset)
             offset = type_key(b"\r")
             expect("升级结果 已完成", offset)
+        type_key(b"q")
+    elif scenario == "detail-discovered-skill-uninstall":
+        expect("技能清单")
+        type_key(b"/" + target.encode() + b"\r")
+        offset = type_key(b"\r")
+        expect("x 卸载", offset)
+        offset = type_key(b"x")
+        expect("卸载 " + target + " · Skills CLI", offset)
+        expect("共享安装", offset)
+        expect("确认执行", offset)
+        offset = type_key(b"\x1b[B\r")
+        expect("原生命令", offset)
+        expect("remove --global --yes --agent codex --skill alpha", offset)
+        expect("原工具输出 · Skills CLI", offset)
+        expect("fixture Skills CLI removed alpha", offset)
+        expect("卸载结果 已完成", offset)
         type_key(b"q")
     elif scenario in ("detail-config-operations", "detail-config-apply"):
         expect("受管配置清单")
@@ -726,20 +755,36 @@ try:
             expect("可发现 claude:default", offset)
         type_key(b"q")
     elif scenario == "skill-location-groups":
-        expect_screen_row(2, "←/→ 安装位置 · [全部]")
-        for label in ("Claude Code", "claude:glm", "claude:mi", "Codex", "Cursor", "共享技能"):
+        narrow = int(width) < 80
+        list_row = 7 if narrow else 6
+        search_row = 4 if narrow else 3
+        labels = ("Claude Code", "claude:glm", "claude:mi", "Codex", "Cursor", "共享技能")
+        second_row = ("Cursor", "共享技能") if narrow else ()
+        expect_screen_row(2, "←/→ 安装位置 · [全部]", exact=False)
+        for label in labels:
+            row = 3 if label in second_row else 2
+            expect_screen_row(row, label, exact=False)
+        for label in labels:
             offset = type_key(b"\x1b[C")
-            expect_screen_row(2, f"←/→ 安装位置 · [{label}]")
+            expect_screen_row(3 if label in second_row else 2, f"[{label}]", exact=False)
             if label == "Cursor":
-                expect_screen_row(6, "cursor-only", exact=False)
+                expect_screen_row(list_row, "cursor-only", exact=False)
                 assert all(name not in capture[offset:] for name in (b"claude-import", b"codex-import", b"fixture-skill"))
             elif label == "claude:glm":
-                expect_screen_row(6, "glm-only", exact=False)
+                expect_screen_row(list_row, "glm-only", exact=False)
             elif label in ("claude:mi", "共享技能"):
-                expect_screen_row(6, "fixture-skil" if int(width) < 80 else "fixture-skill", exact=False)
+                expect_screen_row(list_row, "fixture-skil" if narrow else "fixture-skill", exact=False)
         type_key("/一个很长的搜索词 @claude:mi\r".encode())
-        expect_screen_row(3, "/ 搜索 · 一个很长的搜索词 @claude:mi")
-        expect_screen_row(2, "←/→ 安装位置 · [共享技能]")
+        expect_screen_row(search_row, "/ 搜索 · 一个很长的搜索词 @claude:mi")
+        expect_screen_row(3 if narrow else 2, "[共享技能]", exact=False)
+        type_key(b"q")
+    elif scenario == "skill-short-location-groups":
+        expect_screen_row(2, "[全部]", exact=False)
+        for _ in range(6):
+            type_key(b"\x1b[C")
+        expect_screen_row(3, "[共享技能]", exact=False)
+        expect_screen_row(4, "/ 搜索")
+        expect_screen_row(7, "│> fixtu", exact=False)
         type_key(b"q")
     elif scenario == "skill-partial":
         expect("能力盘点不完整")

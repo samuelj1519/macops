@@ -314,6 +314,13 @@ enum Work {
     Switch(Box<crate::agent::plugin_lifecycle::SourceSwitch>),
 }
 
+fn source_change(work: &Work) -> Option<&crate::agent::plugin_lifecycle::SourceSwitch> {
+    match work {
+        Work::Switch(plan) if plan.changes_source() => Some(plan),
+        _ => None,
+    }
+}
+
 struct PluginSite<'a> {
     id: &'a str,
     revision: &'a crate::domain::resource::Revision,
@@ -913,7 +920,7 @@ fn apply_sites(
     yes: bool,
 ) -> Result<Value> {
     let shared = plan_shared_work(ctx, request, &mut sites);
-    let planned = preview(ctx, request, &sites, offers, agents);
+    let mut planned = preview(ctx, request, &sites, offers, agents);
     if dry {
         return Ok(
             json!({"agentBatch":true,"mode":"dry-run","verb":request.kind.label(),"results":planned,"persistentWrites":false}),
@@ -921,19 +928,75 @@ fn apply_sites(
     }
     if sites.iter().any(|site| site.work.is_some()) {
         let text = batch_text(&planned, crate::terminal::presentation::table_width());
-        let action = if sites
+        let review_sources = !yes
+            && sites
+                .iter()
+                .filter_map(|site| site.work.as_ref())
+                .any(|work| source_change(work).is_some());
+        let regular = sites
             .iter()
-            .any(|site| matches!(site.work, Some(Work::Switch(_))))
-        {
-            "换源并升级"
-        } else {
-            request.kind.label()
-        };
+            .filter_map(|site| site.work.as_ref())
+            .any(|work| source_change(work).is_none());
         let name = crate::output::sanitize(request.display_name, false);
-        crate::operations::confirm(&format!("{action} {name}\n{text}"), yes)?;
+        if review_sources {
+            if regular {
+                crate::operations::confirm(
+                    &format!(
+                        "{} {name}\n需更新市场的配置会另行确认。\n{text}",
+                        request.kind.label()
+                    ),
+                    false,
+                )?;
+            } else {
+                crate::terminal::presentation::panel("升级计划", &text);
+            }
+            review_source_changes(&mut sites, &mut planned, confirm_source_change)?;
+        } else {
+            let action = request.kind.label();
+            crate::operations::confirm(&format!("{action} {name}\n{text}"), yes)?;
+        }
+    }
+    if sites.iter().any(|site| site.work.is_some()) {
         crate::operations::recover_before_write(ctx, None)?;
     }
     perform(ctx, request, sites, offers, planned, shared)
+}
+
+fn review_source_changes(
+    sites: &mut [Site<'_>],
+    planned: &mut [Value],
+    mut confirm: impl FnMut(&crate::agent::plugin_lifecycle::SourceSwitch) -> Result<bool>,
+) -> Result<()> {
+    for (site, row) in sites.iter_mut().zip(planned) {
+        if let Some(plan) = site.work.as_ref().and_then(source_change)
+            && !confirm(plan)?
+        {
+            site.work = None;
+            row["status"] = json!("skipped");
+            row["reason"] = json!("已选择跳过此配置。");
+        }
+    }
+    Ok(())
+}
+
+fn confirm_source_change(plan: &crate::agent::plugin_lifecycle::SourceSwitch) -> Result<bool> {
+    use crate::terminal::presentation::{PanelLine, section_panel};
+    let (summary, commands) = plan.confirmation();
+    let mut lines = summary
+        .lines()
+        .map(|line| PanelLine::Text(line.into()))
+        .collect::<Vec<_>>();
+    lines.push(PanelLine::Section("将执行的原命令"));
+    lines.extend(commands.into_iter().map(PanelLine::Command));
+    section_panel("确认更新市场并升级", &lines, false);
+    let selected = picker::select(
+        &["跳过此配置".into(), "确认更新并升级".into()],
+        0,
+        false,
+        "只作用于这套配置",
+        |_| None,
+    )?;
+    Ok(selected == [1])
 }
 
 fn plan_shared_work(
@@ -1092,7 +1155,10 @@ fn perform_with(
             continue;
         }
         let is_shared = matches!(work, Work::Shared);
-        let (status, reason) = result_status(ctx, execute(work))?;
+        let (status, mut reason) = result_status(ctx, execute(work))?;
+        if is_shared && status == "current" {
+            reason = "共享技能已经符合目标，未启动 Skills CLI。".into();
+        }
         row["status"] = json!(status);
         row["reason"] = json!(reason);
         if is_shared {
@@ -1181,6 +1247,7 @@ pub(crate) fn batch_text(rows: &[Value], columns: usize) -> String {
                 Some("changed") => "已完成",
                 Some("current") => "已达到目标",
                 Some("not-installed") => "未安装",
+                Some("skipped") => "已跳过",
                 Some("unattempted") => "尚未开始",
                 Some("unknown") => "结果待核对",
                 Some("blocked") => "暂不能操作",
@@ -1198,16 +1265,24 @@ pub(crate) fn batch_text(rows: &[Value], columns: usize) -> String {
         &data,
         columns,
     );
+    let mut notes: Vec<(&str, Vec<&str>)> = Vec::new();
     for row in rows {
         if let Some(reason) = row["reason"].as_str().filter(|reason| !reason.is_empty()) {
             let agent = row["agent"].as_str().unwrap_or("—");
-            let _ = writeln!(
-                text,
-                "说明 · {}　{}",
-                crate::output::sanitize(agent, false),
-                crate::output::sanitize(reason, false)
-            );
+            if let Some((_, agents)) = notes.iter_mut().find(|(note, _)| *note == reason) {
+                agents.push(agent);
+            } else {
+                notes.push((reason, vec![agent]));
+            }
         }
+    }
+    for (reason, agents) in notes {
+        let _ = writeln!(
+            text,
+            "说明 · {}　{}",
+            crate::output::sanitize(&agents.join("、"), false),
+            crate::output::sanitize(reason, false)
+        );
     }
     text.trim_end().into()
 }

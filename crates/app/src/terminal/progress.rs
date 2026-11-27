@@ -100,7 +100,7 @@ fn draw_install_progress(stages: &mpsc::Receiver<ProgressEvent>) {
     let mut frame = 0;
     loop {
         render_progress(label, ProgressPhase::Working(frame), color, "");
-        match stages.recv_timeout(Duration::from_millis(100)) {
+        match stages.recv_timeout(Duration::from_millis(400)) {
             Ok(ProgressEvent::Stage(next)) => {
                 render_progress(label, ProgressPhase::Complete, color, "\n");
                 label = next;
@@ -124,7 +124,7 @@ fn draw_install_progress(stages: &mpsc::Receiver<ProgressEvent>) {
     }
 }
 
-const DOTS: [&str; 3] = ["·", "··", "···"];
+const DOTS: [&str; 4] = ["·", "•", "·", " "];
 
 #[derive(Clone, Copy)]
 enum ProgressPhase {
@@ -134,28 +134,31 @@ enum ProgressPhase {
 }
 
 fn progress_line(label: &str, phase: ProgressPhase, columns: usize, color: bool) -> String {
-    let (suffix, tone) = match phase {
-        ProgressPhase::Working(frame) => (DOTS[frame], Tone::Active),
-        ProgressPhase::Complete => ("已完成", Tone::Success),
-        ProgressPhase::Incomplete => ("未完成", Tone::Warning),
+    let (activity, status, tone) = match phase {
+        ProgressPhase::Working(frame) => (DOTS[frame], "", Tone::Active),
+        ProgressPhase::Complete => (" ", "已完成", Tone::Success),
+        ProgressPhase::Incomplete => (" ", "未完成", Tone::Warning),
     };
     let symbol = paint("○", tone, color);
-    if columns < 5 {
+    if columns < 7 {
         return if columns == 0 { String::new() } else { symbol };
     }
     let rail = paint("│", Tone::Muted, color);
-    let label = fit(label, columns.saturating_sub(13));
-    let suffix = paint(&fit(suffix, columns - 5), tone, color);
+    let activity = paint(activity, tone, color);
+    let label = fit(label, columns.saturating_sub(15));
+    let status = paint(&fit(status, columns - 7), tone, color);
     if label.is_empty() {
-        format!("{rail} {symbol}  {suffix}")
+        format!("{rail} {symbol} {activity}  {status}")
+    } else if matches!(phase, ProgressPhase::Working(_)) {
+        format!("{rail} {symbol} {activity}  {label}")
     } else {
-        format!("{rail} {symbol}  {label}  {suffix}")
+        format!("{rail} {symbol} {activity}  {label}  {status}")
     }
 }
 
 fn render_progress(label: &str, phase: ProgressPhase, color: bool, end: &str) {
     let line = progress_line(label, phase, presentation::columns(), color);
-    eprint!("\r\x1b[2K{line}{end}");
+    eprint!("\x1b[?25l\r\x1b[2K{line}{end}\x1b[?25h");
 }
 
 pub(crate) struct LiveProgress {
@@ -206,6 +209,20 @@ impl LiveProgress {
                 }
                 _ => break,
             }
+        }
+    }
+
+    pub(crate) fn announce(
+        &mut self,
+        journal: &crate::domain::Journal,
+        invocation: Option<&crate::operations::native_runner::FrozenInvocation>,
+    ) {
+        if let Some((command, env)) = invocation.map_or_else(
+            || journal.plan.command.as_ref().map(|command| (command, None)),
+            |call| Some((&call.command, Some(&call.env))),
+        ) {
+            let banner = super::plan::native_banner(journal, command, env);
+            self.display(banner.as_bytes());
         }
     }
 

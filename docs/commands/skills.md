@@ -23,7 +23,7 @@
 | `--shared` | 明确同意写入共享目录。共享技能的变更可能被名单外 Agent 读取，脚本选择 Agent 后还应在需要时显式确认共享范围 |
 | `--only NAME`、`--all` | 在支持来源维护的命令中选技能成员。可重复传 `--only`。这里的 `--all` 选择成员，`--agent all` 选择 Agent |
 | `--revision SHA` | 在支持固定来源的命令中指定完整提交 SHA。升级仓库时也可用 `OWNER/REPO@REF` |
-| `--switch-source` | 明确允许受支持的 Claude 插件更换来源。必须能核对旧市场影响范围及与上游相同的市场名、插件名。详见 [换源流程](../flows/capabilities.md#claude-code-换源并升级) |
+| `--switch-source` | 允许受支持的 Claude 插件更新市场来源，包括固定到同一 GitHub 仓库的新提交。详见 [市场更新流程](../flows/capabilities.md#更新-claude-code-插件市场并升级) |
 
 终端中，按 Agent 编排的入口在省略目标时提供多选。脚本应给出目标和适用的共享授权。已有无 Agent 参数的共享技能脚本沿用原来的作用域。
 

@@ -36,7 +36,7 @@ pub(super) fn paint(text: &str, tone: Tone, color: bool) -> String {
     format!("\x1b[{style}m{text}\x1b[0m")
 }
 
-fn width(text: &str) -> usize {
+pub(super) fn width(text: &str) -> usize {
     Line::from(text).width()
 }
 

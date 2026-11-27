@@ -13,7 +13,7 @@ lock=home/'.agents/.skill-lock.json'; target=home/'.agents/skills'/name
 try: book=json.loads(lock.read_text())
 except FileNotFoundError: book={'version':3,'skills':{}}
 if verb=='remove':
-    shutil.rmtree(target);book['skills'].pop(name);lock.write_text(json.dumps(book));sys.exit(0)
+    shutil.rmtree(target);book['skills'].pop(name);lock.write_text(json.dumps(book));print('fixture Skills CLI removed '+name, flush=True);sys.exit(0)
 if mode=='wait':
     while not (home/'continue-native').exists():time.sleep(.03)
 source=args[1].split('github.com/')[1].split('/');commit=source[3]

@@ -805,6 +805,14 @@ fn skill_browser_shows_installed_locations_and_shared_profile_visibility() -> Te
         chezmoi_native::run_browser_pty(&f, &["skill"], scenario, &f.home, "140", "0")?;
     }
     chezmoi_native::run_browser_pty(&f, &["skill"], "skill-location-groups", &f.home, "68", "0")?;
+    chezmoi_native::run_browser_pty(
+        &f,
+        &["skill"],
+        "skill-short-location-groups",
+        &f.home,
+        "42",
+        "0",
+    )?;
     assert!(!f.file("state").exists());
     Ok(())
 }
@@ -8476,5 +8484,46 @@ fn app_details_cancel_then_upgrade_to_the_explicit_version() -> TestResult {
     )?;
     assert_eq!(fs::read_to_string(f.file("version"))?, "2.4.0");
     assert_eq!(fs::read_to_string(f.file("calls"))?, "upgrade\n");
+    Ok(())
+}
+
+#[test]
+fn app_details_install_a_declared_package_through_its_provider() -> TestResult {
+    let f = Fixture::new()?;
+    chezmoi_native::run_browser_pty(
+        &f,
+        &["app"],
+        "detail-declared-install",
+        std::path::Path::new("demo"),
+        "160",
+        "0",
+    )?;
+    assert_eq!(fs::read_to_string(f.file("version"))?, "2.0.0");
+    assert_eq!(fs::read_to_string(f.file("calls"))?, "install\n");
+    Ok(())
+}
+
+#[test]
+fn skill_details_uninstall_only_the_selected_discovered_member() -> TestResult {
+    let f = Fixture::new()?;
+    native_skill_fixture(&f, &["alpha", "beta"])?;
+    public_skill_runner(&f)?;
+    let other = f.home.join(".agents/skills/beta/SKILL.md");
+    let before = fs::read(&other)?;
+    chezmoi_native::run_browser_pty(
+        &f,
+        &["skill"],
+        "detail-discovered-skill-uninstall",
+        std::path::Path::new("alpha"),
+        "160",
+        "0",
+    )?;
+    assert!(!f.home.join(".agents/skills/alpha/SKILL.md").exists());
+    assert_eq!(fs::read(other)?, before);
+    let calls = fs::read_to_string(f.home.join("native-calls.jsonl"))?;
+    assert_eq!(calls.lines().count(), 1);
+    assert!(
+        calls.contains("\"remove\"") && calls.contains("\"alpha\"") && !calls.contains("\"beta\"")
+    );
     Ok(())
 }

@@ -81,7 +81,7 @@ fn a_second_plugin_from_the_market_blocks_the_source_switch() -> TestResult {
         commit: "a".repeat(40),
         files: "b".repeat(64),
     };
-    Scope::read(&target, id)?.verify_old(&target, id, &old, &wanted)?;
+    Scope::read(&target, id)?.verify_old(&target, id, &old, &wanted, None)?;
     let installed_manifest =
         plugins.join("cache/devnorm-local/devnorm/1.0.0/.claude-plugin/plugin.json");
     std::fs::create_dir_all(installed_manifest.parent().ok_or("installed directory")?)?;
@@ -110,7 +110,7 @@ fn a_second_plugin_from_the_market_blocks_the_source_switch() -> TestResult {
     std::fs::create_dir_all(&destination)?;
     assert!(
         Scope::read(&target, id)?
-            .verify_old(&target, id, &old, &wanted)
+            .verify_old(&target, id, &old, &wanted, None)
             .is_err()
     );
     std::fs::remove_dir(&destination)?;
@@ -227,6 +227,12 @@ impl SwitchFixture {
     }
 
     fn register_market(&self, location: &std::path::Path, source: &Value) -> Result<()> {
+        if source["source"] == "github"
+            && let Some(commit) = source["ref"].as_str()
+        {
+            std::fs::create_dir_all(location.join(".git"))?;
+            std::fs::write(location.join(".git/HEAD"), commit)?;
+        }
         std::fs::write(
             self.profile.join("plugins/known_marketplaces.json"),
             serde_json::to_vec(&json!({
@@ -305,6 +311,74 @@ fn switch_publishes_verified_market_before_plugin_update_and_retry_is_idempotent
         }
         assert_eq!(f.settings()?["enabledPlugins"][ID], false);
     }
+    Ok(())
+}
+
+#[test]
+fn same_github_market_advances_the_pin_before_updating_the_user_plugin() -> TestResult {
+    use std::fs;
+
+    let f = SwitchFixture::new()?;
+    let wanted = &f.basis.market;
+    let old = "b".repeat(40);
+    let previous = json!({"source":"github","repo":wanted.repo,"ref":old});
+    let other = json!({"source":"github","repo":"other/repo","ref":old});
+    assert!(github_pin(&other, wanted).is_err());
+    let slot = market_slot(&f.target, MARKET)?;
+    SwitchFixture::populate(&slot, INITIAL)?;
+    f.register_market(&slot, &previous)?;
+    let settings = f.profile.join(SETTINGS);
+    let mut bytes = fs::read(&settings)?;
+    change_source(&mut bytes, MARKET, &previous)?;
+    fs::write(&settings, &bytes)?;
+    let head = slot.join(".git/HEAD");
+    fs::create_dir_all(head.parent().ok_or("Git directory")?)?;
+    fs::write(&head, &wanted.commit)?;
+    assert!(SourceSwitch::plan(f.target.clone(), &f.basis, true).is_err());
+    fs::write(&head, &old)?;
+    assert!(SourceSwitch::plan(f.target.clone(), &f.basis, false).is_err());
+    let plan = SourceSwitch::plan(f.target.clone(), &f.basis, true)?.ok_or("GitHub advance")?;
+    let (summary, commands) = plan.confirmation();
+    assert!(summary.contains("bbbbbbb → aaaaaaa"));
+    assert_eq!(commands.len(), 2);
+    assert_eq!(fs::read(&settings)?, bytes);
+    let mut calls = 0;
+    let result = plan.run_with(&f.ctx, |_, journal, binding| {
+        let invocation = &binding.invocation;
+        super::super::worker_guard(journal, invocation)?;
+        assert_eq!(
+            crate::terminal::plan::native_command(
+                &invocation.command,
+                Some(("CLAUDE_CONFIG_DIR", &invocation.env["CLAUDE_CONFIG_DIR"])),
+            ),
+            commands[calls]
+        );
+        calls += 1;
+        if calls == 1 {
+            assert_eq!(
+                f.settings()?["extraKnownMarketplaces"][MARKET]["source"],
+                wanted.declaration()
+            );
+            SwitchFixture::populate(&slot, UPDATED)?;
+            fs::write(&head, &wanted.commit)?;
+            f.register_market(&slot, &wanted.declaration())?;
+        } else {
+            SwitchFixture::populate(&f.cache("2.0.0"), UPDATED)?;
+            f.register("2.0.0")?;
+        }
+        Ok(NativeOutcome::Exited {
+            code: Some(0),
+            signal: None,
+        })
+    })?;
+    assert_eq!(result["journal"]["phase"], "succeeded");
+    assert_eq!(calls, 2);
+    assert_eq!(f.settings()?["enabledPlugins"][ID], false);
+    assert_eq!(f.settings()?["model"], "keep");
+    assert!(SourceSwitch::plan(f.target.clone(), &f.basis, true)?.is_none());
+    fs::write(&head, &old)?;
+    assert!(!wanted.verify_cache(&f.target, ID)?);
+    assert!(SourceSwitch::plan(f.target.clone(), &f.basis, true).is_err());
     Ok(())
 }
 

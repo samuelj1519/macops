@@ -1481,6 +1481,42 @@ pub(crate) fn maintain_from_inventory(ctx: &Context, key: &str, action: Action) 
     inventory_maintenance(ctx, key, action, crate::operations::confirm)
 }
 
+pub(crate) fn maintain_shared_from_inventory(
+    ctx: &Context,
+    id: &str,
+    action: Action,
+) -> Result<Value> {
+    use crate::domain::resource::CapabilityAction;
+    let (operation, verb) = match action {
+        Action::Upgrade => (CapabilityAction::Upgrade, "升级"),
+        Action::Uninstall => (CapabilityAction::Uninstall, "卸载"),
+        _ => return Err(invalid()),
+    };
+    if !id.starts_with("capability:") {
+        return Err(invalid());
+    }
+    let SharedPlan::Maintain(plan) = plan_shared(ctx, id, operation, None)? else {
+        return Err(invalid());
+    };
+    let [(current, _)] = plan.members.as_slice() else {
+        return Err(Error::attention(
+            "ambiguous",
+            "选中的技能对应多份安装。请核对安装位置。",
+        ));
+    };
+    let path = disk::payload(ctx, &current.install_name)?;
+    crate::operations::confirm(
+        &format!(
+            "{verb} {} · Skills CLI\n共享安装 {}\n此改动会影响使用此共享目录的 Agent。",
+            current.install_name,
+            crate::output::sanitize(&path.display().to_string(), false),
+        ),
+        false,
+    )?;
+    crate::operations::recover_before_write(ctx, None)?;
+    plan.run(ctx)
+}
+
 fn inventory_maintenance(
     ctx: &Context,
     key: &str,

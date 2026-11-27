@@ -45,8 +45,9 @@ fn inventory_filters_managers_and_actual_skill_locations() {
     assert_eq!(app.visible().len(), 2);
     app.switch_group(true);
     assert!(
-        app.group_filter()
-            .is_some_and(|tabs| tabs.contains("[Homebrew]"))
+        app.group_tabs(32, 8)
+            .iter()
+            .any(|line| line.contains("[Homebrew]"))
     );
     assert_eq!(app.selected().as_deref(), Some("brew-jq"));
     app.switch_group(true);
@@ -86,19 +87,57 @@ fn inventory_filters_managers_and_actual_skill_locations() {
         .view
         .items
         .extend((0..10).map(|n| item(&format!("added-{n}"), "skills-cli", &[])));
+    assert_stable_group_tabs(&mut skills);
+}
+
+fn assert_stable_group_tabs(skills: &mut Browser) {
     skills.view.note = "技能清单".into();
-    let before = skills.header_lines(15, true);
+    let before = skills.header_lines(15, true, 140, 10);
     skills.search = "一个很长的搜索词 @claude:mi".into();
     skills.typing = true;
-    let searching = skills.header_lines(1, true);
+    let searching = skills.header_lines(1, true, 140, 10);
     assert_eq!(before.len(), searching.len());
     assert_eq!(before[1].find("技能清单"), searching[1].find("技能清单"));
     assert_eq!(before[2], searching[2]);
     assert!(searching[3].starts_with("/ 搜索 · 一个很长的搜索词"));
     skills.switch_group(true);
-    let switched = skills.header_lines(0, true);
-    assert_eq!(switched[2], "←/→ 安装位置 · [全部]");
+    let switched = skills.header_lines(0, true, 140, 10);
+    assert!(switched[2].starts_with("←/→ 安装位置 · [全部]"));
+    assert_eq!(
+        before[2].replace(['[', ']'], " "),
+        switched[2].replace(['[', ']'], " ")
+    );
     assert_eq!(switched[3], searching[3]);
+    let narrow = skills.group_tabs(42, 10);
+    assert!(narrow.len() > 1);
+    assert!(narrow.iter().all(|line| presentation::width(line) <= 42));
+    for group in [
+        "全部",
+        "claude:glm",
+        "claude:mi",
+        "Cursor",
+        "共享技能",
+        "未核验",
+    ] {
+        assert!(narrow.iter().any(|line| line.contains(group)));
+    }
+    skills.switch_group(true);
+    let active = skills.group_tabs(42, 10);
+    assert_eq!(
+        narrow
+            .iter()
+            .map(|line| line.replace(['[', ']'], " "))
+            .collect::<Vec<_>>(),
+        active
+            .iter()
+            .map(|line| line.replace(['[', ']'], " "))
+            .collect::<Vec<_>>()
+    );
+    skills.group = Some("未核验".into());
+    let short = skills.header_lines(0, true, 42, 4);
+    assert_eq!(short.len(), 4);
+    assert!(short[2].contains("[未核验]"));
+    assert!(short[3].starts_with("/ 搜索"));
 }
 
 #[test]

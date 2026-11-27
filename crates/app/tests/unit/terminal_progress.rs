@@ -4,19 +4,74 @@ use crate::test_support::TestResult;
 use std::fs::{self, File, OpenOptions};
 
 #[test]
+fn a_native_output_banner_omits_local_recipe_arguments() -> TestResult {
+    use crate::domain::{Action, CommandSpec, Kind, Observation, Package, Plan, Provider};
+    use clap::Parser;
+    let temp = tempfile::tempdir_in("/private/tmp")?;
+    let cli = crate::cli::Cli::try_parse_from([
+        "mo",
+        "--home",
+        temp.path().to_str().ok_or("fixture path")?,
+        "app",
+    ])?;
+    let ctx = crate::context::Context::from_cli(&cli, &mut vec![])?;
+    let url = format!("https://actor:{}@example.org/file", "fixture-only");
+    let command = CommandSpec {
+        program: "/fixture/bin/brew".into(),
+        args: vec!["install".into(), "--cask".into(), url.clone()],
+    };
+    let package = Package {
+        id: "fixture:cask".into(),
+        name: "fixture".into(),
+        kind: Kind::App,
+        official_url: String::new(),
+        provider: Provider::Brew {
+            package: url,
+            cask: true,
+        },
+        paths: vec![],
+        exact_version_required: false,
+    };
+    let journal = crate::operations::new_journal(
+        &ctx,
+        Plan {
+            brew: None,
+            npm_binding: None,
+            uv_owner: None,
+            timeout_secs: 60,
+            recipe_sha256: crate::domain::fingerprint(&package)?,
+            package,
+            action: Action::Install,
+            before: Observation::Missing { evidence: None },
+            target: None,
+            command: Some(command.clone()),
+            query: None,
+            warnings: vec![],
+            synchronous: true,
+            delegated: false,
+        },
+    )?;
+    let text = super::super::plan::native_banner(&journal, &command, None);
+    assert!(text.contains("原工具输出 · Homebrew") && text.contains("/fixture/bin/brew"));
+    assert!(!text.contains("fixture-only"));
+    Ok(())
+}
+
+#[test]
 fn progress_keeps_the_same_circle_and_label_start_with_and_without_color() {
     let label = "核验新市场与插件";
-    for (phase, suffix) in [
-        (ProgressPhase::Working(0), "·"),
-        (ProgressPhase::Working(2), "···"),
-        (ProgressPhase::Complete, "已完成"),
-        (ProgressPhase::Incomplete, "未完成"),
+    for (phase, activity, suffix) in [
+        (ProgressPhase::Working(0), "·", ""),
+        (ProgressPhase::Working(1), "•", ""),
+        (ProgressPhase::Working(3), " ", ""),
+        (ProgressPhase::Complete, " ", "  已完成"),
+        (ProgressPhase::Incomplete, " ", "  未完成"),
     ] {
         let line = progress_line(label, phase, 50, false);
-        assert_eq!(line, format!("│ ○  {label}  {suffix}"));
+        assert_eq!(line, format!("│ ○ {activity}  {label}{suffix}"));
     }
-    let narrow = progress_line(label, ProgressPhase::Incomplete, 16, false);
-    assert_eq!(narrow, "│ ○  核…  未完成");
+    let narrow = progress_line(label, ProgressPhase::Incomplete, 18, false);
+    assert_eq!(narrow, "│ ○    核…  未完成");
     assert_eq!(progress_line(label, ProgressPhase::Complete, 1, false), "○");
     let colored = progress_line(label, ProgressPhase::Complete, 50, true);
     assert!(colored.contains("\x1b[1;32m○\x1b[0m"));

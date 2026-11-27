@@ -849,9 +849,16 @@ fn agent_batch(layout: TextLayout, data: &Value, rows: &[Value]) -> String {
     if data["mode"] == "dry-run" {
         format!("预演 · {}\n{text}\n", field(data, "verb"))
     } else {
+        let skipped = rows.iter().filter(|row| row["status"] == "skipped").count();
+        let skipped_hint = if skipped == 0 {
+            String::new()
+        } else {
+            format!(" · 已跳过 {skipped}")
+        };
         format!(
-            "{text}\n{achieved}/{} 个适用 Agent 已达到目标 · 本次修改 {} · 已达目标 {unchanged} · 未安装 {uninstalled}\n",
-            rows.len() - uninstalled,
+            "mo  {}结果\n{text}\n{achieved}/{} 个适用 Agent 已达到目标 · 本次修改 {} · 已达目标 {unchanged} · 未安装 {uninstalled}{skipped_hint}\n",
+            field(data, "verb"),
+            rows.len() - uninstalled - skipped,
             achieved - unchanged
         )
     }

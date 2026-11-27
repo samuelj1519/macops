@@ -31,17 +31,19 @@ mo skill upgrade owner/repo --agent claude-mi --agent claude-glm --dry-run
 
 第一次维护其他方式装好的兼容技能时，程序可先提出接管当前安装。确认后以已核对的实际目录和版本记录基线。目录、来源或成员有歧义时，以结果提示为准。固定来源的派生交付走另一条受控路径，从固定 Git 对象构建，再按配方选择成员、应用许可约束、精确编辑及调用元数据。 [共享技能实现](../../crates/app/src/skills/native_skills_journey.rs) · [来源载荷实现](../../crates/app/src/source/source_payload.rs) · [共享技能模型](../models/control_plane/SharedSkillJourney.tla)
 
-## Claude Code 换源并升级
+## 更新 Claude Code 插件市场并升级
 
-例如，原插件市场指向本机固定目录，用户想换到公开仓库的指定版本。先预演：
+如果市场仍固定在旧提交，或者当前使用本机目录，可先预演把一套配置更新到公开仓库的指定版本。
 
 ```sh
 mo skill upgrade owner/repo@v1.2.0 --agent claude-mi --switch-source --dry-run
 ```
 
-支持范围为用户级的单插件本地市场，且上游提供相同市场名和插件名。程序要知道该市场影响哪些插件，并核对固定提交里的载荷。终端确认会展示旧来源、新来源、配置和插件。脚本换源须明确提供 `--switch-source`。
+支持唯一用户级安装的单插件市场。旧来源可为已核验的本机目录，也可为同一 GitHub 仓库的已核验提交。上游须提供相同市场名和插件名。交互式升级会按配置展示旧来源、目标版本和将要执行的原命令，逐项选择确认或跳过。跳过的配置单独计数，其他已确认的升级继续。脚本更新来源须明确提供 `--switch-source`。
 
-每套配置先更新来源声明并用 Claude Code 添加市场，核对后再更新插件。两个原生阶段独立记录。第一阶段已核验时可以继续第二阶段。原结果未知时先核对。已绑定目标提交的市场无需再次改源。最后核对版本、载荷及启停状态。 [换源实现](../../crates/app/src/agent/plugin_source_switch.rs) · [换源模型](../models/control_plane/SkillSourceSwitch.tla)
+每套配置先更新来源声明并用 Claude Code 添加市场，核对后再更新插件。两个原生阶段独立记录。第一阶段已核验时可以继续第二阶段。原结果未知时先核对。最后核对版本、载荷及启停状态。 [换源实现](../../crates/app/src/agent/plugin_source_switch.rs) · [换源模型](../models/control_plane/SkillSourceSwitch.tla)
+
+终端里的「原生命令」显示受支持适配器将执行的程序和参数，「原工具输出」显示该进程输出，「mo 升级结果」汇总各配置的结果。共享技能已符合目标时，结果会说明本次没有启动 Skills CLI。
 
 ## 启停、同步与卸载
 

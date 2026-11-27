@@ -597,6 +597,14 @@ fn agent_batch_summary_distinguishes_work_done_from_existing_state() {
     let text = command_human(layout, &command, &data);
     assert!(text.contains("2/2 个适用 Agent 已达到目标"));
     assert!(text.contains("本次修改 1 · 已达目标 1 · 未安装 1"));
+    data["results"]
+        .as_array_mut()
+        .expect("fixture rows")
+        .push(json!({"agent":"claude-zen","status":"skipped"}));
+    let skipped = command_human(layout, &command, &data);
+    assert!(skipped.starts_with("mo  升级结果"));
+    assert!(skipped.contains("2/2 个适用 Agent 已达到目标"));
+    assert!(skipped.contains("已跳过 1"));
     data["mode"] = json!("dry-run");
     assert!(command_human(layout, &command, &data).starts_with("预演 · 升级\n"));
 }

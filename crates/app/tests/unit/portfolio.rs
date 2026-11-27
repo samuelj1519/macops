@@ -309,7 +309,7 @@ fn verified_source_switch_previews_new_version_and_skips_already_verified_target
             },
             |_, _| prepared.take().ok_or_else(selector_error),
         );
-        let rows = preview(&ctx, &request, &sites, &offers, &agents);
+        let mut rows = preview(&ctx, &request, &sites, &offers, &agents);
         if installed {
             assert_eq!(rows[0]["status"], "current");
             assert!(sites[0].work.is_none());
@@ -323,6 +323,21 @@ fn verified_source_switch_previews_new_version_and_skips_already_verified_target
                     .contains("换源并升级")
             );
             assert!(matches!(sites[0].work, Some(Work::Switch(_))));
+            review_source_changes(&mut sites, &mut rows, |plan| {
+                let (summary, commands) = plan.confirmation();
+                assert!(summary.contains("目标版本 2.0.0"));
+                assert!(commands[0].contains("plugin marketplace add"));
+                assert!(commands[1].contains("plugin update"));
+                Ok(true)
+            })?;
+            assert_eq!(rows[0]["status"], "planned");
+            review_source_changes(&mut sites, &mut rows, |_| Ok(false))?;
+            assert_eq!(rows[0]["status"], "skipped");
+            assert_eq!(rows[0]["targetVersion"], "2.0.0");
+            let result = perform_with(&ctx, &request, sites, &offers, rows, |_| {
+                panic!("refused source change must not run Native")
+            })?;
+            assert_eq!(result["incomplete"], false);
         }
         assert!(prepared.is_none());
         assert!(!ctx.state.exists());

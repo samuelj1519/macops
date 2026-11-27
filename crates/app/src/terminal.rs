@@ -157,6 +157,7 @@ struct Details {
 enum DetailTarget {
     App {
         adopt: bool,
+        install: bool,
         upgrade: bool,
         uninstall: bool,
     },
@@ -178,11 +179,18 @@ enum NativeAction {
         action: Action,
         package: Box<Package>,
     },
-    AppVersion(Box<Package>),
+    AppVersion {
+        package: Box<Package>,
+        action: Action,
+    },
     AgentPreference(String),
     AgentLaunch(String),
     AgentUninstall(String),
     Skills {
+        action: Action,
+        id: String,
+    },
+    SharedSkill {
         action: Action,
         id: String,
     },
@@ -235,47 +243,7 @@ fn detail_target(
         .as_ref()
         .map_or("", |data| data.manager.as_str());
     match kind {
-        Kind::Apps => {
-            let provider = match &item.list {
-                crate::browser::ListDetail::Application {
-                    recipe: Some(id), ..
-                } => crate::catalog::inventory::load(ctx)
-                    .ok()
-                    .and_then(|catalog| {
-                        catalog
-                            .packages
-                            .into_iter()
-                            .find(|package| package.id == *id)
-                    })
-                    .map(|package| package.provider),
-                _ => None,
-            };
-            let (upgrade, uninstall) = match &provider {
-                Some(Provider::Command {
-                    upgrade, uninstall, ..
-                }) => (upgrade.is_some(), uninstall.is_some()),
-                Some(
-                    Provider::BrewFormula { .. }
-                    | Provider::Brew { cask: true, .. }
-                    | Provider::Mise { .. }
-                    | Provider::Cargo { .. }
-                    | Provider::Bun { .. },
-                ) => (true, true),
-                Some(Provider::Npm {
-                    authority: Some(authority),
-                    ..
-                }) => (authority.registry.is_some(), authority.allow_remove),
-                _ => (false, false),
-            };
-            DetailTarget::App {
-                adopt: upgrade
-                    || uninstall
-                    || matches!(manager, "npm" | "uv")
-                    || matches!(provider, Some(Provider::Command { .. })),
-                upgrade,
-                uninstall,
-            }
-        }
+        Kind::Apps => application_detail_target(ctx, item, manager),
         Kind::Skills | Kind::Capabilities if !scoped && !skills_native => {
             if !item.inventory.as_ref().is_some_and(|data| {
                 use crate::domain::resource::State;
@@ -284,7 +252,7 @@ fn detail_target(
             }) {
                 return DetailTarget::Other;
             }
-            if manager.starts_with("skills-cli:") {
+            if manager == "skills-cli:github" {
                 DetailTarget::SharedSkill
             } else if !item.agents.is_empty() && matches!(manager, "claude-plugin" | "codex-config")
             {
@@ -308,6 +276,80 @@ fn detail_target(
                     && matches!(session, Session::Config(browser) if browser.supports_forget(ctx)),
             }),
         _ => DetailTarget::Other,
+    }
+}
+
+fn application_detail_target(ctx: &Context, item: &Item, manager: &str) -> DetailTarget {
+    let recipe = match &item.list {
+        crate::browser::ListDetail::Application { recipe, .. } => recipe.as_deref(),
+        _ => None,
+    };
+    let provider = recipe
+        .and_then(|id| {
+            crate::catalog::inventory::load(ctx)
+                .ok()
+                .and_then(|catalog| {
+                    catalog
+                        .packages
+                        .into_iter()
+                        .find(|package| package.id == id)
+                })
+        })
+        .or_else(|| {
+            (manager == "brew")
+                .then(|| {
+                    crate::software::brew::candidate(ctx, &item.id)
+                        .ok()
+                        .flatten()
+                })
+                .flatten()
+                .filter(|package| {
+                    package.id == item.id
+                        && matches!(package.provider, Provider::BrewFormula { .. })
+                })
+        })
+        .map(|package| package.provider);
+    let (install, upgrade, uninstall) = match &provider {
+        Some(Provider::Command {
+            install,
+            upgrade,
+            uninstall,
+            ..
+        }) => (install.is_some(), upgrade.is_some(), uninstall.is_some()),
+        Some(
+            Provider::BrewFormula { .. }
+            | Provider::Brew { cask: true, .. }
+            | Provider::Mise { .. }
+            | Provider::Cargo { .. }
+            | Provider::Bun { .. },
+        ) => (true, true, true),
+        Some(Provider::Npm {
+            authority: Some(authority),
+            ..
+        }) => (
+            authority.registry.is_some(),
+            authority.registry.is_some(),
+            authority.allow_remove,
+        ),
+        _ => (false, false, false),
+    };
+    let install = install
+        && item.inventory.as_ref().is_some_and(|data| {
+            use crate::domain::resource::State;
+            matches!(data.status, State::Missing | State::Declared)
+        })
+        && recipe.is_some_and(|id| {
+            crate::catalog::inventory::declared_catalog(ctx)
+                .is_ok_and(|catalog| catalog.packages.iter().any(|package| package.id == id))
+        });
+    DetailTarget::App {
+        adopt: upgrade
+            || uninstall
+            || matches!(manager, "npm" | "uv")
+            || matches!(provider, Some(Provider::Command { .. })),
+        upgrade,
+        uninstall,
+        install,
     }
 }
 
@@ -403,14 +445,41 @@ impl Browser {
         self.preserve(id.as_deref());
     }
 
-    fn group_filter(&self) -> Option<String> {
+    fn group_tabs(&self, columns: usize, max_rows: usize) -> Vec<String> {
+        if max_rows == 0 {
+            return Vec::new();
+        }
         let mode = match self.kind {
             Kind::Apps => "来源",
             Kind::Skills | Kind::Capabilities => "安装位置",
-            _ => return None,
+            _ => return Vec::new(),
         };
-        let label = sanitize(self.group.as_deref().map_or("全部", group_label), false);
-        Some(format!("←/→ {mode} · [{label}]"))
+        let heading = format!("←/→ {mode} ·");
+        let mut lines = Vec::new();
+        let mut line = heading;
+        let mut selected_row = 0;
+        for group in std::iter::once(None).chain(self.groups().into_iter().map(Some)) {
+            let label = sanitize(group.map_or("全部", group_label), false);
+            let label = presentation::fit(&label, columns.saturating_sub(4));
+            let selected = group == self.group.as_deref();
+            let tab = if selected {
+                format!("[{label}]")
+            } else {
+                format!(" {label} ")
+            };
+            if presentation::width(&line) + 1 + presentation::width(&tab) > columns {
+                lines.push(std::mem::replace(&mut line, String::from(" ")));
+            }
+            if selected {
+                selected_row = lines.len();
+            }
+            let _ = write!(line, " {tab}");
+        }
+        lines.push(line);
+        let first = selected_row.saturating_sub(max_rows - 1);
+        lines.drain(..first);
+        lines.truncate(max_rows);
+        lines
     }
 
     fn visible(&self) -> Vec<&Item> {
@@ -574,19 +643,21 @@ impl Browser {
                 package: Box::new(package),
             });
         }
-        if action == Action::Upgrade
+        if matches!(action, Action::Install | Action::Upgrade)
             && (package.exact_version_required
                 || matches!(
                     package.provider,
                     Provider::Cargo { .. }
                         | Provider::Command {
                             available: None,
-                            upgrade: Some(_),
                             ..
                         }
                 ))
         {
-            return Some(NativeAction::AppVersion(Box::new(package)));
+            return Some(NativeAction::AppVersion {
+                package: Box::new(package),
+                action,
+            });
         }
         let prepare = || {
             if matches!(package.provider, Provider::Mise { .. }) {
@@ -642,6 +713,23 @@ impl Browser {
             }
             Err(error) => self.notice = crate::output::error_text(&error),
         }
+    }
+
+    fn prompt_app_version(&mut self, ctx: &Context, package: &Package, action: Action) {
+        let mut version = String::new();
+        let result = (|| {
+            eprintln!(
+                "输入 {} 的目标版本（直接按 Enter 取消）",
+                sanitize(&package.name, false)
+            );
+            std::io::stdin().read_line(&mut version)?;
+            let version = version.trim();
+            if version.is_empty() {
+                return Err(Error::attention("cancelled", "已取消操作"));
+            }
+            crate::operations::plan(ctx, package, action, Some(version), false)
+        })();
+        self.preview_plan(result, Some(version.trim().to_owned()));
     }
 
     fn finish_operation(&mut self, ctx: &Context, session: &mut Session) {
@@ -708,6 +796,16 @@ impl Browser {
         };
         let id = self.selected()?;
         let (command, title, confirm, report) = match (&details.target, key) {
+            (DetailTarget::SharedSkill, 'u' | 'x') => {
+                return Some(NativeAction::SharedSkill {
+                    id,
+                    action: if key == 'u' {
+                        Action::Upgrade
+                    } else {
+                        Action::Uninstall
+                    },
+                });
+            }
             (DetailTarget::SharedSkill, 'a') => (
                 Command::Skill {
                     project: None,
@@ -802,20 +900,20 @@ impl Browser {
         let Page::Detail(detail) = &self.page else {
             return None;
         };
-        let action = if key == 'u' {
-            Action::Upgrade
-        } else {
-            Action::Uninstall
+        let action = match key {
+            'i' => Action::Install,
+            'u' => Action::Upgrade,
+            _ => Action::Uninstall,
         };
-        if detail.skills_native {
+        if detail.skills_native && action != Action::Install {
             return Some(NativeAction::Skills {
                 action,
                 id: self.selected()?,
             });
         }
         if self.kind == Kind::Apps {
-            if matches!(detail.target, DetailTarget::App { upgrade, uninstall, .. }
-                if !(if key == 'u' { upgrade } else { uninstall }))
+            if matches!(detail.target, DetailTarget::App { install, upgrade, uninstall, .. }
+                if !(match action { Action::Install => install, Action::Upgrade => upgrade, _ => uninstall }))
             {
                 self.notice = "这份安装暂无已核验的维护入口。请用详情中的原安装工具维护。".into();
                 return None;
@@ -839,21 +937,8 @@ impl Browser {
             return;
         }
         let result = match action {
-            NativeAction::AppVersion(package) => {
-                let mut version = String::new();
-                let result = (|| {
-                    eprintln!(
-                        "输入 {} 的目标版本（直接按 Enter 取消）",
-                        sanitize(&package.name, false)
-                    );
-                    std::io::stdin().read_line(&mut version)?;
-                    let version = version.trim();
-                    if version.is_empty() {
-                        return Err(Error::attention("cancelled", "已取消升级"));
-                    }
-                    crate::operations::plan(ctx, &package, Action::Upgrade, Some(version), false)
-                })();
-                self.preview_plan(result, Some(version.trim().to_owned()));
+            NativeAction::AppVersion { package, action } => {
+                self.prompt_app_version(ctx, &package, action);
                 return;
             }
             NativeAction::Plugin { id, action } => {
@@ -910,6 +995,12 @@ impl Browser {
                 self.operation_result(ctx, session, action, result);
                 return;
             }
+            NativeAction::SharedSkill { action, id } => {
+                let result =
+                    crate::skills::native_skills::maintain_shared_from_inventory(ctx, &id, action);
+                self.operation_result(ctx, session, action, result);
+                return;
+            }
             NativeAction::AgentPreference(label) => {
                 crate::agent::codex_install::session::configure(ctx, &label)
             }
@@ -954,6 +1045,8 @@ impl Browser {
         let label = operation_label(action);
         self.refresh(ctx, session);
         self.notice = match result {
+            Ok(value) if value["status"] == "current" => "已是目标版本。".into(),
+            Ok(value) if value["status"] == "changed" => format!("{label}结果 已完成"),
             Ok(value) => {
                 let receipt = value.get("journal").unwrap_or(&value);
                 let mut notice = format!(
@@ -1041,7 +1134,13 @@ impl Browser {
         self.refresh(ctx, session);
     }
 
-    fn header_lines(&self, count: usize, unified: bool) -> Vec<String> {
+    fn header_lines(
+        &self,
+        count: usize,
+        unified: bool,
+        width: usize,
+        height: usize,
+    ) -> Vec<String> {
         let filter = match self.kind {
             Kind::Skills | Kind::Capabilities if self.show_unregistered => " · 全部发现",
             Kind::Skills | Kind::Capabilities => " · 已登记筛选",
@@ -1066,7 +1165,7 @@ impl Browser {
             lines.push(format!("Tab 切换 · {}", tabs.join("  ")));
         }
         lines.push(title);
-        lines.extend(self.group_filter());
+        lines.extend(self.group_tabs(width, height.saturating_sub(lines.len() + 1)));
         let query = sanitize(&self.search, false);
         lines.push(if self.typing || !query.is_empty() {
             let cursor = if self.typing { "▏" } else { "" };
@@ -1079,16 +1178,23 @@ impl Browser {
 
     fn draw(&mut self, ctx: &Context, frame: &mut Frame, kind: Kind, unified: bool) {
         let visible = self.visible();
-        let lines = self.header_lines(visible.len(), unified);
-        let header_height = u16::try_from(lines.len())
-            .unwrap_or(u16::MAX)
-            .min(frame.area().height.saturating_sub(2));
-        let [header, main, footer] = layout_with_notice(frame, &self.notice, header_height);
         let inset = if matches!(self.page, Page::List) {
             3
         } else {
             2
         };
+        let below_header = inset + 2;
+        let lines = self.header_lines(
+            visible.len(),
+            unified,
+            usize::from(frame.area().width),
+            usize::from(frame.area().height.saturating_sub(below_header)),
+        );
+        let header_height = u16::try_from(lines.len())
+            .unwrap_or(u16::MAX)
+            .min(frame.area().height.saturating_sub(2));
+        let [header, main, footer] =
+            layout_with_notice(frame, &self.notice, header_height, below_header);
         let page_rows = isize::try_from(main.height.saturating_sub(inset).max(1)).unwrap_or(1);
         let text = lines
             .iter()
@@ -1273,8 +1379,17 @@ fn item_details(
     text
 }
 
-fn layout_with_notice(frame: &mut Frame, message: &str, header_height: u16) -> [Rect; 3] {
-    let limit = frame.area().height.saturating_sub(header_height + 2).min(4);
+fn layout_with_notice(
+    frame: &mut Frame,
+    message: &str,
+    header_height: u16,
+    below_header: u16,
+) -> [Rect; 3] {
+    let limit = frame
+        .area()
+        .height
+        .saturating_sub(header_height.saturating_add(below_header))
+        .min(4);
     let notice = Paragraph::new(sanitize(message, true)).wrap(Wrap { trim: true });
     let height = if message.is_empty() {
         0
@@ -1331,14 +1446,37 @@ fn recovery_notice(value: &serde_json::Value) -> String {
 
 fn operation_label(action: Action) -> &'static str {
     match action {
+        Action::Install => "安装",
         Action::Adopt => "纳入管理",
         Action::Upgrade => "升级",
         _ => "卸载",
     }
 }
 
-fn keys(kind: Kind, page: &Page, unified: bool) -> &'static str {
-    match page {
+fn keys(kind: Kind, page: &Page, unified: bool) -> std::borrow::Cow<'static, str> {
+    if let Page::Detail(details) = page
+        && let DetailTarget::App {
+            adopt,
+            install,
+            upgrade,
+            uninstall,
+        } = details.target
+        && (adopt || install || upgrade || uninstall)
+    {
+        return [
+            (install, "i 安装"),
+            (adopt, "a 检查管理资格"),
+            (upgrade, "u 升级"),
+            (uninstall, "x 卸载"),
+            (true, "Esc 返回  q 退出"),
+        ]
+        .into_iter()
+        .filter_map(|(enabled, label)| enabled.then_some(label))
+        .collect::<Vec<_>>()
+        .join("  ")
+        .into();
+    }
+    let text = match page {
         Page::List if matches!(kind, Kind::Skills | Kind::Capabilities) => {
             "j/k 滚动  / 搜索（@档案）  Enter 详情  a 切换发现项  r 刷新  q 退出"
         }
@@ -1348,6 +1486,7 @@ fn keys(kind: Kind, page: &Page, unified: bool) -> &'static str {
         Page::List if kind == Kind::Marketplaces => "j/k 滚动  / 搜索  Enter 详情  q 退出",
         Page::List => "j/k 滚动  / 搜索  Enter 详情  r 刷新  q 退出",
         Page::Operation(plan, _) => match plan.action {
+            Action::Install => "Enter 确认安装  Esc 返回  q 退出",
             Action::Adopt => "Enter 确认纳入管理  Esc 返回  q 退出",
             Action::Upgrade => "Enter 确认升级  Esc 返回  q 退出",
             _ => "Enter 确认卸载  Esc 返回  q 退出",
@@ -1360,7 +1499,7 @@ fn keys(kind: Kind, page: &Page, unified: bool) -> &'static str {
         Page::Detail(details) if details.agent_removable => "x 卸载  Esc 返回  q 退出",
         Page::Detail(details) if details.skills_native => "u 升级  x 卸载  Esc 返回  q 退出",
         Page::Detail(details) if matches!(details.target, DetailTarget::SharedSkill) => {
-            "a 接管技能  Esc 返回  q 退出"
+            "u 升级  x 卸载  a 接管技能  Esc 返回  q 退出"
         }
         Page::Detail(details)
             if matches!(details.target, DetailTarget::Plugin { claude: true }) =>
@@ -1384,45 +1523,13 @@ fn keys(kind: Kind, page: &Page, unified: bool) -> &'static str {
             "o 打开实际文件  s 打开管理源  d 差异  v 核验  p 应用  Esc 返回  q 退出"
         }
         Page::Detail(_) if kind == Kind::Config => "o 打开实际文件  s 打开管理源  Esc 返回  q 退出",
-        Page::Detail(details)
-            if matches!(
-                details.target,
-                DetailTarget::App {
-                    upgrade: true,
-                    uninstall: true,
-                    ..
-                }
-            ) =>
-        {
-            "a 检查管理资格  u 升级  x 卸载  Esc 返回  q 退出"
-        }
-        Page::Detail(details)
-            if matches!(details.target, DetailTarget::App { upgrade: true, .. }) =>
-        {
-            "a 检查管理资格  u 升级  Esc 返回  q 退出"
-        }
-        Page::Detail(details)
-            if matches!(
-                details.target,
-                DetailTarget::App {
-                    uninstall: true,
-                    ..
-                }
-            ) =>
-        {
-            "a 检查管理资格  x 卸载  Esc 返回  q 退出"
-        }
-        Page::Detail(details)
-            if matches!(details.target, DetailTarget::App { adopt: true, .. }) =>
-        {
-            "a 检查管理资格  Esc 返回  q 退出"
-        }
         Page::Detail(_) if kind == Kind::Apps => "只读 · 请用原安装工具维护  Esc 返回  q 退出",
         Page::Detail(_) if unified && kind == Kind::Capabilities => {
             "a 检查管理资格  Esc 返回  q 退出"
         }
         Page::Detail(_) | Page::File { .. } => "j/k 滚动  Esc 返回  q 退出",
-    }
+    };
+    text.into()
 }
 
 fn control(event: &KeyEvent, key: char) -> bool {
@@ -1547,7 +1654,7 @@ pub(crate) fn browse(
                         break After::Native(action);
                     }
                 }
-                KeyCode::Char(key @ ('u' | 'x')) => {
+                KeyCode::Char(key @ ('i' | 'u' | 'x')) => {
                     if let Some(action) = browser.maintenance_key(ctx, key) {
                         break After::Native(action);
                     }

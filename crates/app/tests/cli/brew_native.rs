@@ -454,6 +454,14 @@ fn adopted_brew_formula_remains_bound_to_its_original_context_without_a_catalog_
     assert_eq!(fs::read(f.home.join("events"))?, original_events);
     assert_eq!(f.read_json("state/receipts.json")?, common);
 
+    run_brew_pty(
+        &f,
+        &actual,
+        &["app"],
+        json!({"inventory":["x", "已取消"], "approved":false}),
+    )?;
+    assert_eq!(f.read_json("state/receipts.json")?, common);
+    assert!(f.home.join("native-cellar/foo").exists());
     let removed = lifecycle_run(&f, &actual, &["app", "uninstall", &id, "--yes"])?;
     assert_eq!(
         removed["data"]["journal"]["phase"], "succeeded",

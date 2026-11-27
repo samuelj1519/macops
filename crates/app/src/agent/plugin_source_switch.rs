@@ -44,7 +44,12 @@ impl GithubMarket {
         if checkout.path != cache || cache != market_slot(target, market)? {
             return Err(blocked());
         }
-        Ok(fingerprint(&capability_local::claude_market_files(&checkout)?)? == self.files)
+        let mut reader = super::Passive::new()?;
+        let matched = checkout_at(&mut reader, &cache, &self.commit)?
+            && fingerprint(&capability_local::claude_market_files(&checkout)?)? == self.files;
+        reader.verify()?;
+        checkout.verify()?;
+        Ok(matched)
     }
 
     pub(super) fn installed(&self, target: &InstallTarget, id: &str) -> Result<bool> {
@@ -75,12 +80,14 @@ pub(super) struct Rebind {
     pub(super) wanted: GithubMarket,
     old: PathBuf,
     stamp: SettingsStamp,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    previous: Option<Value>,
 }
 
 impl Rebind {
     pub(super) fn apply(&self, target: &InstallTarget, id: &str) -> Result<()> {
         let mut state = Scope::read(target, id)?;
-        state.verify_old(target, id, &self.old, &self.wanted)?;
+        state.verify_old(target, id, &self.old, &self.wanted, self.previous.as_ref())?;
         if state.stamp != self.stamp {
             return Err(blocked());
         }
@@ -95,7 +102,7 @@ impl Rebind {
             self.stamp.mode,
             |_| {
                 let current = Scope::read(target, id)?;
-                current.verify_old(target, id, &self.old, &self.wanted)?;
+                current.verify_old(target, id, &self.old, &self.wanted, self.previous.as_ref())?;
                 if current.stamp != self.stamp {
                     return Err(blocked());
                 }
@@ -109,6 +116,12 @@ fn blocked() -> crate::error::Error {
     unavailable(
         "请核对这套 Claude 配置的市场来源。换源需要同名插件、唯一的用户级安装以及可核验的市场记录。",
     )
+}
+
+fn check_market(message: &str) -> crate::error::Error {
+    unavailable(format!(
+        "{message} 打开这套 Claude Code 的 /plugin，进入 Marketplaces 核对来源后重试。"
+    ))
 }
 
 struct Scope {
@@ -218,26 +231,35 @@ impl Scope {
         id: &str,
         old: &std::path::Path,
         wanted: &GithubMarket,
+        previous: Option<&Value>,
     ) -> Result<()> {
         let directory = json!({"source":"directory","path":old});
-        if self.registered != directory
-            || (self.declared != directory && self.declared != wanted.declaration())
+        let expected = previous.unwrap_or(&directory);
+        if &self.registered != expected
+            || (&self.declared != expected && self.declared != wanted.declaration())
             || self.checkout.as_deref() != Some(old)
         {
-            return Err(blocked());
+            return Err(check_market("已登记的来源、配置声明或市场目录不一致。"));
         }
         let (_, market) = leaf(id)?;
         let destination = market_slot(target, market)?;
-        if old.starts_with(&destination)
+        if Directory::open(old)?.path != old {
+            return Err(blocked());
+        }
+        let mut reader = super::Passive::new()?;
+        if let Some(previous) = previous {
+            let commit = github_pin(previous, wanted)?;
+            if old != destination || !checkout_at(&mut reader, old, commit)? {
+                return Err(check_market("本机市场缓存的位置或提交与登记不一致。"));
+            }
+        } else if old.starts_with(&destination)
             || destination.starts_with(old)
             || !destination
                 .symlink_metadata()
                 .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
-            || Directory::open(old)?.path != old
         {
             return Err(blocked());
         }
-        let mut reader = super::Passive::new()?;
         let catalog =
             file(&mut reader, &old.join(".claude-plugin/marketplace.json"))?.ok_or_else(blocked)?;
         let catalog = crate::policy::json::parse(&catalog)?;
@@ -248,6 +270,34 @@ impl Scope {
         single_market(&catalog, &manifest, market, id)?;
         reader.verify()
     }
+}
+
+fn checkout_at(reader: &mut super::Passive, path: &std::path::Path, commit: &str) -> Result<bool> {
+    let head = file(reader, &path.join(".git/HEAD"))?;
+    Ok(head
+        .as_deref()
+        .and_then(|bytes| std::str::from_utf8(bytes).ok())
+        .map(str::trim)
+        == Some(commit))
+}
+
+fn github_pin<'a>(source: &'a Value, wanted: &GithubMarket) -> Result<&'a str> {
+    use crate::policy::source_git::{ObjectId, Repository};
+    let repo = source["repo"]
+        .as_str()
+        .ok_or_else(|| check_market("市场不是受支持的 GitHub 来源。"))?;
+    if source["source"] != "github" || Repository::parse(repo)? != Repository::parse(&wanted.repo)?
+    {
+        return Err(check_market("已登记市场来自另一个仓库。"));
+    }
+    let commit = source["ref"]
+        .as_str()
+        .filter(|value| ObjectId::parse(value).is_ok())
+        .ok_or_else(|| check_market("旧市场没有固定到完整的提交。"))?;
+    if *source != json!({"source":"github","repo":repo,"ref":commit}) {
+        return Err(check_market("旧市场还有其他来源选项，无法确认影响范围。"));
+    }
+    Ok(commit)
 }
 
 fn market_slot(target: &InstallTarget, name: &str) -> Result<PathBuf> {
@@ -414,11 +464,10 @@ impl SourceSwitch {
                     "这套 Claude 配置的来源已改变。请重新核对换源计划。",
                 ));
             }
-            let old = state.registered["path"]
-                .as_str()
-                .map(PathBuf::from)
-                .ok_or_else(blocked)?;
-            state.verify_old(&target, &id, &old, &basis.market)?;
+            let old = state.checkout.clone().ok_or_else(blocked)?;
+            let previous =
+                (state.registered["source"] != "directory").then(|| state.registered.clone());
+            state.verify_old(&target, &id, &old, &basis.market, previous.as_ref())?;
             Some(Intent {
                 target: target.clone(),
                 id: id.clone(),
@@ -426,6 +475,7 @@ impl SourceSwitch {
                     old,
                     wanted: basis.market.clone(),
                     stamp: state.stamp,
+                    previous,
                 }),
                 before: before.clone(),
                 binary: basis.binary.clone(),
@@ -458,14 +508,70 @@ impl SourceSwitch {
         )
     }
     pub(crate) fn detail(&self) -> String {
+        let commit = self.wanted.commit.get(..7).unwrap_or(&self.wanted.commit);
+        if !self.changes_source() {
+            return format!(
+                "市场已固定到 {} 的提交 {commit}，可直接升级插件。",
+                self.wanted.repo
+            );
+        }
         let old = self.old["path"]
             .as_str()
             .or_else(|| self.old["repo"].as_str())
             .unwrap_or("本机市场");
-        format!(
-            "换源并升级 {} · {} → {}@{}。该市场只登记了这一项插件。",
-            self.id, old, self.wanted.repo, self.wanted.commit
+        if let Some(previous) = self.old["ref"].as_str() {
+            format!(
+                "市场提交 {} → {}。",
+                previous.get(..7).unwrap_or(previous),
+                commit
+            )
+        } else {
+            format!(
+                "换源并升级。市场从 {} 改用 {} 的已核验提交 {}。",
+                old, self.wanted.repo, commit
+            )
+        }
+    }
+
+    pub(crate) fn changes_source(&self) -> bool {
+        self.import.is_some()
+    }
+
+    pub(crate) fn confirmation(&self) -> (String, Vec<String>) {
+        let scope = self.target.directory.canonical.display().to_string();
+        let scope = Some(("CLAUDE_CONFIG_DIR", scope.as_str()));
+        let commands = self
+            .import
+            .iter()
+            .map(Intent::command)
+            .chain([self.update_intent(self.before.clone()).command()])
+            .map(|command| crate::terminal::plan::native_command(&command, scope))
+            .collect();
+        (
+            format!(
+                "{} · 目标版本 {}\n{}\n确认后先更新这套配置的市场声明。",
+                self.target.name,
+                self.version,
+                self.detail()
+            ),
+            commands,
         )
+    }
+
+    fn update_intent(&self, before: Facts) -> Intent {
+        Intent {
+            target: self.target.clone(),
+            id: self.id.clone(),
+            desired: Desired::PinnedVersion {
+                wanted: self.wanted.clone(),
+                version: self.version.clone(),
+                enabled: before.enabled,
+            },
+            before,
+            binary: self.binary.clone(),
+            binary_digest: self.binary_digest.clone(),
+            market: None,
+        }
     }
 
     pub(crate) fn run(self, ctx: &Context) -> Result<Value> {
@@ -494,20 +600,8 @@ impl SourceSwitch {
         {
             return Err(blocked());
         }
-        Intent {
-            target: self.target,
-            id: self.id,
-            desired: Desired::PinnedVersion {
-                wanted: self.wanted,
-                version: self.version,
-                enabled: current.enabled,
-            },
-            before: current,
-            binary: self.binary,
-            binary_digest: self.binary_digest,
-            market: None,
-        }
-        .run_locked_with(ctx, &store, launch)
+        self.update_intent(current)
+            .run_locked_with(ctx, &store, launch)
     }
 }
 

@@ -462,6 +462,9 @@ pub fn launch(store: &Store, journal: &mut Journal) -> Result<process::Output> {
         .stdin
         .take()
         .ok_or_else(|| Error::new("worker_gate_missing", "worker stdin 未建立"))?;
+    if let Some(progress) = &mut progress {
+        progress.announce(journal, None);
+    }
     if let Err(e) = gate.write_all(b"RUN\n") {
         process::kill_group(child.id());
         let _ = child.wait();

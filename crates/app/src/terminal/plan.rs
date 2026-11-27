@@ -1,5 +1,100 @@
 use crate::{context::Context, domain::Provider, policy::public_source::domain_link};
 
+pub(crate) fn native_command(
+    command: &crate::domain::CommandSpec,
+    scope: Option<(&str, &str)>,
+) -> String {
+    fn quote(arg: &str) -> String {
+        if !arg.is_empty()
+            && arg
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"_./:@=-".contains(&byte))
+        {
+            arg.into()
+        } else {
+            format!("'{}'", arg.replace('\'', "'\\''"))
+        }
+    }
+    let mut parts = Vec::new();
+    if let Some((key, value)) = scope {
+        parts.push(format!("{key}={}", quote(value)));
+    }
+    parts.push(quote(&command.program.display().to_string()));
+    parts.extend(command.args.iter().map(|arg| quote(arg)));
+    parts.join(" ")
+}
+
+pub(crate) fn native_banner(
+    journal: &crate::domain::Journal,
+    command: &crate::domain::CommandSpec,
+    env: Option<&std::collections::BTreeMap<String, String>>,
+) -> String {
+    use super::presentation::{self, PanelLine};
+    use crate::output::{TerminalLine, sanitize, terminal_line};
+
+    let scope = env.and_then(|env| {
+        ["CLAUDE_CONFIG_DIR", "CODEX_HOME"]
+            .into_iter()
+            .find_map(|key| env.get(key).map(|value| (key, value.as_str())))
+    });
+    let trusted = if crate::skills::native_skills::is_native(journal) {
+        Some("Skills CLI")
+    } else if crate::agent::plugin_lifecycle::owns(journal)
+        || crate::agent::claude_install::is_install(journal)
+        || crate::agent::codex_install::is_install(journal)
+    {
+        Some(if matches!(scope, Some(("CODEX_HOME", _))) {
+            "Codex"
+        } else {
+            "Claude Code"
+        })
+    } else if journal.plan.brew.is_some() {
+        Some("Homebrew")
+    } else if crate::agent::ai_tx::is_native(journal) {
+        command
+            .program
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| matches!(*name, "mise" | "mimo"))
+    } else {
+        None
+    };
+    let tool = trusted.unwrap_or(match journal.plan.package.provider {
+        Provider::Brew { .. } | Provider::BrewFormula { .. } | Provider::Service { .. } => {
+            "Homebrew"
+        }
+        Provider::Cargo { .. } => "Cargo",
+        Provider::Bun { .. } => "Bun",
+        Provider::Mise { .. } => "mise",
+        Provider::Npm { .. } => "npm",
+        _ => "本机安装器",
+    });
+    let command = if trusted.is_some() {
+        PanelLine::Command(native_command(command, scope))
+    } else {
+        PanelLine::Note(format!(
+            "{} · 使用配方中的参数",
+            sanitize(&command.program.display().to_string(), false)
+        ))
+    };
+    let color = presentation::color();
+    let width = presentation::columns().saturating_sub(1).min(96);
+    let mut output = presentation::section_text(
+        "原生命令",
+        &[command],
+        (width >= 24).then_some(width),
+        color,
+        false,
+    );
+    output.push_str(&terminal_line(
+        TerminalLine::Section,
+        &format!("原工具输出 · {tool}"),
+        color,
+    ));
+    output.push('\n');
+    output
+}
+
 pub(crate) fn source_label(value: &str) -> &str {
     let public = value.split(['?', '#']).next().unwrap_or_default();
     if domain_link(public) {

@@ -368,6 +368,9 @@ pub fn launch(store: &Store, journal: &mut Journal, binding: &RunBinding) -> Res
     let gated = (|| {
         Store::atomic_new(&store.root, &name(journal, "worker"), &worker)?;
         store.save(journal)?;
+        if let Some(progress) = &mut progress {
+            progress.announce(journal, Some(&binding.invocation));
+        }
         Store::atomic_new(
             &store.root,
             &binding.gate_name,
