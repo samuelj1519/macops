@@ -2345,6 +2345,7 @@ pub fn app_scoped(
             all: false,
             change_id: None,
             agents: crate::cli::SkillAgents::default(),
+            switch_source: false,
         };
         return Ok(Some(upgrade(ctx, &selection, dry, yes)?));
     }
@@ -2791,6 +2792,7 @@ fn outdated(ctx: &Context, name: Option<&str>, only: &[String]) -> Result<Value>
                 revision: None,
                 change_id: None,
                 agents: crate::cli::SkillAgents::default(),
+                switch_source: false,
             },
         )?
     };

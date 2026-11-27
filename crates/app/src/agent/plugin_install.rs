@@ -147,6 +147,7 @@ fn choose_plugin_targets_using(
         agent::resource_agents,
         browser::sanitize,
         domain::resource::{Data, Management},
+        terminal::presentation::{table, table_width},
     };
     let mut profiles = resource_agents::profile_roots_matching(ctx, |kind, _| kind == client)?;
     profiles.sort_by(|a, b| {
@@ -157,6 +158,8 @@ fn choose_plugin_targets_using(
     });
     let mut choices = vec![];
     let mut labels = vec![];
+    let mut rows = vec![];
+    let mut notes = vec![];
     terminal(TerminalLine::Heading, "安装位置");
     for profile in profiles {
         let Data::Agent { config_dir, .. } = &profile.data else {
@@ -168,7 +171,7 @@ fn choose_plugin_targets_using(
         );
         let path = sanitize(&config_dir.display().to_string(), false);
         let Ok(target) = resource_agents::InstallTarget::capture(ctx, &profile) else {
-            eprintln!("  {name} · {path} · 暂不能核验目录");
+            rows.push(vec!["—".into(), name, "目录待核验".into(), path]);
             continue;
         };
         let registered = profile.management == Management::Adopted;
@@ -197,10 +200,34 @@ fn choose_plugin_targets_using(
             registered,
         })));
         labels.push(name.clone());
-        eprintln!("  {} {name} · {path} · {status}{existing}", choices.len());
+        rows.push(vec![
+            choices.len().to_string(),
+            name.clone(),
+            status.into(),
+            path,
+        ]);
+        if !existing.is_empty() {
+            notes.push(format!("{name}　{}", existing.trim()));
+        }
     }
     choices.push(Some(Destination::Independent));
-    eprintln!("  {} 新建单独配置", choices.len());
+    rows.push(vec![
+        choices.len().to_string(),
+        "新建单独配置".into(),
+        "—".into(),
+        "—".into(),
+    ]);
+    eprint!(
+        "{}",
+        table(
+            &["编号", "Agent", "管理状态", "配置目录"],
+            &rows,
+            table_width()
+        )
+    );
+    for note in notes {
+        eprintln!("说明　{note}");
+    }
     labels.push("新建单独配置".into());
     labels.push("返回".into());
     Ok(select(&labels)?

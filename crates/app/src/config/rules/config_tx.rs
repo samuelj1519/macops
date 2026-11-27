@@ -298,7 +298,10 @@ pub enum MiseReconcilePlan {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum ToolEntry {
-    Pin(String),
+    Pin {
+        version: String,
+        options: Vec<(String, String)>,
+    },
     Unsupported(String),
 }
 
@@ -352,7 +355,7 @@ fn collect_entries(
             && let Some(tbl) = item.as_table_like()
         {
             for (k, v) in tbl.iter() {
-                tools.insert(k.to_owned(), classify_tool_item(v));
+                tools.insert(k.to_owned(), classify_tool_item(k, v));
             }
             continue;
         }
@@ -375,19 +378,52 @@ fn collect_entries(
     (tools, others)
 }
 
-fn classify_tool_item(item: &Item) -> ToolEntry {
-    if let Some(val) = item.as_value() {
-        if let Some(s) = val.as_str() {
-            return ToolEntry::Pin(s.to_owned());
-        }
-        if let Some(inline) = val.as_inline_table()
-            && inline.len() == 1
-            && let Some(ver) = inline.get("version").and_then(TomlValue::as_str)
-        {
-            return ToolEntry::Pin(ver.to_owned());
-        }
+pub(crate) fn tool_pin<'a>(spec: &str, item: &'a Item) -> Option<&'a str> {
+    if let Some(version) = item.as_str() {
+        return Some(version);
     }
-    ToolEntry::Unsupported(canonical_item(item))
+    let options = item.as_inline_table()?;
+    let version = options.get("version")?.as_str()?;
+    if options.len() == 1 {
+        return Some(version);
+    }
+    if spec != "http:cursor-agent"
+        || !options.iter().all(|(name, value)| match name {
+            "version" | "version_list_url" | "version_regex" | "url" => value.as_str().is_some(),
+            "platforms" => value.as_inline_table().is_some_and(|platforms| {
+                !platforms.is_empty()
+                    && platforms.iter().all(|(_, download)| {
+                        download.as_inline_table().is_some_and(|table| {
+                            table.len() == 1
+                                && table.get("url").and_then(TomlValue::as_str).is_some()
+                        })
+                    })
+            }),
+            _ => false,
+        })
+        || (options.get("url").is_none() && options.get("platforms").is_none())
+    {
+        return None;
+    }
+    Some(version)
+}
+
+fn classify_tool_item(spec: &str, item: &Item) -> ToolEntry {
+    let Some(version) = tool_pin(spec, item) else {
+        return ToolEntry::Unsupported(canonical_item(item));
+    };
+    let mut options: Vec<_> = item
+        .as_inline_table()
+        .into_iter()
+        .flat_map(|table| table.iter())
+        .filter(|(name, _)| *name != "version")
+        .map(|(name, value)| (name.into(), canonical_value(value)))
+        .collect();
+    options.sort();
+    ToolEntry::Pin {
+        version: version.into(),
+        options,
+    }
 }
 
 fn redact_if_env(_key: &str, _raw: &str) -> String {
@@ -403,7 +439,8 @@ fn diff_maps(
 ) -> Vec<MiseDriftRow> {
     let mut rows = Vec::new();
     let render_tool = |e: &ToolEntry| match e {
-        ToolEntry::Pin(v) => v.clone(),
+        ToolEntry::Pin { version, options } if options.is_empty() => version.clone(),
+        ToolEntry::Pin { version, .. } => format!("{version}（含下载选项）"),
         ToolEntry::Unsupported(_) => "<unsupported>".into(),
     };
     for (k, lv) in live_tools {
@@ -522,12 +559,46 @@ pub fn evaluate_mise_reconcile(
             rows: vec![],
         });
     };
-    let (ToolEntry::Pin(src_pin), ToolEntry::Pin(live_pin)) = (src_entry, live_entry) else {
+    compare_pins(
+        live_text,
+        source_text,
+        &src_doc,
+        spec,
+        src_entry,
+        live_entry,
+    )
+}
+
+fn compare_pins(
+    live_text: &str,
+    source_text: &str,
+    src_doc: &Document<&str>,
+    spec: &str,
+    src_entry: &ToolEntry,
+    live_entry: &ToolEntry,
+) -> Result<MiseReconcilePlan> {
+    let (
+        ToolEntry::Pin {
+            version: src_pin,
+            options: src_options,
+        },
+        ToolEntry::Pin {
+            version: live_pin,
+            options: live_options,
+        },
+    ) = (src_entry, live_entry)
+    else {
         return Err(Error::attention(
             "unsupported_mise_pin_shape",
-            "目标工具的 [tools] 条目必须是单一版本字符串或仅含 version 的内联表",
+            "目标工具需要一个明确版本。Cursor 的 HTTP 下载选项可以保留在同一个内联表里。",
         ));
     };
+    if src_options != live_options {
+        return Ok(MiseReconcilePlan::Drift {
+            reason: "tool_options_drifted".into(),
+            rows: vec![],
+        });
+    }
     exact_version(src_pin)?;
     exact_version(live_pin)?;
     if src_pin == live_pin {
@@ -543,7 +614,7 @@ pub fn evaluate_mise_reconcile(
             })
         };
     }
-    rewrite_tool_pin_spanned(source_text, &src_doc, spec, live_pin).map(|rewritten| {
+    rewrite_tool_pin_spanned(source_text, src_doc, spec, live_pin).map(|rewritten| {
         if rewritten == live_text {
             MiseReconcilePlan::Rewrite {
                 spec: spec.into(),

@@ -436,6 +436,8 @@ pub fn launch(store: &Store, journal: &mut Journal) -> Result<process::Output> {
     } else {
         crate::terminal::progress::LiveProgress::open()
     };
+    let (mut mise_progress, stdout, stderr) =
+        launch_streams(journal, progress.is_some(), &output_file, &error_file)?;
     let path = store
         .path
         .join("operations")
@@ -445,8 +447,8 @@ pub fn launch(store: &Store, journal: &mut Journal) -> Result<process::Output> {
         .arg("__worker")
         .arg(&path)
         .stdin(Stdio::piped())
-        .stdout(output_file.try_clone()?)
-        .stderr(error_file.try_clone()?)
+        .stdout(stdout)
+        .stderr(stderr)
         .process_group(0)
         .spawn()?;
     journal.phase = Phase::Running;
@@ -482,14 +484,29 @@ pub fn launch(store: &Store, journal: &mut Journal) -> Result<process::Output> {
             process::kill_group(child.id());
             break child.wait()?;
         }
-        if let Some(progress) = &mut progress {
-            progress.relay([&output_file, &error_file], false);
+        if relay_launch(
+            &mut progress,
+            &mut mise_progress,
+            &mut output_file,
+            &error_file,
+            false,
+        )
+        .is_err()
+        {
+            uncertain = true;
+            process::kill_group(child.id());
+            break child.wait()?;
         }
         std::thread::sleep(Duration::from_millis(15));
     };
-    if let Some(progress) = &mut progress {
-        progress.relay([&output_file, &error_file], true);
-    }
+    uncertain |= relay_launch(
+        &mut progress,
+        &mut mise_progress,
+        &mut output_file,
+        &error_file,
+        true,
+    )
+    .is_err();
     uncertain |= output_file.metadata()?.len() > 2 * 1024 * 1024
         || error_file.metadata()?.len() > 2 * 1024 * 1024;
     output_file.seek(SeekFrom::Start(0))?;
@@ -506,6 +523,56 @@ pub fn launch(store: &Store, journal: &mut Journal) -> Result<process::Output> {
         stderr: String::from_utf8_lossy(&diagnostic).into_owned(),
         uncertain,
     })
+}
+
+fn launch_streams(
+    journal: &Journal,
+    live: bool,
+    output: &std::fs::File,
+    error: &std::fs::File,
+) -> std::io::Result<(
+    Option<crate::terminal::mise_progress::MiseProgress>,
+    Stdio,
+    Stdio,
+)> {
+    if live
+        && crate::agent::ai_tx::is_native(journal)
+        && journal.plan.command.as_ref().is_some_and(|command| {
+            command
+                .program
+                .file_name()
+                .is_some_and(|file| file == "mise")
+                && command.args.first().is_some_and(|arg| arg == "use")
+        })
+        && let Some((pty, stdout, stderr)) = crate::terminal::mise_progress::MiseProgress::open()
+    {
+        return Ok((Some(pty), stdout, stderr));
+    }
+    Ok((
+        None,
+        Stdio::from(output.try_clone()?),
+        Stdio::from(error.try_clone()?),
+    ))
+}
+
+fn relay_launch(
+    display: &mut Option<crate::terminal::progress::LiveProgress>,
+    pty: &mut Option<crate::terminal::mise_progress::MiseProgress>,
+    output: &mut std::fs::File,
+    error: &std::fs::File,
+    draining: bool,
+) -> std::io::Result<()> {
+    if let Some(display) = display {
+        if let Some(pty) = pty {
+            let result = pty.relay(display, output, draining);
+            if draining {
+                pty.finish(display);
+            }
+            return result;
+        }
+        display.relay([output, error], draining);
+    }
+    Ok(())
 }
 
 pub fn worker(path: &Path) -> Result<()> {

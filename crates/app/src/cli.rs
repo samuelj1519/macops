@@ -377,6 +377,8 @@ pub struct SkillSelection {
         help = "指定某个提交的完整 SHA。按标签或分支更新某个仓库时可用 OWNER/REPO@版本。"
     )]
     pub revision: Option<String>,
+    #[arg(long, help = "允许同名 Claude 插件换到所选 GitHub 仓库的固定版本")]
+    pub switch_source: bool,
     #[arg(long = "only", help = "指定一个成员或来源分组，可重复")]
     pub only: Vec<String>,
     #[arg(long, help = "处理全部符合条件的技能。先加 --dry-run 核对范围。")]

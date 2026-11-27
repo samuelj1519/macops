@@ -1,9 +1,10 @@
 use crate::{
-    browser::{Item, Kind, View, sanitize},
+    browser::{Item, Kind, View},
     context::Context,
     domain::resource::{Management, State},
     error::Result,
     policy::public_source::repository_subject,
+    terminal::presentation::{table, table_width},
 };
 use serde_json::Value;
 use std::fmt::Write as _;
@@ -74,6 +75,7 @@ impl Related {
                 title(*kind),
                 view.items.len()
             );
+            let mut rows = Vec::new();
             for item in view.items.iter().take(3) {
                 let Some(info) = item.inventory.as_ref() else {
                     continue;
@@ -92,23 +94,33 @@ impl Related {
                         .collect::<Vec<_>>()
                         .join("、")
                 } else if item.agents.is_empty() {
-                    info.manager.clone()
+                    "—".into()
                 } else {
                     item.agents.join("、")
                 };
-                let market = if self.repository_query && info.repository.is_none() {
-                    " · 依据市场登记"
+                let basis = if self.repository_query && info.repository.is_none() {
+                    "市场登记"
                 } else {
-                    ""
+                    "—"
                 };
-                let _ = writeln!(
-                    text,
-                    "    {} · {state} · {} · {}{market}",
-                    sanitize(&item.name, false),
-                    sanitize(version, false),
-                    sanitize(&place, false)
-                );
+                rows.push(vec![
+                    item.name.clone(),
+                    state.into(),
+                    version.into(),
+                    place,
+                    info.manager.clone(),
+                    basis.into(),
+                ]);
             }
+            let mut headers = vec!["名称", "安装状态", "版本", "安装位置", "渠道"];
+            if rows.iter().any(|row| row[5] == "市场登记") {
+                headers.push("匹配依据");
+            } else {
+                for row in &mut rows {
+                    row.pop();
+                }
+            }
+            text.push_str(&table(&headers, &rows, table_width()));
             if view.items.len() > 3 {
                 let _ = writeln!(text, "    另有 {} 项，见维护入口。", view.items.len() - 3);
             }
@@ -122,27 +134,30 @@ impl Related {
     pub(super) fn maintenance(&self, first: usize) -> String {
         let mut text = String::new();
         if self.views.is_empty() {
-            text.push_str("  当前盘点没有可打开的匹配记录。\n");
+            return "  当前盘点没有可打开的匹配记录。\n".into();
         }
+        let mut rows = Vec::new();
+        let mut has_plugins = false;
         for (index, (kind, view)) in self.views.iter().enumerate() {
             let action = if *kind == Kind::Apps {
                 "查看和维护软件"
             } else {
                 "查看技能与插件"
             };
-            let _ = writeln!(
-                text,
-                "  {} {action} · {} 项",
-                first + index,
-                view.items.len()
-            );
-            if view.items.iter().any(|item| {
+            rows.push(vec![
+                (first + index).to_string(),
+                action.into(),
+                view.items.len().to_string(),
+            ]);
+            has_plugins |= view.items.iter().any(|item| {
                 item.inventory.as_ref().is_some_and(|info| {
                     matches!(info.manager.as_str(), "claude-plugin" | "codex-config")
                 })
-            }) {
-                text.push_str("    原生插件在对应 Agent 的插件菜单中维护。\n");
-            }
+            });
+        }
+        text.push_str(&table(&["编号", "入口", "项目数"], &rows, table_width()));
+        if has_plugins {
+            text.push_str("原生插件在对应 Agent 的插件菜单中维护。\n");
         }
         text
     }

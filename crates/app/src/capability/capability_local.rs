@@ -316,6 +316,43 @@ pub(crate) fn plugin_payload_files(
     root: &Directory,
     capability: CapabilityKind,
 ) -> Result<Vec<(String, bool, String)>> {
+    plugin_files(root, capability, PayloadFlavor::installed(capability))
+}
+
+pub(crate) fn claude_market_files(root: &Directory) -> Result<Vec<(String, bool, String)>> {
+    plugin_files(root, CapabilityKind::ClaudePlugin, PayloadFlavor::Checkout)
+}
+
+pub(crate) fn claude_updated_files(root: &Directory) -> Result<Vec<(String, bool, String)>> {
+    plugin_files(
+        root,
+        CapabilityKind::ClaudePlugin,
+        PayloadFlavor::ClaudeUpdated,
+    )
+}
+
+#[derive(Clone, Copy)]
+enum PayloadFlavor {
+    Strict,
+    Checkout,
+    ClaudeUpdated,
+}
+
+impl PayloadFlavor {
+    fn installed(capability: CapabilityKind) -> Self {
+        if capability == CapabilityKind::CodexPlugin {
+            Self::Checkout
+        } else {
+            Self::Strict
+        }
+    }
+}
+
+fn plugin_files(
+    root: &Directory,
+    capability: CapabilityKind,
+    flavor: PayloadFlavor,
+) -> Result<Vec<(String, bool, String)>> {
     let mut entries = Vec::new();
     let mut entry_limit = payload_entry_limit(capability);
     let mut byte_limit = PAYLOAD_BYTE_BUDGET;
@@ -326,7 +363,7 @@ pub(crate) fn plugin_payload_files(
         &mut entry_limit,
         &mut byte_limit,
         &mut entries,
-        capability == CapabilityKind::CodexPlugin,
+        flavor,
     )?;
     root.verify()?;
     entries.sort_by(|a, b| a.0.cmp(&b.0));
@@ -369,7 +406,7 @@ pub fn snapshot_payload(
         &mut remaining_entries,
         budget,
         &mut entries,
-        codex,
+        PayloadFlavor::installed(capability),
     )?;
     if codex {
         verify_codex_manifest(&root, &entries, budget)?;
@@ -499,7 +536,7 @@ fn walk_payload(
     remaining_entries: &mut usize,
     budget: &mut u64,
     out: &mut Vec<(String, bool, String)>,
-    exclude_git: bool,
+    flavor: PayloadFlavor,
 ) -> Result<()> {
     if depth >= PAYLOAD_DEPTH_LIMIT {
         return Err(budget_err("能力包目录层级超出读取上限"));
@@ -521,14 +558,25 @@ fn walk_payload(
             ));
         };
         let meta = dir.metadata(OsStr::new(name))?.ok_or_else(changed)?;
-        if exclude_git && depth == 0 && name == ".git" {
+        if matches!(flavor, PayloadFlavor::Checkout) && depth == 0 && name == ".git" {
             if meta.kind != EntryKind::Directory {
                 return Err(Error::attention(
                     "unsupported_capability_payload",
-                    "Codex Git 元数据必须在实体目录中",
+                    "Git 元数据必须在实体目录中",
                 ));
             }
             continue;
+        }
+        if matches!(flavor, PayloadFlavor::ClaudeUpdated)
+            && depth == 0
+            && name == ".in_use"
+            && meta.kind == EntryKind::Directory
+        {
+            let marker = dir.child(OsStr::new(name))?;
+            if crate::capability::capability_guard::listing(&marker)?.is_empty() {
+                dir.verify_child(OsStr::new(name), &marker)?;
+                continue;
+            }
         }
         match policy::classify_payload_entry(name, depth, meta.kind == EntryKind::File) {
             policy::PayloadMetadataDisposition::IgnoreRegularMarker => continue,
@@ -555,7 +603,7 @@ fn walk_payload(
                     remaining_entries,
                     budget,
                     out,
-                    exclude_git,
+                    flavor,
                 )?;
                 dir.verify_child(OsStr::new(name), &child)?;
             }

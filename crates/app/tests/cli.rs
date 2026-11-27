@@ -117,14 +117,16 @@ fn capability_agent_picker_explains_shared_scope_before_cancel() -> TestResult {
     fs::create_dir(f.home.join(".cursor"))?;
     let lock = f.home.join(".agents/.skill-lock.json");
     let before = fs::read(&lock)?;
-    chezmoi_native::run_browser_pty(
-        &f,
-        &["skill", "upgrade", "owner/repo"],
-        "skill-agent-picker-cancel",
-        &f.home,
-        "100",
-        "3",
-    )?;
+    for scenario in ["skill-agent-picker-cancel", "skill-agent-picker-all-cancel"] {
+        chezmoi_native::run_browser_pty(
+            &f,
+            &["skill", "upgrade", "owner/repo"],
+            scenario,
+            &f.home,
+            "100",
+            "3",
+        )?;
+    }
     assert_eq!(fs::read(lock)?, before);
     assert!(!f.file("state").exists());
     Ok(())

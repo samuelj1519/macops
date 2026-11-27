@@ -1,4 +1,5 @@
 pub(crate) mod install;
+pub(crate) mod mise_progress;
 pub(crate) mod picker;
 pub(crate) mod plan;
 pub(crate) mod presentation;
@@ -25,7 +26,7 @@ use ratatui::{
     Frame, Terminal,
     backend::CrosstermBackend,
     layout::{Constraint, Layout, Rect},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
+    widgets::{Block, Borders, Paragraph, Row, Table, TableState, Wrap},
 };
 use std::{
     fmt::Write as _,
@@ -184,6 +185,7 @@ struct Browser {
     page: Page,
     notice: String,
     offset: usize,
+    page_rows: isize,
 }
 
 fn group_keys(kind: Kind, item: &Item) -> Vec<&str> {
@@ -247,6 +249,7 @@ impl Browser {
             page: Page::List,
             notice: String::new(),
             offset: 0,
+            page_rows: 1,
         }
     }
 
@@ -698,6 +701,12 @@ impl Browser {
         let groups = self.group_tabs(frame.area().width);
         let header_height = 1 + u16::from(unified) + u16::from(groups.is_some());
         let [header, main, footer] = layout_with_notice(frame, &self.notice, header_height);
+        let inset = if matches!(self.page, Page::List) {
+            3
+        } else {
+            2
+        };
+        self.page_rows = isize::try_from(main.height.saturating_sub(inset).max(1)).unwrap_or(1);
         let visible = self.visible();
         let search = if self.typing { "搜索 " } else { "" };
         let filter = match kind {
@@ -820,25 +829,28 @@ impl Browser {
     }
 
     fn list(&self, frame: &mut Frame, area: Rect, visible: &[&Item]) {
-        let items: Vec<_> = visible
+        let headers = crate::browser::list_headers(self.kind);
+        let rows = visible
             .iter()
             .map(|item| {
-                let name = sanitize(&item.name, false);
-                let summary = sanitize(&item.summary, false);
-                if matches!(self.kind, Kind::History | Kind::Marketplaces) {
-                    return ListItem::new(format!("{name}  {summary}"));
-                }
-                let status = match item.management {
-                    Management::Declared => "有声明",
-                    Management::Native => "原生登记",
-                    Management::Adopted => "受管",
-                    Management::Untracked => "已发现",
-                };
-                ListItem::new(format!("{name}  {status}  {summary}"))
+                crate::browser::list_row(self.kind, item)
+                    .into_iter()
+                    .map(|value| sanitize(&value, false))
+                    .collect::<Vec<_>>()
             })
-            .collect();
-        let mut state = ListState::default().with_selected((!items.is_empty()).then_some(self.row));
-        let list = List::new(items)
+            .collect::<Vec<_>>();
+        let budget = usize::from(area.width.saturating_sub(4));
+        let (headers, widths) = presentation::visible_columns(headers, &rows, budget);
+        let widths = widths
+            .into_iter()
+            .map(|width| Constraint::Length(u16::try_from(width).unwrap_or(area.width)));
+        let mut state = TableState::default().with_selected((!rows.is_empty()).then_some(self.row));
+        let values = rows
+            .into_iter()
+            .map(|row| Row::new(row.into_iter().take(headers.len())));
+        let list = Table::new(values, widths)
+            .header(Row::new(headers.iter().copied()).style(ratatui::style::Modifier::BOLD))
+            .column_spacing(2)
             .block(Block::default().borders(Borders::ALL))
             .highlight_symbol("> ");
         frame.render_stateful_widget(list, area, &mut state);
@@ -1069,8 +1081,7 @@ pub(crate) fn browse(
                 browser.type_key(event.code);
                 continue;
             }
-            let rows =
-                isize::try_from(terminal.size()?.height.saturating_sub(4).max(1)).unwrap_or(1);
+            let rows = browser.page_rows;
             match event.code {
                 KeyCode::Tab | KeyCode::BackTab if unified => {
                     match switch_tab(ctx, session, kind, event.code == KeyCode::Tab) {

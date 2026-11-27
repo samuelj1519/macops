@@ -183,6 +183,16 @@ impl LiveProgress {
         }
     }
 
+    pub(super) fn display(&mut self, bytes: &[u8]) -> bool {
+        self.flush_pending();
+        if self.queued.len() + bytes.len() > 128 * 1024 {
+            return false;
+        }
+        self.queued.extend_from_slice(bytes);
+        self.flush_pending();
+        true
+    }
+
     pub(crate) fn relay(&mut self, files: [&std::fs::File; 2], draining: bool) {
         const LIMIT: u64 = 2 * 1024 * 1024;
         let mut buffer = [0; 8192];

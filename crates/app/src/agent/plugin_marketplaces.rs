@@ -1,7 +1,7 @@
 use crate::{
     agent::native_plugins::valid_name,
     agent::native_plugins_files::{Passive, object_file},
-    browser::{Item, View},
+    browser::{Item, ListDetail, View},
     context::Context,
     domain::resource::{Data, Management},
     error::{Error, Result},
@@ -508,7 +508,7 @@ fn market_item(profile: &Value, market: Option<&Value>, index: usize) -> Item {
         format!("原生命令 {}", field(profile, "nativeEntry")),
         format!("官方入口 {}", field(profile, "official")),
     ];
-    let (name, summary) = if let Some(row) = market {
+    let (name, summary, status) = if let Some(row) = market {
         details.push(format!(
             "范围 {} · 来源 {}",
             field(row, "scope"),
@@ -533,11 +533,11 @@ fn market_item(profile: &Value, market: Option<&Value>, index: usize) -> Item {
                 .filter_map(Value::as_str)
                 .map(str::to_owned),
         );
-        (field(row, "name"), format!("{id}  ·  {status}"))
+        (field(row, "name"), format!("{id}  ·  {status}"), status)
     } else {
         let status = profile_summary(profile);
         details.push(status.clone());
-        (id, status)
+        (id, status.clone(), status)
     };
     Item {
         id: format!("{id}:{index}"),
@@ -551,6 +551,11 @@ fn market_item(profile: &Value, market: Option<&Value>, index: usize) -> Item {
         agents: vec![],
         loaded: None,
         details,
+        list: ListDetail::Market {
+            profile: id.into(),
+            status,
+            registered: market.is_some(),
+        },
         inventory: None,
     }
 }

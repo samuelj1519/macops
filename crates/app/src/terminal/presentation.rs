@@ -58,11 +58,154 @@ pub(super) fn fit(text: &str, columns: usize) -> String {
 }
 
 pub(super) fn columns() -> usize {
+    usize::from(size().0)
+}
+
+pub(super) fn size() -> (u16, u16) {
     crossterm::terminal::size()
         .ok()
-        .map(|(width, _)| usize::from(width))
-        .filter(|width| *width > 0)
-        .unwrap_or(80)
+        .filter(|&(width, height)| width > 0 && height > 0)
+        .unwrap_or((80, 24))
+}
+
+pub(crate) fn table_width() -> usize {
+    columns().saturating_sub(5).min(92)
+}
+
+pub(crate) fn column_widths(
+    headers: &[&str],
+    rows: &[Vec<String>],
+    budget: usize,
+) -> Option<Vec<usize>> {
+    let minimum: Vec<_> = headers.iter().map(|label| width(label).max(2)).collect();
+    let available = budget.checked_sub(headers.len().saturating_sub(1) * 2)?;
+    if minimum.iter().sum::<usize>() > available {
+        return None;
+    }
+    let mut widths = minimum.clone();
+    for row in rows {
+        for (current, value) in widths.iter_mut().zip(row) {
+            *current = (*current).max(width(value).min(available));
+        }
+    }
+    let mut total = widths.iter().sum::<usize>();
+    while total > available {
+        let index = widths
+            .iter()
+            .zip(&minimum)
+            .enumerate()
+            .filter(|(_, (current, floor))| current > floor)
+            .max_by_key(|(_, (current, _))| *current)
+            .map(|(index, _)| index)?;
+        widths[index] -= 1;
+        total -= 1;
+    }
+    Some(widths)
+}
+
+pub(crate) fn visible_columns<'a>(
+    headers: &'a [&str],
+    rows: &[Vec<String>],
+    budget: usize,
+) -> (&'a [&'a str], Vec<usize>) {
+    (1..=headers.len())
+        .rev()
+        .find_map(|count| {
+            let headers = &headers[..count];
+            column_widths(headers, rows, budget).map(|widths| (headers, widths))
+        })
+        .unwrap_or((&headers[..1], vec![budget]))
+}
+
+fn pad_row(out: &mut String, cells: impl Iterator<Item = impl AsRef<str>>, widths: &[usize]) {
+    for (index, (value, columns)) in cells.zip(widths).enumerate() {
+        let value = value.as_ref();
+        out.push_str(value);
+        if index + 1 < widths.len() {
+            out.push_str(&" ".repeat(columns.saturating_sub(width(value)) + 2));
+        }
+    }
+    out.push('\n');
+}
+
+pub(super) fn picker_labels(
+    headers: &[&str],
+    rows: &[Vec<String>],
+    budget: usize,
+) -> (String, Vec<String>) {
+    let rows: Vec<Vec<String>> = rows
+        .iter()
+        .map(|row| {
+            row.iter()
+                .map(|value| crate::output::sanitize(value, false))
+                .collect()
+        })
+        .collect();
+    let (headers, widths) = visible_columns(headers, &rows, budget);
+    let mut header = String::new();
+    pad_row(&mut header, headers.iter().copied(), &widths);
+    header.pop();
+    let labels = rows
+        .iter()
+        .map(|row| {
+            let mut label = String::new();
+            let cells = row
+                .iter()
+                .zip(&widths)
+                .map(|(cell, columns)| fit(cell, *columns));
+            pad_row(&mut label, cells, &widths);
+            label.pop();
+            label
+        })
+        .collect();
+    (header, labels)
+}
+
+pub(crate) fn table(headers: &[&str], rows: &[Vec<String>], budget: usize) -> String {
+    if rows.is_empty() {
+        return "本次没有记录。\n".into();
+    }
+    let rows: Vec<Vec<String>> = rows
+        .iter()
+        .map(|row| {
+            row.iter()
+                .map(|value| crate::output::sanitize(value, false))
+                .collect()
+        })
+        .collect();
+    let mut out = String::new();
+    let Some(widths) = column_widths(headers, &rows, budget) else {
+        for (index, row) in rows.iter().enumerate() {
+            if index > 0 {
+                out.push('\n');
+            }
+            for (header, value) in headers.iter().zip(row) {
+                let _ = writeln!(out, "{header}　{value}");
+            }
+        }
+        return out;
+    };
+    pad_row(&mut out, headers.iter().copied(), &widths);
+    pad_row(
+        &mut out,
+        widths.iter().map(|columns| "─".repeat(*columns)),
+        &widths,
+    );
+    for row in &rows {
+        let mut remaining: Vec<_> = row.iter().take(widths.len()).map(String::as_str).collect();
+        loop {
+            let cells = remaining.iter_mut().zip(&widths).map(|(rest, columns)| {
+                let (cell, tail) = rest.split_at(prefix_len(rest, *columns));
+                *rest = tail;
+                cell
+            });
+            pad_row(&mut out, cells, &widths);
+            if remaining.iter().all(|part| part.is_empty()) {
+                break;
+            }
+        }
+    }
+    out
 }
 
 pub(crate) fn panel(title: &str, content: &str) {
@@ -109,6 +252,28 @@ fn panel_text(title: &str, content: &str, columns: usize, color: bool) -> String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn table_aligns_chinese_and_keeps_the_whole_wrapped_path() {
+        let path = "/fixture/config/long/profile/settings.json";
+        let rows = vec![
+            vec!["本机".into(), path.into()],
+            vec!["CLI".into(), "—".into()],
+        ];
+        let text = table(&["名称", "配置目录"], &rows, 24);
+        let lines: Vec<_> = text.lines().collect();
+        assert_eq!(
+            width(&lines[0][..lines[0].find("配置目录").unwrap_or_default()]),
+            6
+        );
+        assert!(lines.iter().all(|line| width(line) <= 24));
+        let wrapped: String = lines[2..lines.len() - 1]
+            .iter()
+            .map(|line| line.trim_start_matches("本机").trim())
+            .collect();
+        assert_eq!(wrapped, path);
+        assert!(table(&["名称", "配置目录"], &rows, 5).contains(&format!("配置目录　{path}")));
+    }
 
     #[test]
     fn panels_keep_chinese_and_wrapped_links_within_the_border() {

@@ -8,6 +8,7 @@ fn selection() -> crate::cli::SkillSelection {
         revision: None,
         change_id: None,
         agents: crate::cli::SkillAgents::default(),
+        switch_source: false,
     }
 }
 

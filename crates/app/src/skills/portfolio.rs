@@ -38,6 +38,7 @@ pub(crate) fn recommend(ctx: &Context, source: &str, kind: Operation) -> Result<
             kind,
             agents: &agents,
             revision: None,
+            switch_source: false,
         },
         true,
         false,
@@ -55,6 +56,7 @@ struct Request<'a> {
     kind: Operation,
     agents: &'a SkillAgents,
     revision: Option<&'a str>,
+    switch_source: bool,
 }
 
 fn scoped(agents: &SkillAgents) -> bool {
@@ -80,7 +82,7 @@ pub(crate) fn routed(cli: &Cli) -> bool {
         | SkillCmd::Remove { agents, .. } => scoped(agents) || interactive,
         SkillCmd::Upgrade(selection) => {
             selection.name.is_some()
-                && (scoped(&selection.agents) || interactive)
+                && (scoped(&selection.agents) || interactive || selection.switch_source)
                 && !selection.all
                 && selection.only.is_empty()
                 && selection.change_id.is_none()
@@ -111,18 +113,21 @@ pub(crate) fn run(cli: &Cli, ctx: &Context) -> Result<Option<Value>> {
             kind: Operation::Install,
             agents,
             revision: None,
+            switch_source: false,
         },
         SkillCmd::Upgrade(selection) if selection.name.is_some() => Request {
             name: selection.name.as_deref().unwrap_or_default(),
             kind: Operation::Upgrade,
             agents: &selection.agents,
             revision: selection.revision.as_deref(),
+            switch_source: selection.switch_source,
         },
         SkillCmd::Remove { id, agents } => Request {
             name: id,
             kind: Operation::Uninstall,
             agents,
             revision: None,
+            switch_source: false,
         },
         SkillCmd::Enable { id, agents } | SkillCmd::Disable { id, agents } => Request {
             name: id,
@@ -133,16 +138,18 @@ pub(crate) fn run(cli: &Cli, ctx: &Context) -> Result<Option<Value>> {
             },
             agents,
             revision: None,
+            switch_source: false,
         },
         SkillCmd::Install { agents, .. } if scoped(agents) => return Err(selector_error()),
         SkillCmd::Upgrade(selection) | SkillCmd::Refresh(selection) | SkillCmd::Sync(selection)
-            if scoped(&selection.agents) =>
+            if scoped(&selection.agents) || selection.switch_source =>
         {
             return Err(selector_error());
         }
         _ => return Ok(None),
     };
     let agent_operation = scoped(request.agents)
+        || request.switch_source
         || interactive
         || matches!(request.kind, Operation::Enable | Operation::Disable);
     if !agent_operation {
@@ -167,7 +174,7 @@ pub(crate) fn run(cli: &Cli, ctx: &Context) -> Result<Option<Value>> {
     if let SkillCmd::Upgrade(selection) = command
         && (selection.all || !selection.only.is_empty() || selection.change_id.is_some())
     {
-        if !scoped(request.agents) {
+        if !scoped(request.agents) && !request.switch_source {
             return Ok(None);
         }
         return Err(selector_error());
@@ -252,18 +259,29 @@ fn selected(
                 "请加 --agent NAME 指定 Agent，或用 --agent all 选择全部。",
             ));
         }
-        let mut labels = agents
-            .iter()
-            .map(|agent| format!("{} · {}", agent.name, agent.path.display()))
+        let has_all = agents.len() > 1;
+        let rows = has_all
+            .then(|| vec!["全部 Agent".into(), "—".into()])
+            .into_iter()
+            .chain(
+                agents
+                    .iter()
+                    .map(|agent| vec![agent.name.clone(), agent.path.display().to_string()]),
+            )
             .collect::<Vec<_>>();
-        if labels.len() > 1 {
-            labels.push("全部 Agent".into());
-        }
-        let selected = picker::select(&labels, 0, true, "选择 Agent", |_| None)?;
-        return if selected.contains(&agents.len()) {
+        let offset = usize::from(has_all);
+        let selected = picker::select_table(
+            &["Agent", "配置目录"],
+            &rows,
+            offset,
+            true,
+            "选择 Agent",
+            |_| None,
+        )?;
+        return if has_all && selected.contains(&0) {
             Ok((0..agents.len()).collect())
         } else {
-            Ok(selected)
+            Ok(selected.into_iter().map(|index| index - offset).collect())
         };
     }
     let mut indices = BTreeSet::new();
@@ -302,6 +320,7 @@ enum Work {
     Shared,
     Install(usize, Box<resource_agents::InstallTarget>),
     Native(Box<crate::agent::plugin_lifecycle::Intent>),
+    Switch(Box<crate::agent::plugin_lifecycle::SourceSwitch>),
 }
 
 struct PluginSite<'a> {
@@ -624,6 +643,91 @@ fn verified_offers(
     }
 }
 
+fn plan_source_switches(
+    ctx: &Context,
+    request: &Request<'_>,
+    sites: &mut [Site<'_>],
+    offers: &[plugin_install::Offer],
+    local: &[Resource],
+    repo: &str,
+    allow_change: bool,
+) {
+    let Some((offer, binary)) = offers.iter().find_map(|offer| match offer {
+        plugin_install::Offer::Claude(offer, binary) => Some((offer.as_ref(), binary)),
+        plugin_install::Offer::Codex(..) => None,
+    }) else {
+        return;
+    };
+    let id = offer.native_id();
+    let mut basis = None;
+    for site in sites {
+        if site.agent.client != "claude" || (site.status != "blocked" && !request.switch_source) {
+            continue;
+        }
+        let installed = local.iter().any(|resource| {
+            matches!(&resource.data, Data::Capability { native_id, origin, deployments, .. }
+                if *native_id == id && origin.manager == "claude-plugin"
+                    && deployments.iter().any(|site_at| site_at.scope == "user" && site_at.harness == site.agent.profile.id))
+        });
+        if !installed
+            || evidence(ctx, request, site.agent, offers, local, Some(repo)).shared
+                != Shared::Missing
+        {
+            continue;
+        }
+        let target = match resource_agents::InstallTarget::capture(ctx, site.agent.profile) {
+            Ok(target) => target,
+            Err(error) => {
+                if allow_change {
+                    site.work = None;
+                    site.status = "blocked";
+                    site.reason = error.message;
+                }
+                continue;
+            }
+        };
+        if !allow_change
+            && !crate::agent::plugin_lifecycle::SourceSwitch::is_bound(&target, offer)
+                .unwrap_or_default()
+        {
+            continue;
+        }
+        let prepared = basis.get_or_insert_with(|| {
+            crate::terminal::progress::during("核验新市场与插件", || {
+                crate::agent::plugin_lifecycle::SwitchOffer::prepare(offer, binary)
+            })
+        });
+        let result = match prepared {
+            Ok(prepared) => {
+                crate::agent::plugin_lifecycle::SourceSwitch::plan(target, prepared, allow_change)
+            }
+            Err(error) => {
+                site.work = None;
+                site.status = "blocked";
+                site.reason.clone_from(&error.message);
+                continue;
+            }
+        };
+        match result {
+            Ok(Some(plan)) => {
+                site.status = "planned";
+                site.reason = plan.detail();
+                site.work = Some(Work::Switch(Box::new(plan)));
+            }
+            Ok(None) => {
+                site.work = None;
+                site.status = "current";
+                site.reason.clear();
+            }
+            Err(error) => {
+                site.work = None;
+                site.status = "blocked";
+                site.reason = error.message;
+            }
+        }
+    }
+}
+
 fn execute(
     ctx: &Context,
     request: Request<'_>,
@@ -653,7 +757,9 @@ fn execute(
         .map(|_| public_skill::Request::parse(query))
         .transpose()?;
     let repository = repo.as_ref().map(|value| value.repository.key());
-    if (request.kind == Operation::Install || request.revision.is_some()) && repository.is_none() {
+    if (request.kind == Operation::Install || request.revision.is_some() || request.switch_source)
+        && repository.is_none()
+    {
         return Err(selector_error());
     }
     let (local, _) =
@@ -669,29 +775,20 @@ fn execute(
         .iter()
         .map(|&index| classify(ctx, &request, &agents[index], &offers, &local, repository))
         .collect::<Vec<_>>();
-    let shared_approved = request.agents.shared || interactive;
-    if !shared_approved {
-        for site in &mut sites {
-            if matches!(site.work, Some(Work::Shared)) {
-                site.work = None;
-                site.status = "blocked";
-                site.reason = "需要修改共享技能目录。确认影响范围后，加 --shared 重试。".into();
-            }
-        }
+    if request.kind == Operation::Upgrade
+        && let Some(repo) = repository
+    {
+        plan_source_switches(
+            ctx,
+            &request,
+            &mut sites,
+            &offers,
+            &local,
+            repo,
+            interactive || request.switch_source,
+        );
     }
-    for site in &mut sites {
-        if matches!(site.work, Some(Work::Install(..) | Work::Native(_)))
-            && agents.iter().any(|other| {
-                other.path != site.agent.path
-                    && (other.path.starts_with(site.agent.path)
-                        || site.agent.path.starts_with(other.path))
-            })
-        {
-            site.work = None;
-            site.status = "blocked";
-            site.reason = "配置目录和另一套 Agent 的目录重叠。请先核对配置位置。".into();
-        }
-    }
+    check_target_scope(&mut sites, &agents, request.agents.shared || interactive);
     let shared = if sites
         .iter()
         .any(|site| matches!(site.work, Some(Work::Shared)))
@@ -722,13 +819,44 @@ fn execute(
     }
     if sites.iter().any(|site| site.work.is_some()) {
         let text = batch_text(&planned);
-        crate::operations::confirm(
-            &format!("{} {}\n{text}", request.kind.label(), request.name),
-            yes,
-        )?;
+        let action = if sites
+            .iter()
+            .any(|site| matches!(site.work, Some(Work::Switch(_))))
+        {
+            "换源并升级"
+        } else {
+            request.kind.label()
+        };
+        crate::operations::confirm(&format!("{action} {}\n{text}", request.name), yes)?;
         crate::operations::recover_before_write(ctx, None)?;
     }
     perform(ctx, &request, sites, &offers, planned, shared)
+}
+
+fn check_target_scope(sites: &mut [Site<'_>], agents: &[Agent<'_>], shared_approved: bool) {
+    if !shared_approved {
+        for site in &mut *sites {
+            if matches!(site.work, Some(Work::Shared)) {
+                site.work = None;
+                site.status = "blocked";
+                site.reason = "需要修改共享技能目录。确认影响范围后，加 --shared 重试。".into();
+            }
+        }
+    }
+    for site in &mut *sites {
+        if matches!(
+            site.work,
+            Some(Work::Install(..) | Work::Native(_) | Work::Switch(_))
+        ) && agents.iter().any(|other| {
+            other.path != site.agent.path
+                && (other.path.starts_with(site.agent.path)
+                    || site.agent.path.starts_with(other.path))
+        }) {
+            site.work = None;
+            site.status = "blocked";
+            site.reason = "配置目录和另一套 Agent 的目录重叠。请先核对配置位置。".into();
+        }
+    }
 }
 
 fn preview(
@@ -754,6 +882,7 @@ fn preview(
         let version = match &site.work {
             Some(Work::Install(index, _)) => offers[*index].plugin_info().ok().map(|(_,v,_,_)| v),
             Some(Work::Native(intent)) => intent.target_version(),
+            Some(Work::Switch(plan)) => Some(plan.version()),
             Some(Work::Shared) => request.revision.or_else(|| request.name.rsplit_once('@').map(|(_,reference)| reference)),
             None if site.status == "blocked" && site.version.is_some() => offers.iter()
                 .filter(|offer| offer.client() == site.agent.client)
@@ -799,6 +928,7 @@ fn perform(
                 ))
             }
             Work::Native(intent) => Some(intent.key()),
+            Work::Switch(plan) => Some(plan.key()),
         };
         if let Some((status, reason)) = physical_key.as_ref().and_then(|key| physical.get(key)) {
             row["status"] = json!(status);
@@ -818,6 +948,7 @@ fn perform(
                 })
             }),
             Work::Native(intent) => intent.run(ctx),
+            Work::Switch(plan) => plan.run(ctx),
         };
         let (status, reason) = result_status(ctx, result)?;
         row["status"] = json!(status);
@@ -892,7 +1023,12 @@ fn result_status(ctx: &Context, result: Result<Value>) -> Result<(&'static str, 
 }
 
 pub(crate) fn batch_text(rows: &[Value]) -> String {
-    rows.iter()
+    use crate::terminal::presentation::{table, table_width};
+    use std::fmt::Write as _;
+
+    let fields = ["agent", "currentVersion", "targetVersion", "directory"];
+    let data = rows
+        .iter()
         .map(|row| {
             let status = match row["status"].as_str() {
                 Some("planned") => "将执行",
@@ -904,23 +1040,28 @@ pub(crate) fn batch_text(rows: &[Value]) -> String {
                 Some("blocked") => "暂不能操作",
                 _ => "未完成",
             };
-            let safe = |value: &str| crate::output::sanitize(value, false);
-            let version = row["currentVersion"]
-                .as_str()
-                .map_or(String::new(), |v| format!(" · 当前 {}", safe(v)));
-            let target = row["targetVersion"]
-                .as_str()
-                .map_or(String::new(), |v| format!(" · 目标 {}", safe(v)));
-            let reason = row["reason"]
-                .as_str()
-                .filter(|text| !text.is_empty())
-                .map_or(String::new(), |s| format!(" · {}", safe(s)));
-            format!(
-                "{} · {status}{version}{target} · {}{reason}",
-                safe(row["agent"].as_str().unwrap_or_default()),
-                safe(row["directory"].as_str().unwrap_or_default())
-            )
+            let mut cells = fields
+                .map(|key| row[key].as_str().unwrap_or("—").to_owned())
+                .to_vec();
+            cells.insert(1, status.into());
+            cells
         })
-        .collect::<Vec<_>>()
-        .join("\n")
+        .collect::<Vec<_>>();
+    let mut text = table(
+        &["Agent", "状态", "当前版本", "目标版本", "安装位置"],
+        &data,
+        table_width(),
+    );
+    for row in rows {
+        if let Some(reason) = row["reason"].as_str().filter(|reason| !reason.is_empty()) {
+            let agent = row["agent"].as_str().unwrap_or("—");
+            let _ = writeln!(
+                text,
+                "说明 · {}　{}",
+                crate::output::sanitize(agent, false),
+                crate::output::sanitize(reason, false)
+            );
+        }
+    }
+    text.trim_end().into()
 }

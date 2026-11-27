@@ -91,16 +91,12 @@ pub fn pin(text: &str, tool: &str) -> Result<String> {
         .and_then(Item::as_table_like)
         .and_then(|t| t.get(spec));
     let pin = item
-        .and_then(|i| {
-            i.as_str().or_else(|| {
-                let t = i.as_inline_table()?;
-                (t.len() == 1)
-                    .then(|| t.get("version").and_then(toml_edit::Value::as_str))
-                    .flatten()
-            })
-        })
+        .and_then(|item| config_tx::tool_pin(spec, item))
         .ok_or_else(|| {
-            Error::attention("unsupported_mise_pin_shape", "AI pin 必须是单一精确版本")
+            Error::attention(
+                "unsupported_mise_pin_shape",
+                format!("无法读取 {tool} 的单一版本配置。请检查 mise 的 [tools] 条目。"),
+            )
         })?;
     exact_version(pin)
 }

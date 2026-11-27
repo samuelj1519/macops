@@ -23,6 +23,7 @@ fn local_inventory_matches_canonical_repository_without_guessing_from_the_name()
         agents: vec!["codex:default".into(), "claude:fixture".into()],
         loaded: None,
         details: vec![],
+        list: crate::browser::ListDetail::Plain,
         inventory: Some(crate::browser::InventoryInfo {
             groups: vec![],
             manager: "skills-cli".into(),
@@ -98,7 +99,12 @@ fn local_inventory_matches_canonical_repository_without_guessing_from_the_name()
     let status = related.status();
     assert!(status.contains("已接管 1") && status.contains("1.11.0"));
     assert!(status.contains("codex:default、claude:fixture") && status.contains("无法核验"));
-    assert!(related.maintenance(3).contains("3 查看技能与插件"));
+    let maintenance = related.maintenance(3);
+    assert!(
+        maintenance
+            .lines()
+            .any(|line| { line.split_whitespace().take(2).eq(["3", "查看技能与插件"]) })
+    );
     Ok(())
 }
 
@@ -121,6 +127,7 @@ fn repository_lookup_associates_plugins_using_their_native_market_registration()
         agents: vec!["claude:fixture".into()],
         loaded: None,
         details: vec![],
+        list: crate::browser::ListDetail::Plain,
         inventory: Some(crate::browser::InventoryInfo {
             groups: vec![],
             manager: "claude-plugin".into(),

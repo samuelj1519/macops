@@ -15,6 +15,7 @@ fn inventory_filters_managers_and_actual_skill_locations() {
         agents: agents.iter().map(|x| (*x).into()).collect(),
         loaded: None,
         details: vec![],
+        list: crate::browser::ListDetail::Plain,
         inventory: Some(crate::browser::InventoryInfo {
             manager: manager.into(),
             groups: agents.iter().map(|x| (*x).into()).collect(),
@@ -145,6 +146,7 @@ fn agent_details_announce_the_managed_session_without_claiming_it_is_loaded() {
                 agents: vec![],
                 loaded: None,
                 details: vec!["档案 fixture".into()],
+                list: crate::browser::ListDetail::Plain,
                 inventory: None,
             }],
             coverage: "observed",

@@ -73,7 +73,18 @@ elif a[0]=='use':
  live=pathlib.Path(a[2]); text=live.read_text(); spec,version=a[-1].rsplit('@',1)
  lines=text.splitlines(True)
  for i,line in enumerate(lines):
-  if line.startswith('"'+spec+'"'): lines[i]='"'+spec+'" = "'+version+'"\n'
+  if line.startswith('"'+spec+'"'):
+   if '= {' in line:
+    import re
+    lines[i]=re.sub(r'(version = ")[^"]+',r'\g<1>'+version,line,count=1)
+   else: lines[i]='"'+spec+'" = "'+version+'"\n'
+ if (h/'mise-redraw').exists():
+  import time
+  assert sys.stderr.isatty()
+  print("fixture mise first frame",file=sys.stderr,flush=True)
+  time.sleep(0.25)
+  print("\x1b[1A\r\x1b[2Kfixture mise second frame\x1b]52;terminal-poison\x07\x1b[?25l",file=sys.stderr,flush=True)
+  while not (h/'release-progress').exists(): time.sleep(0.05)
  live.write_text(''.join(lines))
  if (h/'change-other').exists(): live.write_text(live.read_text().replace('24.0.0','25.0.0'))
  if (h/'change-source').exists():
@@ -95,6 +106,41 @@ else: sys.exit(8)
     fs::set_permissions(&mise, fs::Permissions::from_mode(0o755))?;
     synthetic_runtimes(&f, live_version)?;
     Ok(f)
+}
+
+#[test]
+fn cursor_upgrade_keeps_download_options_in_live_and_declared_config() -> TestResult {
+    let f = setup("cursor", "1.0.0")?;
+    let live = f.home.join(".config/mise/config.toml");
+    let source = f
+        .home
+        .join(".local/share/chezmoi/dot_config/mise/private_config.toml");
+    let text = r#"[tools]
+"http:cursor-agent" = { version = "1.0.0", version_list_url = "https://example.test/releases", version_regex = '([^/]+)/', platforms = { macos-arm64 = { url = "https://example.test/{{ version }}.tgz" } } } # preserve
+"#;
+    fs::write(&live, text)?;
+    fs::write(&source, text)?;
+    let (out, result) = f.run(&["agent", "upgrade", "cursor", "--yes"])?;
+    assert_code(&out, 0);
+    assert_eq!(result["data"]["journal"]["phase"], "succeeded");
+    let expected = text.replace("1.0.0", "2.0.0");
+    assert_eq!(fs::read_to_string(live)?, expected);
+    assert_eq!(fs::read_to_string(source)?, expected);
+    Ok(())
+}
+
+#[test]
+fn mise_progress_repaints_in_place_before_completion() -> TestResult {
+    let f = setup("claude", "1.0.0")?;
+    fs::write(f.home.join("mise-redraw"), b"")?;
+    super::chezmoi_native::run_browser_pty(
+        &f,
+        &["agent", "upgrade", "claude", "--yes"],
+        "native-progress-mise",
+        &f.home.join("release-progress"),
+        "100",
+        "0",
+    )
 }
 fn synthetic_runtimes(f: &Fixture, live_version: &str) -> TestResult {
     for version in ["1.0.0", "2.0.0", "9.0.0", live_version] {

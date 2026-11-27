@@ -19,6 +19,11 @@ use std::{
     path::{Path, PathBuf},
 };
 
+#[path = "plugin_source_switch.rs"]
+mod source_switch;
+use source_switch::{GithubMarket, Rebind};
+pub(crate) use source_switch::{SourceSwitch, SwitchOffer};
+
 const MARKER: &str = "agent-plugin-action-v1:";
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -31,9 +36,15 @@ enum Desired {
         enabled: Option<bool>,
         payload: String,
     },
+    Rebind(Rebind),
+    PinnedVersion {
+        wanted: GithubMarket,
+        version: String,
+        enabled: Option<bool>,
+    },
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct Facts {
     installed: bool,
@@ -45,10 +56,22 @@ struct Facts {
     payload: Option<String>,
 }
 
+impl Facts {
+    fn same_install(&self, other: &Self) -> bool {
+        self.installed == other.installed
+            && self.version == other.version
+            && self.revision == other.revision
+            && self.enabled == other.enabled
+            && self.footprint == other.footprint
+            && self.payload == other.payload
+    }
+}
+
 impl Desired {
     fn met(&self, facts: &Facts) -> bool {
         match self {
             Self::Absent => !facts.installed,
+            Self::Rebind(_) | Self::PinnedVersion { .. } => false,
             Self::Enabled(value) => facts.installed && facts.enabled == Some(*value),
             Self::Version {
                 version,
@@ -66,8 +89,8 @@ impl Desired {
     fn action(&self) -> Action {
         match self {
             Self::Absent => Action::Uninstall,
-            Self::Version { .. } => Action::Upgrade,
-            Self::Enabled(_) => Action::Update,
+            Self::Version { .. } | Self::PinnedVersion { .. } => Action::Upgrade,
+            Self::Enabled(_) | Self::Rebind(_) => Action::Update,
         }
     }
 }
@@ -438,33 +461,60 @@ impl Intent {
 
     pub(crate) fn target_version(&self) -> Option<&str> {
         match &self.desired {
-            Desired::Version { version, .. } => Some(version),
+            Desired::Version { version, .. } | Desired::PinnedVersion { version, .. } => {
+                Some(version)
+            }
             _ => None,
         }
     }
 
-    fn reached(&self, current: &Facts) -> bool {
-        self.desired.met(current)
+    fn reached(&self, current: &Facts) -> Result<bool> {
+        if let Desired::Rebind(rebind) = &self.desired {
+            return Ok(self.before.same_install(current)
+                && rebind.wanted.verify_cache(&self.target, &self.id)?);
+        }
+        if let Desired::PinnedVersion {
+            wanted,
+            version,
+            enabled,
+        } = &self.desired
+        {
+            return Ok(current.installed
+                && current.version.as_ref() == Some(version)
+                && current.enabled == *enabled
+                && wanted.verify_cache(&self.target, &self.id)?
+                && wanted.installed(&self.target, &self.id)?);
+        }
+        Ok(self.desired.met(current)
             && (!matches!(self.desired, Desired::Enabled(_))
                 || (current.version == self.before.version
                     && current.revision == self.before.revision
                     && current.footprint == self.before.footprint
                     && current.payload == self.before.payload
-                    && current.origin == self.before.origin))
+                    && current.origin == self.before.origin)))
     }
 
     fn command(&self) -> CommandSpec {
-        let action = match (&self.desired, self.target.client.as_str()) {
-            (Desired::Absent, "codex") => "remove",
-            (Desired::Absent, _) => "uninstall",
-            (Desired::Version { .. }, _) => "update",
-            (Desired::Enabled(true), _) => "enable",
-            (Desired::Enabled(false), _) => "disable",
-        };
-        let mut args = vec!["plugin".into(), action.into(), self.id.clone()];
+        let (verbs, argument): (&[&str], String) =
+            match (&self.desired, self.target.client.as_str()) {
+                (Desired::Rebind(rebind), _) => (
+                    &["marketplace", "add"],
+                    format!("{}#{}", rebind.wanted.repo, rebind.wanted.commit),
+                ),
+                (Desired::Absent, "codex") => (&["remove"], self.id.clone()),
+                (Desired::Absent, _) => (&["uninstall"], self.id.clone()),
+                (Desired::Version { .. } | Desired::PinnedVersion { .. }, _) => {
+                    (&["update"], self.id.clone())
+                }
+                (Desired::Enabled(true), _) => (&["enable"], self.id.clone()),
+                (Desired::Enabled(false), _) => (&["disable"], self.id.clone()),
+            };
+        let mut args = vec!["plugin".into()];
+        args.extend(verbs.iter().map(|value| (*value).into()));
+        args.push(argument);
         if self.target.client == "claude" {
             args.extend(["--scope".into(), "user".into()]);
-            if action == "uninstall" {
+            if matches!(self.desired, Desired::Absent) {
                 args.push("--keep-data".into());
             }
         }
@@ -475,7 +525,7 @@ impl Intent {
     }
 
     fn invocation(&self, home: &Path, timeout: u64) -> FrozenInvocation {
-        FrozenInvocation {
+        let mut invocation = FrozenInvocation {
             command: self.command(),
             cwd: home.into(),
             timeout_secs: timeout,
@@ -494,14 +544,29 @@ impl Intent {
                     self.target.directory.canonical.display().to_string(),
                 ),
             ]),
+        };
+        if matches!(
+            self.desired,
+            Desired::Rebind(_) | Desired::PinnedVersion { .. }
+        ) {
+            invocation.env.extend([
+                ("CLAUDE_CODE_PLUGIN_PREFER_HTTPS".into(), "1".into()),
+                ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+                ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
+            ]);
         }
+        invocation
     }
 
     pub(crate) fn run(&self, ctx: &Context) -> Result<Value> {
         let store = Store::lock(ctx)?;
+        self.run_locked(ctx, &store)
+    }
+
+    fn run_locked(&self, ctx: &Context, store: &Store) -> Result<Value> {
         store.check_pending()?;
         let current = read_facts(&self.target, &self.id)?;
-        if self.reached(&current) {
+        if self.reached(&current)? {
             return Ok(json!({"status":"current"}));
         }
         if current != self.before || digest_binary(&self.binary)? != self.binary_digest {
@@ -534,7 +599,10 @@ impl Intent {
                 evidence: None,
             },
             target: match &self.desired {
-                Desired::Version { version, .. } => Some(version.clone()),
+                Desired::Version { version, .. } | Desired::PinnedVersion { version, .. } => {
+                    Some(version.clone())
+                }
+                Desired::Rebind(rebind) => Some(rebind.wanted.commit.clone()),
                 Desired::Enabled(true) => Some("enabled".into()),
                 Desired::Enabled(false) => Some("disabled".into()),
                 _ => None,
@@ -550,9 +618,9 @@ impl Intent {
         Store::atomic_new(&store.root, &state_name(&journal), self)?;
         store.save(&journal)?;
         let invocation = self.invocation(&ctx.home, ctx.timeout_secs);
-        let binding = native_runner::prepare(&store, &journal, &invocation)?;
-        let outcome = native_runner::launch(&store, &mut journal, &binding)?;
-        finish(&store, &mut journal, self, &outcome)
+        let binding = native_runner::prepare(store, &journal, &invocation)?;
+        let outcome = native_runner::launch(store, &mut journal, &binding)?;
+        finish(store, &mut journal, self, &outcome)
     }
 }
 
@@ -595,6 +663,14 @@ pub(crate) fn worker_guard(journal: &Journal, invocation: &FrozenInvocation) -> 
     {
         return Err(changed());
     }
+    if let Desired::Rebind(rebind) = &data.desired {
+        rebind.apply(&data.target, &data.id)?;
+    }
+    if let Desired::PinnedVersion { wanted, .. } = &data.desired
+        && !wanted.verify_cache(&data.target, &data.id)?
+    {
+        return Err(changed());
+    }
     Ok(())
 }
 
@@ -612,7 +688,8 @@ fn finish(
     intent: &Intent,
     outcome: &NativeOutcome,
 ) -> Result<Value> {
-    let verified = read_facts(&intent.target, &intent.id);
+    let verified = read_facts(&intent.target, &intent.id)
+        .and_then(|facts| intent.reached(&facts).map(|reached| (facts, reached)));
     let exited = matches!(
         outcome,
         NativeOutcome::Exited {
@@ -620,9 +697,14 @@ fn finish(
             signal: None
         }
     );
-    let (phase, message) = if exited && verified.as_ref().is_ok_and(|facts| intent.reached(facts)) {
+    let reached = verified.as_ref().is_ok_and(|(_, reached)| *reached);
+    let (phase, message) = if exited && reached {
         (Phase::Succeeded, "已核对所选配置的插件状态。")
-    } else if exited && verified.as_ref().is_ok_and(|facts| *facts == intent.before) {
+    } else if exited
+        && verified
+            .as_ref()
+            .is_ok_and(|(facts, _)| *facts == intent.before)
+    {
         (
             Phase::Failed,
             "原生命令结束，插件保持原状态。请检查该配置的插件菜单。",
@@ -634,7 +716,14 @@ fn finish(
         )
     };
     journal.phase = phase;
-    journal.message = message.into();
+    journal.message = if let (Phase::Unknown, Err(error)) = (phase, verified) {
+        format!(
+            "{message} {}",
+            crate::output::sanitize(&error.message, false)
+        )
+    } else {
+        message.into()
+    };
     store.save(journal)?;
     Ok(json!({"journal":journal,"nativeOutcome":outcome}))
 }

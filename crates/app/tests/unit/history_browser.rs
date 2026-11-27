@@ -148,5 +148,22 @@ fn agent_row_hides_the_generated_label_suffix_and_keeps_the_profile_identity() -
     assert_eq!(item.summary, "claude · 单独配置");
     assert_eq!(item.id, "agent:stable");
     assert_eq!(item.path.as_ref(), Some(&path));
+    let profile = list_row(Kind::Agents, &item);
+    assert_eq!(profile[1], "受管");
+    assert_eq!(profile[5], path.to_str().ok_or("profile path")?);
+
+    let cli = Item {
+        path: Some("/fixture/bin/claude".into()),
+        list: ListDetail::Agent {
+            command: "claude".into(),
+            version: Some("2.1.0".into()),
+            model: None,
+            configuration: false,
+        },
+        ..item
+    };
+    let row = list_row(Kind::Agents, &cli);
+    assert_eq!(&row[2..4], &["claude", "2.1.0"]);
+    assert_eq!(row[5], "—");
     Ok(())
 }

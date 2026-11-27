@@ -290,3 +290,17 @@ fn empty_payload_files_consume_no_bytes_even_when_the_remaining_byte_budget_is_z
     assert!(snapshot_payload(CapabilityKind::SkillsCli, &query.payload, &mut bytes).is_err());
     Ok(())
 }
+#[test]
+fn claude_write_verification_allows_only_an_empty_root_lease_directory() -> TestResult {
+    let tmp = tempfile::tempdir_in("/private/tmp")?;
+    std::fs::write(tmp.path().join("plugin.json"), b"fixture")?;
+    let root = Directory::open(tmp.path())?;
+    let before = claude_updated_files(&root)?;
+    let marker = tmp.path().join(".in_use");
+    std::fs::create_dir(&marker)?;
+    assert_eq!(claude_updated_files(&root)?, before);
+    assert!(plugin_payload_files(&root, CapabilityKind::ClaudePlugin).is_err());
+    std::fs::write(marker.join("unexpected"), b"fixture")?;
+    assert!(claude_updated_files(&root).is_err());
+    Ok(())
+}

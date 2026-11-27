@@ -56,7 +56,153 @@ pub(crate) struct Item {
     pub loaded: Option<bool>,
     pub details: Vec<String>,
     #[serde(skip)]
+    pub list: ListDetail,
+    #[serde(skip)]
     pub inventory: Option<InventoryInfo>,
+}
+
+#[derive(Debug)]
+pub(crate) enum ListDetail {
+    Plain,
+    Application {
+        scope: String,
+        version_count: usize,
+    },
+    Agent {
+        command: String,
+        version: Option<String>,
+        model: Option<String>,
+        configuration: bool,
+    },
+    History {
+        action: &'static str,
+        result: &'static str,
+    },
+    Market {
+        profile: String,
+        status: String,
+        registered: bool,
+    },
+}
+
+impl ListDetail {
+    fn profile(command: String, model: Option<String>) -> Self {
+        Self::Agent {
+            command,
+            model,
+            version: None,
+            configuration: true,
+        }
+    }
+}
+
+pub(crate) fn list_headers(kind: Kind) -> &'static [&'static str] {
+    match kind {
+        Kind::Apps => &["软件", "管理状态", "渠道", "安装范围", "当前版本", "版本数"],
+        Kind::Skills | Kind::Capabilities => &["能力", "管理状态", "版本", "安装位置", "渠道"],
+        Kind::Agents => &["Agent", "管理状态", "命令", "版本", "模型", "配置目录"],
+        Kind::Config => &["配置", "管理状态", "本机状态", "本机位置"],
+        Kind::History => &["目标", "操作", "结果"],
+        Kind::Marketplaces => &["市场", "Agent", "目录状态"],
+    }
+}
+
+fn management_label(item: &Item) -> &'static str {
+    use crate::domain::resource::Management;
+    match item.management {
+        Management::Declared => "有声明",
+        Management::Native => "原生登记",
+        Management::Adopted => "受管",
+        Management::Untracked => "已发现",
+    }
+}
+
+pub(crate) fn list_row(kind: Kind, item: &Item) -> Vec<String> {
+    let dash = "—";
+    let path = || {
+        item.path
+            .as_ref()
+            .map_or_else(|| dash.into(), |path| path.display().to_string())
+    };
+    let status = || management_label(item).into();
+    let metadata = item.inventory.as_ref();
+    let version = || {
+        metadata
+            .and_then(|info| info.version.as_deref())
+            .unwrap_or(dash)
+            .to_owned()
+    };
+    let channel = || {
+        metadata
+            .map_or(dash, |info| info.manager.as_str())
+            .to_owned()
+    };
+    let mut row = vec![item.name.clone()];
+    let columns = match (kind, &item.list) {
+        (
+            Kind::Agents,
+            ListDetail::Agent {
+                command,
+                version,
+                model,
+                configuration,
+            },
+        ) => vec![
+            status(),
+            command.clone(),
+            version.as_deref().unwrap_or(dash).into(),
+            model.as_deref().unwrap_or(dash).into(),
+            if *configuration { path() } else { dash.into() },
+        ],
+        (Kind::History, ListDetail::History { action, result }) => {
+            vec![(*action).into(), (*result).into()]
+        }
+        (
+            Kind::Marketplaces,
+            ListDetail::Market {
+                profile,
+                status,
+                registered,
+            },
+        ) => {
+            if !registered {
+                row[0] = dash.into();
+            }
+            vec![profile.clone(), status.clone()]
+        }
+        (Kind::Config, _) => vec![status(), item.summary.clone(), path()],
+        (Kind::Skills | Kind::Capabilities, _) => {
+            let groups = metadata.map_or(&[][..], |info| info.groups.as_slice());
+            let place = if groups.is_empty() {
+                dash.into()
+            } else {
+                groups
+                    .iter()
+                    .map(|group| crate::terminal::group_label(group))
+                    .collect::<Vec<_>>()
+                    .join("、")
+            };
+            vec![status(), version(), place, channel()]
+        }
+        (
+            Kind::Apps,
+            ListDetail::Application {
+                scope,
+                version_count,
+            },
+        ) => {
+            vec![
+                status(),
+                channel(),
+                scope.clone(),
+                version(),
+                version_count.to_string(),
+            ]
+        }
+        _ => vec![dash.into(); list_headers(kind).len() - 1],
+    };
+    row.extend(columns);
+    row
 }
 
 #[derive(Debug)]
@@ -323,6 +469,10 @@ fn history_item(journal: crate::domain::Journal, recovery: RecoveryState) -> Ite
         agents: vec![],
         loaded: None,
         details,
+        list: ListDetail::History {
+            action: operation,
+            result: phase,
+        },
         inventory: None,
     }
 }
@@ -330,21 +480,22 @@ fn history_item(journal: crate::domain::Journal, recovery: RecoveryState) -> Ite
 pub(crate) use crate::output::sanitize;
 
 fn plain(view: &View, kind: Kind) -> String {
-    use std::fmt::Write as _;
-    let mut text = format!("{}\n", sanitize(&view.note, false));
-    for item in view
+    let rows = view
         .items
         .iter()
         .filter(|item| (kind != Kind::Skills || item.managed) && !item.directory)
-    {
-        let _ = writeln!(
-            text,
-            "{}\t{}",
-            sanitize(&item.name, false),
-            sanitize(&item.summary, false)
-        );
+        .map(|item| list_row(kind, item))
+        .collect::<Vec<_>>();
+    let note = sanitize(&view.note, false);
+    if rows.is_empty() {
+        return format!("{note}\n");
     }
-    text
+    let table = crate::terminal::presentation::table(
+        list_headers(kind),
+        &rows,
+        crate::terminal::presentation::table_width(),
+    );
+    format!("{note}\n{table}")
 }
 
 fn resource_view(ctx: &Context, filter: &str) -> Result<View> {
@@ -394,6 +545,12 @@ fn agent_view(ctx: &Context) -> Result<View> {
                     source: None,
                     agents: vec![],
                     loaded: None,
+                    list: ListDetail::Agent {
+                        command: crate::agent::ai_policy::binary(name).ok()?.into(),
+                        version: tool["version"].as_str().map(str::to_owned),
+                        model: None,
+                        configuration: false,
+                    },
                     inventory: None,
                     details: vec![
                         format!("程序 {binary}"),
@@ -482,10 +639,23 @@ fn view_from_snapshot(snapshot: crate::domain::resource::Snapshot, show_scope: b
     }
 }
 
+fn release_detail(release: &crate::domain::resource::Release) -> String {
+    let path = release
+        .path
+        .as_deref()
+        .map_or_else(String::new, |path| path.display().to_string());
+    format!(
+        "版本 {} {} {path}",
+        release.version,
+        if release.active { "在用" } else { "" }
+    )
+}
+
 fn resource_item(resource: crate::domain::resource::Resource, show_scope: bool) -> Option<Item> {
     use crate::domain::resource::{Data, Management};
     let mut name = resource.name;
     let mut inventory = None;
+    let list;
     let (summary, path, agents, details) = match resource.data {
         Data::Application {
             manager,
@@ -503,22 +673,16 @@ fn resource_item(resource: crate::domain::resource::Resource, show_scope: bool) 
                 format!("观察 {:?}", resource.status),
                 format!("登记配方 {}", recipe_ref.as_deref().unwrap_or("无")),
             ];
-            details.extend(releases.iter().map(|release| {
-                let path = release
-                    .path
-                    .as_deref()
-                    .map_or_else(String::new, |p| p.display().to_string());
-                format!(
-                    "版本 {} {} {path}",
-                    release.version,
-                    if release.active { "在用" } else { "" }
-                )
-            }));
+            details.extend(releases.iter().map(release_detail));
             details.extend(issues);
             let summary = if show_scope {
                 format!("{manager} · {scope}")
             } else {
                 format!("{manager} · {} 个版本", releases.len())
+            };
+            list = ListDetail::Application {
+                scope: scope.clone(),
+                version_count: releases.len(),
             };
             inventory = Some(InventoryInfo {
                 manager,
@@ -561,6 +725,7 @@ fn resource_item(resource: crate::domain::resource::Resource, show_scope: bool) 
                 format!("模型 {}", model.selected.as_deref().unwrap_or("未知")),
                 format!("观察 {:?}", resource.status),
             ];
+            list = ListDetail::profile(command, model.selected);
             (summary.clone(), Some(config_dir), vec![summary], details)
         }
         _ => return None,
@@ -576,6 +741,7 @@ fn resource_item(resource: crate::domain::resource::Resource, show_scope: bool) 
         source: None,
         agents,
         loaded: None,
+        list,
         details,
         inventory,
     })

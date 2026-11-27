@@ -215,7 +215,9 @@ fn config_browser_r_retries_only_after_a_confirmed_exit_and_publishes_success() 
     );
     let out = config_plain(&f.fixture)?;
     assert_code(&out, 0);
-    assert_eq!(std::str::from_utf8(&out.stdout)?.lines().count(), 3);
+    let text = std::str::from_utf8(&out.stdout)?;
+    assert!(text.contains("本机状态") && text.contains("本机位置"));
+    assert_eq!(text.lines().filter(|line| line.starts_with('.')).count(), 2);
     assert!(!f.destination.join(".demo").exists());
     Ok(())
 }
@@ -398,8 +400,18 @@ fn browser_distinguishes_pending_and_complete_inventory_without_the_legacy_summa
     let browsed = config_plain(&f.fixture)?;
     assert_code(&browsed, 0);
     let text = std::str::from_utf8(&browsed.stdout)?;
-    assert_eq!(text.lines().count(), 82);
-    assert!(text.contains("target-80"));
+    assert!(text.contains("本机状态") && text.contains("本机位置"));
+    let targets = text
+        .lines()
+        .filter_map(|line| line.split_whitespace().next())
+        .filter(|field| field.starts_with("target-"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        targets,
+        (0..81)
+            .map(|index| format!("target-{index:02}"))
+            .collect::<Vec<_>>()
+    );
     let (listed, value) = f.run(&["config"])?;
     assert_code(&listed, 3);
     assert!(

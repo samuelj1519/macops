@@ -280,6 +280,7 @@ fn skill_item(
             agents,
             loaded,
             details,
+            list: crate::browser::ListDetail::Plain,
             inventory: Some(crate::browser::InventoryInfo {
                 manager: origin.manager,
                 groups,

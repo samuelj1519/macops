@@ -201,10 +201,26 @@ fn record(title: &str, value: &Value, fields: Fields) -> String {
 }
 
 fn table(title: &str, value: &Value, fields: Fields) -> String {
+    use std::io::IsTerminal as _;
     let mut text = format!("{title}\n");
     let rows = value.as_array().map_or(&[][..], Vec::as_slice);
     if rows.is_empty() {
         text.push_str("  本次没有记录。\n");
+        return text;
+    }
+    if std::io::stdout().is_terminal() {
+        use crate::terminal::presentation::{table, table_width};
+        let headers = fields.iter().map(|(_, name)| *name).collect::<Vec<_>>();
+        let data = rows
+            .iter()
+            .map(|row| {
+                fields
+                    .iter()
+                    .map(|(key, _)| cell(row, key).unwrap_or_else(|| "—".into()))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        text.push_str(&table(&headers, &data, table_width()));
         return text;
     }
     let _ = writeln!(

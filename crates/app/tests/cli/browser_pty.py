@@ -66,13 +66,23 @@ def type_key(key):
 
 
 try:
-    if scenario == "skill-agent-picker-cancel":
+    if scenario in ("skill-agent-picker-cancel", "skill-agent-picker-all-cancel"):
+        expect("全部 Agent")
         expect("codex")
         expect("cursor-agent")
         expect("选择 Agent")
-        offset = type_key(b" \r")
+        expected = [s.encode() for s in ("全部 Agent", "codex", "cursor-agent")]
+        assert capture.index(expected[0]) < min(capture.index(label) for label in expected[1:])
+        choose_all = scenario == "skill-agent-picker-all-cancel"
+        offset = type_key(b"\x1b[A \r" if choose_all else b" \r")
         expect("共享目录会影响", offset)
         expect("确认执行", offset)
+        plain = re.sub(rb"\x1b\[[0-?]*[ -/]*[@-~]", b"", bytes(capture[offset:]))
+        headers = ("Agent", "状态", "当前版本", "目标版本", "安装位置")
+        assert any(all(h.encode() in line for h in headers) for line in plain.splitlines())
+        rows = [rf"{label}[ ]+将执行" for label in ("codex", "cursor-agent")]
+        count = sum(re.search(row.encode(), plain) is not None for row in rows)
+        assert count == (2 if choose_all else 1)
         offset = type_key(b"\r")
         expect("已取消", offset)
     elif scenario in ("skill-adopt-style", "skill-adopt-no-color"):
@@ -94,6 +104,14 @@ try:
         expect("● 取消", offset)
         offset = type_key(b"\r")
         expect("已取消", offset)
+    elif scenario == "native-progress-mise":
+        expect("fixture mise first frame")
+        expect("fixture mise second frame")
+        assert b"\x1b[1A" in capture and b"\x1b[2K" in capture
+        assert b"\x1b]52;" not in capture and b"\x1b[?25l" not in capture
+        assert process.poll() is None
+        Path(target).touch()
+        expect("已完成")
     elif scenario == "native-progress":
         expect("fixture stdout progress")
         expect("fixture stderr progress")
@@ -267,7 +285,9 @@ try:
         expect("已取消", offset)
     elif scenario in ("adopt-picker-cancel", "adopt-picker-select"):
         expect("Enter 选择")
-        expect("npm ·")
+        expect("渠道")
+        expect("安装范围")
+        expect("npm")
         expect("picker-left")
         expect("picker-right")
         assert b"picker-missing" not in capture
@@ -429,6 +449,8 @@ try:
         assert b"fixture-loose" not in capture[offset:]
         type_key(b"q")
     elif scenario == "skills-discovered":
+        expect("管理状态")
+        expect("安装位置")
         expect("fixture-skill")
         expect("fixture-loose")
         expect("全部发现")

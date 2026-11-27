@@ -25,6 +25,30 @@ pub(crate) fn select(
     prompt: &str,
     shortcut: impl Fn(&str) -> Option<Vec<usize>>,
 ) -> Result<Vec<usize>> {
+    select_lines(labels, None, initial, multiple, prompt, shortcut)
+}
+
+pub(crate) fn select_table(
+    headers: &[&str],
+    rows: &[Vec<String>],
+    initial: usize,
+    multiple: bool,
+    prompt: &str,
+    shortcut: impl Fn(&str) -> Option<Vec<usize>>,
+) -> Result<Vec<usize>> {
+    let (header, labels) =
+        presentation::picker_labels(headers, rows, presentation::columns().saturating_sub(7));
+    select_lines(&labels, Some(&header), initial, multiple, prompt, shortcut)
+}
+
+fn select_lines(
+    labels: &[String],
+    header: Option<&str>,
+    initial: usize,
+    multiple: bool,
+    prompt: &str,
+    shortcut: impl Fn(&str) -> Option<Vec<usize>>,
+) -> Result<Vec<usize>> {
     if !std::io::stdin().is_terminal() {
         return Err(Error::attention(
             "confirmation_required",
@@ -34,11 +58,14 @@ pub(crate) fn select(
     if labels.is_empty() {
         return Ok(vec![]);
     }
-    let (width, height) = terminal::size()
-        .ok()
-        .filter(|&(w, h)| w > 0 && h > 0)
-        .unwrap_or((80, 24));
-    let size = usize::from(height.saturating_sub(5).clamp(1, 8)).min(labels.len());
+    let (width, height) = presentation::size();
+    let size = usize::from(
+        height
+            .saturating_sub(5 + u16::from(header.is_some()))
+            .clamp(1, 8),
+    )
+    .min(labels.len());
+    let drawing_rows = size + usize::from(header.is_some());
     let mut active = initial.min(labels.len() - 1);
     let mut marked = vec![];
     let mut typed = String::new();
@@ -56,12 +83,13 @@ pub(crate) fn select(
         columns: usize::from(width.saturating_sub(1)),
         multiple,
         prompt,
+        header,
         color: presentation::color(),
     };
     let result = loop {
         if redraw {
             if showing {
-                clear(&mut output, size)?;
+                clear(&mut output, drawing_rows)?;
             }
             draw(&mut output, labels, &marked, active, &view)?;
             showing = true;
@@ -81,7 +109,7 @@ pub(crate) fn select(
                     break vec![];
                 }
                 typed.clear();
-                clear(&mut output, size)?;
+                clear(&mut output, drawing_rows)?;
                 write!(output, "  请输入列表中的编号，或用方向键选择。\r\n")?;
                 showing = false;
                 redraw = true;
@@ -118,7 +146,7 @@ pub(crate) fn select(
             _ => {}
         }
     };
-    clear(&mut output, size)?;
+    clear(&mut output, drawing_rows)?;
     Ok(result)
 }
 
@@ -153,6 +181,7 @@ struct View<'a> {
     columns: usize,
     multiple: bool,
     prompt: &'a str,
+    header: Option<&'a str>,
     color: bool,
 }
 
@@ -168,10 +197,19 @@ fn draw(
         columns: width,
         multiple,
         prompt,
+        header,
         color,
     } = *view;
     let start = active.saturating_sub(size / 2).min(labels.len() - size);
     let rail = paint("│", Tone::Muted, color);
+    if let Some(header) = header {
+        let header = fit(header, width.saturating_sub(6));
+        write!(
+            output,
+            "{rail}     {}\r\n",
+            paint(&header, Tone::Muted, color)
+        )?;
+    }
     for (index, label) in labels.iter().enumerate().skip(start).take(size) {
         let cursor = if active == index {
             paint("›", Tone::Active, color)
@@ -233,6 +271,7 @@ mod tests {
             columns: 70,
             multiple: true,
             prompt: "选择技能",
+            header: None,
             color: true,
         };
         draw(&mut bytes, &labels, &[0], 1, &view)?;

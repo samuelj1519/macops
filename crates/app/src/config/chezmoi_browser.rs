@@ -407,6 +407,7 @@ fn config_item(id: &str, entry: &Managed, summary: &str, kind: &str, directory: 
         agents: vec![],
         loaded: None,
         inventory: None,
+        list: crate::browser::ListDetail::Plain,
         details: vec![
             "管理器 chezmoi".into(),
             format!("目标 {}", entry.absolute.display()),

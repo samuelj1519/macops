@@ -80,3 +80,26 @@ fn pin_spans_keep_all_non_target_bytes_and_preupgrade_drift_is_global() -> TestR
     assert!(rewrite(text, "unknown", "2.0.0").is_err());
     Ok(())
 }
+
+#[test]
+fn cursor_inline_download_options_survive_upgrade_and_reconciliation() -> TestResult {
+    let old = r#"# preserve
+[tools]
+"http:cursor-agent" = { version = "1.0.0", version_list_url = "https://example.test/releases", version_regex = '([^/]+)/', platforms = { macos-arm64 = { url = "https://example.test/{{ version }}.tgz" }, macos-x64 = { url = "https://example.test/x64/{{ version }}.tgz" } } } # keep
+node = "24.0.0"
+"#;
+    let next = old.replace("1.0.0", "2.0.0");
+    assert_eq!(pin(old, "cursor")?, "1.0.0");
+    assert_eq!(rewrite(old, "cursor", "2.0.0")?, next);
+    assert!(matches!(
+        config_tx::evaluate_mise_reconcile(&next, old, Some("cursor"))?,
+        config_tx::MiseReconcilePlan::Rewrite { rewritten, .. } if rewritten == next
+    ));
+    let drift = next.replace("x64/{{ version }}", "other/{{ version }}");
+    assert!(matches!(
+        config_tx::evaluate_mise_reconcile(&drift, old, Some("cursor"))?,
+        config_tx::MiseReconcilePlan::Drift { .. }
+    ));
+    assert!(pin(&old.replace("version_regex", "postinstall"), "cursor").is_err());
+    Ok(())
+}
