@@ -12,7 +12,20 @@
 | 数据转换 | 旧写入口停写，原位保留、提交前回滚与发布后收口 |
 | uv 观察 | 零原生命令、冻结根身份和旧记录兼容 |
 
-运行 `python3 -B tools/verify_models.py` 可检查该脚本登记的 TLA+ 基线和可达状态。Brew、chezmoi、源交付和能力等专题的验证器位于 `tools/`，其中 `verify_uv_model.py` 检查 uv 的模型和错误逻辑。`verify_native_plugin_model.py` 直接以 Python 检查 Codex 插件的受理、执行与恢复，需要 Python 3.10 或更新版本。实际文件系统、进程和 CLI 行为由编译产物验收。 [验证](../verification.md)
+运行 `python3 -B tools/verify_models.py` 可检查该脚本登记的 TLA+ 基线和可达状态。Brew、chezmoi、源交付和能力等专题的验证器位于 `tools/`，其中 `verify_uv_model.py` 检查 uv 的模型和错误逻辑。`verify_native_plugin_model.py` 直接以 Python 检查 Codex 插件的受理、执行与恢复，需要 Python 3.10 或更新版本。实际文件系统、进程和 CLI 行为由编译产物验收。 [验证](../development/verification.md)
+
+## 从业务流程找模型
+
+| 流程 | 模型 |
+| --- | --- |
+| [推荐与安装](../flows/recommend.md) | [推荐选择](control_plane/RecommendJourney.tla)、[模型辅助](control_plane/ModelAssist.tla)、[插件安装目标](agent_install/AgentInstallTarget.tla) |
+| [能力维护](../flows/capabilities.md) | [共享技能](control_plane/SharedSkillJourney.tla)、[按 Agent 批量操作](control_plane/AgentCapabilityBatch.tla)、[Claude 插件换源](control_plane/SkillSourceSwitch.tla) |
+| [Agent 升级](../flows/agents.md) | [CLI 升级](ai_upgrade/AiUpgrade.tla)、[升级恢复](ai_upgrade/AgentRecovery.tla) |
+| [配置](../flows/configuration.md) | [chezmoi 原生范围](chezmoi_native/ChezmoiNative.tla)、[源文件操作](control_plane/ChezmoiSource.tla) |
+| [恢复](../flows/recovery.md) | [自动核对](operation/ResumeWrite.tla)、[命令边界](operation/CommandBoundaries.tla)、[查询进程组](operation/QueryLifetime.tla) |
+| [日常维护](../flows/maintenance.md) | [迁移](migration/Migration.tla)、[清单重放](control_plane/Replay.tla)、[缓存清理](cache/Cache.tla) |
+
+遇到反例时，先记录 CFG、初始条件和转换路径，再按实际 CLI 的作用域及文件、进程行为复现。修改模型时说明它对应的实现分支，以及哪些条件抽象成了模型变量。
 
 ## 统一管理入口
 
