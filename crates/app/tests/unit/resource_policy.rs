@@ -200,9 +200,52 @@ fn shared_content_does_not_merge_other_names_scopes_or_origins() -> TestResult {
         "user",
         None
     ));
+    Ok(())
+}
+
+#[test]
+fn runtime_version_requires_unique_installation_and_release_evidence() -> TestResult {
+    let app = application(
+        "mise",
+        "claude",
+        "Claude",
+        Path::new("/root"),
+        vec![resource::Release {
+            version: "1".into(),
+            path: Some("/one".into()),
+            active: true,
+        }],
+    )?;
     assert_eq!(
-        bind_runtime(Path::new("/one/claude"), std::slice::from_ref(&app)).as_deref(),
-        Some(app.id.as_str())
+        bind_runtime(Path::new("/one/claude"), std::slice::from_ref(&app)),
+        Some((app.id.as_str(), Some("1")))
+    );
+    let alias = application(
+        "local-executable",
+        "claude",
+        "claude",
+        Path::new("/root"),
+        vec![resource::Release {
+            version: "1".into(),
+            path: Some("/one/claude".into()),
+            active: false,
+        }],
+    )?;
+    assert_eq!(
+        bind_runtime(Path::new("/one/claude"), &[alias, app.clone()]),
+        Some((app.id.as_str(), Some("1")))
+    );
+    let mut overlapping_releases = app.clone();
+    if let resource::Data::Application { releases, .. } = &mut overlapping_releases.data {
+        releases.push(resource::Release {
+            version: "2".into(),
+            path: Some("/one/bin".into()),
+            active: false,
+        });
+    }
+    assert_eq!(
+        bind_runtime(Path::new("/one/bin/claude"), &[overlapping_releases]),
+        Some((app.id.as_str(), None))
     );
     assert!(bind_runtime(Path::new("/other/claude"), std::slice::from_ref(&app)).is_none());
     assert!(bind_runtime(Path::new("/one/claude"), &[app.clone(), app]).is_none());

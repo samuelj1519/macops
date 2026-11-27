@@ -27,6 +27,8 @@ if scenario == "skill-adopt-style":
     environment.pop("NO_COLOR", None)
 elif scenario == "skill-adopt-no-color":
     environment["NO_COLOR"] = "1"
+elif scenario == "app-version-evidence":
+    environment["PATH"] = f'{Path(target) / ".local/bin"}:{environment["PATH"]}'
 process = subprocess.Popen(
     command,
     stdin=writer,
@@ -652,6 +654,13 @@ try:
             offset = type_key(b"\r")
             expect("卸载结果 已完成", offset)
         type_key(b"q")
+    elif scenario == "app-version-evidence":
+        expect("版本")
+        expect("3.1.4")
+        assert not (Path(target) / "version-probe").exists()
+        offset = type_key(b"r")
+        expect("8.7.6", offset)
+        type_key(b"q")
     elif scenario == "unified-list":
         expect("Tab 切换")
         offset = type_key(b"\t")
@@ -902,6 +911,13 @@ try:
         expect("1.2.3", offset)
         expect("codex", offset)
         expect("Agent CLI 版本或档案证据不完整", offset)
+        type_key(b"q")
+    elif scenario == "agent-profile-version":
+        expect("待核验")
+        assert not (Path(target) / "version-probe").exists()
+        type_key(b"r")
+        expect_screen_row(6, "8.7.6", exact=False)
+        expect_screen_row(7, "待核验", exact=False)
         type_key(b"q")
     elif scenario == "archived":
         expect("绑定已变化")

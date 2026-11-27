@@ -59,23 +59,24 @@ pub(crate) fn native_banner(
     } else {
         None
     };
-    let tool = trusted.unwrap_or(match journal.plan.package.provider {
-        Provider::Brew { .. } | Provider::BrewFormula { .. } | Provider::Service { .. } => {
-            "Homebrew"
-        }
-        Provider::Cargo { .. } => "Cargo",
-        Provider::Bun { .. } => "Bun",
-        Provider::Mise { .. } => "mise",
-        Provider::Npm { .. } => "npm",
-        _ => "本机安装器",
-    });
-    let command = if trusted.is_some() {
-        PanelLine::Command(native_command(command, scope))
+    let (tool, command) = if let Some(tool) = trusted {
+        (tool, PanelLine::Command(native_command(command, scope)))
     } else {
-        PanelLine::Note(format!(
-            "{} · 使用配方中的参数",
-            sanitize(&command.program.display().to_string(), false)
-        ))
+        let tool = match journal.plan.package.provider {
+            Provider::Brew { .. } | Provider::BrewFormula { .. } | Provider::Service { .. } => {
+                "Homebrew"
+            }
+            Provider::Cargo { .. } => "Cargo",
+            Provider::Bun { .. } => "Bun",
+            Provider::Mise { .. } => "mise",
+            Provider::Npm { .. } => "npm",
+            _ => "本机安装器",
+        };
+        let program = sanitize(&command.program.display().to_string(), false);
+        (
+            tool,
+            PanelLine::Note(format!("{program} · 使用配方中的参数")),
+        )
     };
     let color = presentation::color();
     let width = presentation::columns().saturating_sub(1).min(96);

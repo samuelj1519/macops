@@ -87,11 +87,11 @@ pub(crate) enum ListDetail {
 }
 
 impl ListDetail {
-    fn profile(command: String, model: Option<String>) -> Self {
+    fn profile(command: String, model: Option<String>, version: Option<String>) -> Self {
         Self::Agent {
             command,
             model,
-            version: None,
+            version,
             configuration: true,
         }
     }
@@ -99,9 +99,9 @@ impl ListDetail {
 
 pub(crate) fn list_headers(kind: Kind) -> &'static [&'static str] {
     match kind {
-        Kind::Apps => &["软件", "管理状态", "渠道", "安装范围", "当前版本", "版本数"],
+        Kind::Apps => &["软件", "管理状态", "版本", "渠道", "安装范围", "版本数"],
         Kind::Skills | Kind::Capabilities => &["能力", "管理状态", "版本", "安装位置", "渠道"],
-        Kind::Agents => &["Agent", "管理状态", "命令", "版本", "模型", "配置目录"],
+        Kind::Agents => &["Agent", "管理状态", "版本", "命令", "模型", "配置目录"],
         Kind::Config => &["配置", "管理状态", "本机状态", "本机位置"],
         Kind::History => &["目标", "操作", "结果"],
         Kind::Marketplaces => &["市场", "Agent", "目录状态"],
@@ -158,8 +158,8 @@ pub(crate) fn list_row(kind: Kind, item: &Item) -> Vec<String> {
             },
         ) => vec![
             status(),
+            version.as_deref().unwrap_or("待核验").into(),
             command.clone(),
-            version.as_deref().unwrap_or(dash).into(),
             model.as_deref().unwrap_or(dash).into(),
             if *configuration { path() } else { dash.into() },
         ],
@@ -201,11 +201,21 @@ pub(crate) fn list_row(kind: Kind, item: &Item) -> Vec<String> {
                 ..
             },
         ) => {
+            use crate::domain::resource::State;
+            let version = metadata.map_or(dash, |info| {
+                info.version.as_deref().unwrap_or(
+                    if matches!(info.status, State::Present | State::Unknown) {
+                        "待核验"
+                    } else {
+                        dash
+                    },
+                )
+            });
             vec![
                 status(),
+                version.into(),
                 channel(),
                 scope.clone(),
-                version(),
                 version_count.to_string(),
             ]
         }
@@ -532,51 +542,101 @@ pub(crate) fn local_applications(ctx: &Context) -> Result<View> {
     })
 }
 
-fn agent_view(ctx: &Context) -> Result<View> {
-    let mut view = resource_view(ctx, "agents")?;
-    let tools = crate::agent::ai::list(ctx)?;
-    view.items.extend(
-        tools["tools"]
-            .as_array()
+pub(crate) fn probe_application_versions(ctx: &Context, view: &mut View) {
+    use crate::agent::{ai_gate, ai_policy};
+    for item in &mut view.items {
+        let ListDetail::Application {
+            scope,
+            version_count,
+            ..
+        } = &mut item.list
+        else {
+            continue;
+        };
+        let Some(info) = &mut item.inventory else {
+            continue;
+        };
+        if info.manager != "local-executable" || info.version.is_some() {
+            continue;
+        }
+        let Some(tool) = ai_policy::TOOLS
             .into_iter()
-            .flatten()
-            .filter_map(|tool| {
-                let name = tool["tool"].as_str()?;
-                let binary = tool["binary"].as_str()?;
-                let version = tool["version"].as_str().unwrap_or("未知");
-                Some(Item {
-                    id: format!("ai:{name}"),
-                    name: name.into(),
-                    summary: format!("CLI · {version}"),
-                    managed: true,
-                    management: crate::domain::resource::Management::Native,
-                    directory: false,
-                    path: Some(PathBuf::from(binary)),
-                    source: None,
-                    agents: vec![],
-                    loaded: None,
-                    list: ListDetail::Agent {
-                        command: crate::agent::ai_policy::binary(name).ok()?.into(),
-                        version: tool["version"].as_str().map(str::to_owned),
-                        model: None,
-                        configuration: false,
-                    },
-                    inventory: None,
-                    details: vec![
-                        format!("程序 {binary}"),
-                        format!("版本 {version}"),
-                        format!(
-                            "本机固定版本 {}",
-                            tool["live_pin"].as_str().unwrap_or("未知")
-                        ),
-                        format!(
-                            "源配置固定版本 {}",
-                            tool["declared_pin"].as_str().unwrap_or("未知")
-                        ),
-                    ],
-                })
-            }),
-    );
+            .find(|tool| ai_policy::binary(tool).is_ok_and(|binary| binary == item.name))
+        else {
+            continue;
+        };
+        let Ok(program) = ai_gate::executable(ctx, &item.name) else {
+            continue;
+        };
+        if program == std::path::Path::new(scope)
+            && let Ok(physical) = crate::platform::fs::read_path(&program)
+            && !crate::software::resource_software::is_mise_dispatcher(ctx, &program, &physical)
+            && let Ok(version) = ai_gate::version(ctx, &physical, tool)
+        {
+            item.details.push(format!("探测版本 {version}"));
+            info.version = Some(version);
+            *version_count = 1;
+        }
+    }
+}
+
+fn agent_view(ctx: &Context) -> Result<View> {
+    use crate::domain::resource::Data;
+    let mut snapshot = crate::catalog::resource_inventory::snapshot(ctx, Some("agents"), None)?;
+    let (tools, versions) = crate::agent::ai::list_with_versions(ctx)?;
+    for resource in &mut snapshot.resources {
+        if let Data::Agent { runtime, .. } = &mut resource.data
+            && runtime.version.is_none()
+            && let Some(binary) = &runtime.binary
+        {
+            let mut matches = versions
+                .iter()
+                .filter_map(|(program, version)| (program == binary).then_some(version));
+            if let Some(version) = matches.next()
+                && matches.all(|other| other == version)
+            {
+                runtime.version = Some(version.clone());
+            }
+        }
+    }
+    let mut view = view_from_snapshot(snapshot, false);
+    let rows = tools["tools"].as_array().map_or(&[][..], Vec::as_slice);
+    view.items.extend(rows.iter().filter_map(|tool| {
+        let name = tool["tool"].as_str()?;
+        let binary = tool["binary"].as_str()?;
+        let version = tool["version"].as_str().unwrap_or("未知");
+        Some(Item {
+            id: format!("ai:{name}"),
+            name: name.into(),
+            summary: format!("CLI · {version}"),
+            managed: true,
+            management: crate::domain::resource::Management::Native,
+            directory: false,
+            path: Some(PathBuf::from(binary)),
+            source: None,
+            agents: vec![],
+            loaded: None,
+            list: ListDetail::Agent {
+                command: crate::agent::ai_policy::binary(name).ok()?.into(),
+                version: tool["version"].as_str().map(str::to_owned),
+                model: None,
+                configuration: false,
+            },
+            inventory: None,
+            details: vec![
+                format!("程序 {binary}"),
+                format!("版本 {version}"),
+                format!(
+                    "本机固定版本 {}",
+                    tool["live_pin"].as_str().unwrap_or("未知")
+                ),
+                format!(
+                    "源配置固定版本 {}",
+                    tool["declared_pin"].as_str().unwrap_or("未知")
+                ),
+            ],
+        })
+    }));
     view.items
         .sort_by(|a, b| a.name.cmp(&b.name).then(a.id.cmp(&b.id)));
     if tools["incomplete"] == true {
@@ -657,8 +717,24 @@ fn release_detail(release: &crate::domain::resource::Release) -> String {
     format!(
         "版本 {} {} {path}",
         release.version,
-        if release.active { "在用" } else { "" }
+        if release.active {
+            "在用"
+        } else {
+            "已安装"
+        }
     )
+}
+
+fn application_version(releases: &[crate::domain::resource::Release]) -> Option<String> {
+    let has_active = releases.iter().any(|release| release.active);
+    let mut seen = BTreeSet::new();
+    let versions = releases
+        .iter()
+        .filter(|release| release.active || !has_active)
+        .map(|release| release.version.as_str())
+        .filter(|version| seen.insert(*version))
+        .collect::<Vec<_>>();
+    (!versions.is_empty()).then(|| versions.join(" / "))
 }
 
 fn resource_item(resource: crate::domain::resource::Resource, show_scope: bool) -> Option<Item> {
@@ -699,10 +775,7 @@ fn resource_item(resource: crate::domain::resource::Resource, show_scope: bool) 
                 manager,
                 groups: vec![],
                 status: resource.status,
-                version: releases
-                    .iter()
-                    .find(|release| release.active)
-                    .map(|release| release.version.clone()),
+                version: application_version(&releases),
                 aliases: resource.aliases,
                 repository: None,
                 native_record: None,
@@ -733,10 +806,14 @@ fn resource_item(resource: crate::domain::resource::Resource, show_scope: bool) 
                 format!("命令 {command}"),
                 format!("档案 {}", config_dir.display()),
                 format!("运行时 {}", runtime.selector),
+                format!(
+                    "程序版本 {}",
+                    runtime.version.as_deref().unwrap_or("待核验")
+                ),
                 format!("模型 {}", model.selected.as_deref().unwrap_or("未知")),
                 format!("观察 {:?}", resource.status),
             ];
-            list = ListDetail::profile(command, model.selected);
+            list = ListDetail::profile(command, model.selected, runtime.version);
             (summary.clone(), Some(config_dir), vec![summary], details)
         }
         _ => return None,

@@ -11,6 +11,7 @@ use crate::{
     error::{Error, Result},
 };
 use serde_json::{Value, json};
+use std::path::PathBuf;
 
 pub(crate) fn parse_tool(key: &str) -> std::result::Result<String, String> {
     let tool = policy::upgrade_target(key)
@@ -131,6 +132,10 @@ fn execute(
 }
 
 pub(crate) fn list(ctx: &Context) -> Result<Value> {
+    list_with_versions(ctx).map(|(inventory, _)| inventory)
+}
+
+pub(crate) fn list_with_versions(ctx: &Context) -> Result<(Value, Vec<(PathBuf, String)>)> {
     tool_inventory(ctx, &policy::TOOLS)
 }
 
@@ -139,13 +144,13 @@ pub(crate) fn detail(ctx: &Context, tool: &str) -> Result<Option<Value>> {
     if !policy::TOOLS.contains(&tool) {
         return Ok(None);
     }
-    let inventory = tool_inventory(ctx, &[tool])?;
+    let (inventory, _) = tool_inventory(ctx, &[tool])?;
     Ok(Some(
         json!({"tool":inventory["tools"][0],"incomplete":inventory["incomplete"],"persistentWrites":false}),
     ))
 }
 
-fn tool_inventory(ctx: &Context, tools: &[&str]) -> Result<Value> {
+fn tool_inventory(ctx: &Context, tools: &[&str]) -> Result<(Value, Vec<(PathBuf, String)>)> {
     let configs = config_tx::resolve_mise_paths(ctx).and_then(|(live, source, _)| {
         Ok((
             Snapshot::capture(&live)?.text,
@@ -153,13 +158,15 @@ fn tool_inventory(ctx: &Context, tools: &[&str]) -> Result<Value> {
         ))
     });
     let mut rows = Vec::new();
+    let mut versions = Vec::new();
     let mut incomplete = false;
     for &tool in tools {
         let binary = gate::executable(ctx, policy::binary(tool)?);
-        let version = binary
+        let observed = binary
             .as_ref()
             .ok()
-            .and_then(|p| gate::version(ctx, p, tool).ok());
+            .and_then(|p| gate::observed_version(ctx, p, tool).ok());
+        let version = observed.as_ref().map(|(_, version)| version);
         incomplete |= binary.is_ok() && version.is_none();
         let pin = |source: bool| {
             configs.as_ref().ok().and_then(|(live, declared)| {
@@ -169,10 +176,12 @@ fn tool_inventory(ctx: &Context, tools: &[&str]) -> Result<Value> {
         rows.push(json!({"tool":tool, "binary":binary.ok(), "version":version, "live_pin":pin(false), "declared_pin":pin(true),
             "profiles": if tool == "claude" { vec![".claude", ".claude-mi", ".claude-kimi", ".claude-glm", ".claude-zen"] } else { vec![] },
             "status": if version.is_some() { "present" } else { "unknown" }}));
+        versions.extend(observed);
     }
-    Ok(
+    Ok((
         json!({"backend":"rust", "incomplete":incomplete, "tools":rows, "persistentWrites":false, "config_coverage":if configs.is_ok() { "complete" } else { "unknown" }}),
-    )
+        versions,
+    ))
 }
 
 fn check_config_sync(

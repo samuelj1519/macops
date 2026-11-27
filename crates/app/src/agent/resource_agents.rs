@@ -360,6 +360,7 @@ pub(crate) fn profile_roots_matching(
                     context: ctx.home.clone(),
                     binary: command,
                     install_ref: None,
+                    version: None,
                     evidence: None,
                 },
             },
@@ -842,17 +843,27 @@ fn profile(
         Model::default()
     };
     let id = resource::id("agent", &(client, path))?;
-    let mut runtime = runtime(ctx, client, profile, path, project, applications)?;
     let registered = registered_target(ctx, path)?.and_then(|target| target.command);
-    let display = registered
+    let command_name = registered
         .as_ref()
         .and_then(|command| command.file_name()?.to_str())
         .map_or_else(|| command_name(client, profile), str::to_owned);
-    if let Some(command) = registered {
-        runtime.selector = "registered-command".into();
-        runtime.binary = Some(command);
+    let mut runtime = runtime(
+        ctx,
+        client,
+        profile,
+        path,
+        project,
+        &command_name,
+        registered,
+    )?;
+    if let Some(binary) = &runtime.binary
+        && let Some((id, version)) = policy::bind_runtime(binary, applications)
+    {
+        runtime.install_ref = Some(id.into());
+        runtime.version = version.map(str::to_owned);
     }
-    let mut aliases = vec![display];
+    let mut aliases = vec![command_name];
     for alias in [
         format!("{client}-{profile}"),
         format!("agent:{client}:{profile}"),
@@ -877,56 +888,88 @@ fn profile(
     })
 }
 
+fn runtime_executable(path: &Path) -> Option<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    let physical = paths::read_path(path).ok()?;
+    let metadata = std::fs::metadata(&physical).ok()?;
+    (metadata.is_file() && metadata.permissions().mode() & 0o111 != 0).then_some(physical)
+}
+
 fn runtime(
     ctx: &Context,
     client: &str,
     profile: &str,
     root: &Path,
     project: Option<&Path>,
-    applications: &[Resource],
+    command_name: &str,
+    registered: Option<PathBuf>,
 ) -> Result<RuntimeBinding> {
+    use crate::catalog::resource_inventory::{native_program, native_query};
     let cwd = project.unwrap_or(&ctx.home);
-    let helper = ctx.home.join(".local/bin/claudectl");
-    let wrapper = ctx.home.join(format!(".local/bin/claude-{profile}"));
-    let is_mise = client == "claude"
-        && paths::read_path(&helper).is_ok()
-        && paths::read_path(&wrapper).is_ok()
-        && helper.is_file()
-        && wrapper.is_file()
-        && policy::legacy_mise_resolver(&paths::regular_bytes(&helper)?)
-        && policy::legacy_claude_wrapper(&paths::regular_bytes(&wrapper)?, &helper, profile);
     let mut runtime = RuntimeBinding {
-        selector: if is_mise {
-            "inspected-mise-context"
-        } else {
-            "unresolved"
-        }
-        .into(),
+        selector: "unresolved".into(),
         context: cwd.to_path_buf(),
         binary: None,
         install_ref: None,
-        evidence: is_mise.then_some(wrapper),
+        version: None,
+        evidence: None,
     };
-    if is_mise {
-        let Ok(program) = crate::catalog::resource_inventory::native_program(ctx, "mise") else {
+    let is_registered = registered.is_some();
+    let Some(entry) = registered.or_else(|| native_program(ctx, command_name).ok()) else {
+        return Ok(runtime);
+    };
+    let Some(physical) =
+        runtime_executable(&entry).filter(|path| !ctx.isolated || path.starts_with(&ctx.home))
+    else {
+        return Ok(runtime);
+    };
+    let helper = ctx.home.join(".local/bin/claudectl");
+    let wrapper = ctx.home.join(format!(".local/bin/claude-{profile}"));
+    let legacy_wrapper = client == "claude"
+        && paths::read_path(&wrapper).ok().as_ref() == Some(&physical)
+        && runtime_executable(&helper).is_some()
+        && policy::legacy_mise_resolver(&paths::regular_bytes(&helper)?)
+        && policy::legacy_claude_wrapper(&paths::regular_bytes(&wrapper)?, &helper, profile);
+    let mise = if legacy_wrapper {
+        native_program(ctx, "mise").ok()
+    } else {
+        crate::software::resource_software::mise_dispatcher(ctx, &entry, &physical)
+    };
+    let tool = if legacy_wrapper {
+        "claude"
+    } else if mise.is_some() {
+        command_name
+    } else {
+        if physical.file_name().is_some_and(|name| name == "mise") {
             return Ok(runtime);
-        };
-        let output = crate::catalog::resource_inventory::native_query(
-            ctx,
-            &crate::domain::CommandSpec {
-                program,
-                args: vec!["which".into(), "claude".into()],
-            },
-            cwd,
-            Some(("CLAUDE_CONFIG_DIR", root)),
-        )?;
-        if output.code == Some(0) && !output.uncertain {
-            let path = PathBuf::from(output.stdout.trim());
-            if let Ok(binary) = paths::read_path(&path) {
-                runtime.install_ref = policy::bind_runtime(&binary, applications);
-                runtime.binary = Some(path);
-            }
         }
+        runtime.selector = if is_registered {
+            "registered-command"
+        } else {
+            "path-command"
+        }
+        .into();
+        runtime.binary = Some(physical);
+        return Ok(runtime);
+    };
+    runtime.evidence = Some(entry);
+    let Some(program) = mise else {
+        return Ok(runtime);
+    };
+    runtime.selector = "inspected-mise-context".into();
+    let output = native_query(
+        ctx,
+        &crate::domain::CommandSpec {
+            program,
+            args: vec!["which".into(), tool.into()],
+        },
+        cwd,
+        (client == "claude").then_some(("CLAUDE_CONFIG_DIR", root)),
+    )?;
+    if output.code == Some(0) && !output.uncertain {
+        let path = PathBuf::from(output.stdout.trim());
+        runtime.binary =
+            runtime_executable(&path).filter(|path| !ctx.isolated || path.starts_with(&ctx.home));
     }
     Ok(runtime)
 }

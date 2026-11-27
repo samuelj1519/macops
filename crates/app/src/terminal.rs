@@ -260,38 +260,43 @@ fn detail_target(
     match kind {
         Kind::Apps => application_detail_target(ctx, item, manager),
         Kind::Skills | Kind::Capabilities if !scoped && !skills_native => {
-            if !item.inventory.as_ref().is_some_and(|data| {
-                use crate::domain::resource::State;
-                data.status == State::Present
-                    || (manager == "codex-config" && data.status == State::Declared)
-            }) {
+            use crate::domain::resource::State;
+            let Some(inventory) = &item.inventory else {
+                return DetailTarget::Other;
+            };
+            let observed = inventory.status == State::Present
+                || (manager == "codex-config" && inventory.status == State::Declared);
+            if !observed {
                 return DetailTarget::Other;
             }
             if manager == "skills-cli:github" {
-                DetailTarget::SharedSkill
-            } else if manager == "codex-config"
-                && !item.agents.is_empty()
-                && let Some(record) = item
-                    .inventory
-                    .as_ref()
-                    .and_then(|info| info.native_record.as_ref())
-                && let Some(directory) = record.parent()
-                && let Some(recipe) = crate::agent::native_plugins::inventory_reinstall_recipe(
-                    ctx, directory, &item.name,
-                )
-            {
-                DetailTarget::CodexRecipe {
-                    id: item.name.clone(),
-                    directory: directory.to_path_buf(),
-                    recipe,
+                return DetailTarget::SharedSkill;
+            }
+            if item.agents.is_empty() {
+                return DetailTarget::Other;
+            }
+            match manager {
+                "claude-plugin" => DetailTarget::Plugin { claude: true },
+                "codex-config" => {
+                    if let Some(directory) = inventory
+                        .native_record
+                        .as_deref()
+                        .and_then(std::path::Path::parent)
+                        && let Some(recipe) =
+                            crate::agent::native_plugins::inventory_reinstall_recipe(
+                                ctx, directory, &item.name,
+                            )
+                    {
+                        DetailTarget::CodexRecipe {
+                            id: item.name.clone(),
+                            directory: directory.to_path_buf(),
+                            recipe,
+                        }
+                    } else {
+                        DetailTarget::Plugin { claude: false }
+                    }
                 }
-            } else if !item.agents.is_empty() && matches!(manager, "claude-plugin" | "codex-config")
-            {
-                DetailTarget::Plugin {
-                    claude: manager == "claude-plugin",
-                }
-            } else {
-                DetailTarget::Other
+                _ => DetailTarget::Other,
             }
         }
         Kind::Agents => crate::agent::ai_policy::upgrade_target(&item.id).map_or_else(
@@ -330,13 +335,11 @@ fn application_detail_target(ctx: &Context, item: &Item, manager: &str) -> Detai
                 })
         })
         .or_else(|| {
-            (manager == "brew")
-                .then(|| {
-                    crate::software::brew::candidate(ctx, &item.id)
-                        .ok()
-                        .flatten()
-                })
-                .flatten()
+            if manager != "brew" {
+                return None;
+            }
+            crate::software::brew::candidate(ctx, &item.id)
+                .ok()?
                 .filter(|package| {
                     package.id == item.id
                         && matches!(package.provider, Provider::BrewFormula { .. })
@@ -696,48 +699,28 @@ impl Browser {
                 action,
             });
         }
-        let prepare = || {
-            if matches!(package.provider, Provider::Mise { .. }) {
-                return crate::operations::plan(
-                    ctx,
-                    &package,
-                    action,
-                    None,
-                    action == Action::Adopt,
-                );
-            }
-            let supported = if action == Action::Adopt {
-                matches!(
-                    package.provider,
-                    Provider::Npm { .. }
-                        | Provider::NpmObserved { .. }
-                        | Provider::Uv { .. }
-                        | Provider::UvObserved { .. }
-                        | Provider::CapabilityObserved { .. }
-                        | Provider::Bun { .. }
-                        | Provider::Cargo { .. }
-                        | Provider::Command { .. }
-                        | Provider::Brew { cask: true, .. }
-                )
-            } else {
-                matches!(
-                    package.provider,
-                    Provider::Npm { .. }
-                        | Provider::Bun { .. }
-                        | Provider::Cargo { .. }
-                        | Provider::Command { .. }
-                        | Provider::Brew { cask: true, .. }
-                )
-            };
-            if !supported {
-                return Err(Error::attention(
-                    "inventory_adapter_unavailable",
-                    "该来源需使用对应的原生维护入口（mo help advanced）",
-                ));
-            }
-            crate::operations::plan(ctx, &package, action, None, action == Action::Adopt)
+        let supported = match package.provider {
+            Provider::Mise { .. }
+            | Provider::Npm { .. }
+            | Provider::Bun { .. }
+            | Provider::Cargo { .. }
+            | Provider::Command { .. }
+            | Provider::Brew { cask: true, .. } => true,
+            Provider::NpmObserved { .. }
+            | Provider::Uv { .. }
+            | Provider::UvObserved { .. }
+            | Provider::CapabilityObserved { .. } => action == Action::Adopt,
+            _ => false,
         };
-        self.preview_plan(prepare(), None);
+        let result = if supported {
+            crate::operations::plan(ctx, &package, action, None, action == Action::Adopt)
+        } else {
+            Err(Error::attention(
+                "inventory_adapter_unavailable",
+                "该来源需使用对应的原生维护入口（mo help advanced）",
+            ))
+        };
+        self.preview_plan(result, None);
         None
     }
 
@@ -1188,6 +1171,9 @@ impl Browser {
             return;
         }
         self.refresh(ctx, session);
+        if self.kind == Kind::Apps {
+            crate::browser::probe_application_versions(ctx, &mut self.view);
+        }
     }
 
     fn header_lines(
@@ -1362,7 +1348,12 @@ impl Browser {
             })
             .collect::<Vec<_>>();
         let budget = usize::from(area.width.saturating_sub(4));
-        let (headers, widths) = presentation::visible_columns(headers, &rows, budget);
+        let minimum_widths: &[usize] = match self.kind {
+            Kind::Apps | Kind::Agents => &[0, 0, 8],
+            _ => &[],
+        };
+        let (headers, widths) =
+            presentation::visible_columns(headers, &rows, budget, minimum_widths);
         let widths = widths
             .into_iter()
             .map(|width| Constraint::Length(u16::try_from(width).unwrap_or(area.width)));

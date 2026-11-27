@@ -299,6 +299,24 @@ pub(crate) fn mise_scope(ctx: &Context) -> std::path::PathBuf {
     })
 }
 
+pub(crate) fn mise_dispatcher(
+    ctx: &Context,
+    entry: &Path,
+    physical: &Path,
+) -> Option<std::path::PathBuf> {
+    if !std::fs::symlink_metadata(entry).ok()?.is_symlink() {
+        return None;
+    }
+    let mise = crate::catalog::resource_inventory::native_program(ctx, "mise").ok()?;
+    (entry != mise && paths::read_path(&mise).ok()? == physical).then_some(mise)
+}
+
+pub(crate) fn is_mise_dispatcher(ctx: &Context, entry: &Path, physical: &Path) -> bool {
+    entry.file_name().is_some_and(|name| name != "mise")
+        && (physical.file_name().is_some_and(|name| name == "mise")
+            || mise_dispatcher(ctx, entry, physical).is_some())
+}
+
 pub fn mise(ctx: &Context, project: Option<&Path>) -> Result<(Vec<Resource>, Coverage)> {
     let mut report = Coverage {
         source: "mise".into(),
@@ -345,7 +363,7 @@ pub fn mise(ctx: &Context, project: Option<&Path>) -> Result<(Vec<Resource>, Cov
             .into_iter()
             .map(|v| Release {
                 version: v.version,
-                path: v.install_path,
+                path: v.install_path.and_then(|path| paths::read_path(&path).ok()),
                 active: v.active,
             })
             .collect();
@@ -693,6 +711,17 @@ fn local_binaries(ctx: &Context, resources: &mut Vec<Resource>) -> Result<Covera
                 report.issues.push("non_utf8_executable_name".into());
                 continue;
             };
+            let releases = (!is_mise_dispatcher(ctx, &logical, &real))
+                .then(|| policy::bind_runtime(&real, resources))
+                .flatten()
+                .and_then(|(_, version)| version)
+                .map(|version| Release {
+                    version: version.into(),
+                    path: Some(logical.clone()),
+                    active: false,
+                })
+                .into_iter()
+                .collect();
             resources.push(Resource {
                 id: resource::id("application", &("entrypoint", &logical))?,
                 name: name.clone(),
@@ -703,7 +732,7 @@ fn local_binaries(ctx: &Context, resources: &mut Vec<Resource>) -> Result<Covera
                     manager: "local-executable".into(),
                     native_id: name,
                     scope: logical.display().to_string(),
-                    releases: vec![],
+                    releases,
                     baseline: None,
                     issues: vec![],
                     recipe_ref: None,

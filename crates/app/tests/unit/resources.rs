@@ -84,6 +84,7 @@ fn categories_and_source_failures_are_explicit() {
             context: "/fixture".into(),
             binary: None,
             install_ref: None,
+            version: None,
             evidence: None,
         },
     };

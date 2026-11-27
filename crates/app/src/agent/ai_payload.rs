@@ -303,6 +303,13 @@ impl Evidence {
         }
         Ok(())
     }
+    pub(crate) fn resolved_file(&self, path: &Path) -> Result<&Path> {
+        self.files
+            .iter()
+            .find(|file| file.requested == path)
+            .map(|file| file.resolved.as_path())
+            .ok_or_else(changed)
+    }
     pub fn header(&mut self, path: &Path) -> Result<Vec<u8>> {
         self.file(path)?;
         let binding = self

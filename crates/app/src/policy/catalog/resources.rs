@@ -294,16 +294,36 @@ pub fn legacy_claude_wrapper(bytes: &[u8], helper: &std::path::Path, profile: &s
     commands == [expected.as_str()]
 }
 
-pub fn bind_runtime(
+pub fn bind_runtime<'a>(
     binary: &std::path::Path,
-    applications: &[crate::domain::resource::Resource],
-) -> Option<String> {
-    let matches:Vec<_>=applications.iter().filter(|r|matches!(&r.data,crate::domain::resource::Data::Application{releases,..} if releases.iter().any(|v|v.path.as_ref().is_some_and(|p|binary.starts_with(p))))).collect();
-    if matches.len() == 1 {
-        Some(matches[0].id.clone())
-    } else {
-        None
-    }
+    applications: &'a [crate::domain::resource::Resource],
+) -> Option<(&'a str, Option<&'a str>)> {
+    use crate::domain::resource::Data;
+    let mut installations = applications.iter().filter_map(|application| {
+        let Data::Application {
+            manager, releases, ..
+        } = &application.data
+        else {
+            return None;
+        };
+        if manager == "local-executable" {
+            return None;
+        }
+        let mut releases = releases.iter().filter(|release| {
+            release
+                .path
+                .as_ref()
+                .is_some_and(|path| binary.starts_with(path))
+        });
+        let release = releases.next()?;
+        let version = releases
+            .next()
+            .is_none()
+            .then_some(release.version.as_str());
+        Some((application.id.as_str(), version))
+    });
+    let first = installations.next()?;
+    installations.next().is_none().then_some(first)
 }
 
 #[derive(Debug)]

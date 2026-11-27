@@ -1003,13 +1003,13 @@ fn apply_sites(
                 .iter()
                 .filter_map(|site| site.work.as_ref())
                 .any(|work| source_change(work).is_some());
-        let regular = sites
-            .iter()
-            .filter_map(|site| site.work.as_ref())
-            .any(|work| source_change(work).is_none());
         let name = crate::output::sanitize(request.display_name, false);
         if review_sources {
-            if regular {
+            if sites
+                .iter()
+                .filter_map(|site| site.work.as_ref())
+                .any(|work| source_change(work).is_none())
+            {
                 crate::operations::confirm(
                     &format!(
                         "{} {name}\n需更新市场的配置会另行确认。\n{text}",
@@ -1308,7 +1308,6 @@ pub(crate) fn batch_text(rows: &[Value], columns: usize) -> String {
     use crate::terminal::presentation::table;
     use std::fmt::Write as _;
 
-    let fields = ["agent", "currentVersion", "targetVersion", "directory"];
     let data = rows
         .iter()
         .map(|row| {
@@ -1323,11 +1322,14 @@ pub(crate) fn batch_text(rows: &[Value], columns: usize) -> String {
                 Some("blocked") => "暂不能操作",
                 _ => "未完成",
             };
-            let mut cells = fields
-                .map(|key| row[key].as_str().unwrap_or("—").to_owned())
-                .to_vec();
-            cells.insert(1, status.into());
-            cells
+            let field = |key: &str| row[key].as_str().unwrap_or("—").to_owned();
+            vec![
+                field("agent"),
+                status.into(),
+                field("currentVersion"),
+                field("targetVersion"),
+                field("directory"),
+            ]
         })
         .collect::<Vec<_>>();
     let mut text = table(

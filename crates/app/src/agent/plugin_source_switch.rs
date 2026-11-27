@@ -86,11 +86,7 @@ pub(super) struct Rebind {
 
 impl Rebind {
     pub(super) fn apply(&self, target: &InstallTarget, id: &str) -> Result<()> {
-        let mut state = Scope::read(target, id)?;
-        state.verify_old(target, id, &self.old, &self.wanted, self.previous.as_ref())?;
-        if state.stamp != self.stamp {
-            return Err(blocked());
-        }
+        let mut state = self.checked_old_scope(target, id)?;
         if state.declared == self.wanted.declaration() {
             return Ok(());
         }
@@ -100,15 +96,17 @@ impl Rebind {
             OsStr::new(SETTINGS),
             &state.settings,
             self.stamp.mode,
-            |_| {
-                let current = Scope::read(target, id)?;
-                current.verify_old(target, id, &self.old, &self.wanted, self.previous.as_ref())?;
-                if current.stamp != self.stamp {
-                    return Err(blocked());
-                }
-                Ok(())
-            },
+            |_| self.checked_old_scope(target, id).map(|_| ()),
         )
+    }
+
+    fn checked_old_scope(&self, target: &InstallTarget, id: &str) -> Result<Scope> {
+        let state = Scope::read(target, id)?;
+        state.verify_old(target, id, &self.old, &self.wanted, self.previous.as_ref())?;
+        if state.stamp != self.stamp {
+            return Err(blocked());
+        }
+        Ok(state)
     }
 }
 
@@ -515,22 +513,21 @@ impl SourceSwitch {
                 self.wanted.repo
             );
         }
+        if let Some(previous) = self.old["ref"].as_str() {
+            return format!(
+                "市场提交 {} → {}。",
+                previous.get(..7).unwrap_or(previous),
+                commit
+            );
+        }
         let old = self.old["path"]
             .as_str()
             .or_else(|| self.old["repo"].as_str())
             .unwrap_or("本机市场");
-        if let Some(previous) = self.old["ref"].as_str() {
-            format!(
-                "市场提交 {} → {}。",
-                previous.get(..7).unwrap_or(previous),
-                commit
-            )
-        } else {
-            format!(
-                "换源并升级。市场从 {} 改用 {} 的已核验提交 {}。",
-                old, self.wanted.repo, commit
-            )
-        }
+        format!(
+            "换源并升级。市场从 {} 改用 {} 的已核验提交 {}。",
+            old, self.wanted.repo, commit
+        )
     }
 
     pub(crate) fn changes_source(&self) -> bool {

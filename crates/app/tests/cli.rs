@@ -19,7 +19,11 @@ mod native_routing;
 mod plugin_marketplaces;
 use common::{Fixture, TestResult, assert_code, uv_tool, write_json};
 use serde_json::json;
-use std::{fs, os::unix::fs::symlink, path::PathBuf};
+use std::{
+    fs,
+    os::unix::fs::{PermissionsExt, symlink},
+    path::PathBuf,
+};
 
 fn npm_manifest(prefix: &std::path::Path, name: &str, version: &str) -> TestResult {
     let module = prefix.join("lib/node_modules").join(name);
@@ -945,6 +949,70 @@ fn list_opens_a_unified_inventory_in_the_terminal_and_keeps_structured_queries()
     assert_code(&out, 0);
     assert!(json["data"]["resources"].is_array(), "{json}");
     chezmoi_native::run_browser_pty(&f, &["app"], "unified-list", &f.home, "100", "0")?;
+    assert!(!f.file("state").exists());
+    Ok(())
+}
+
+#[test]
+fn app_versions_remain_visible_in_a_narrow_terminal_and_probe_only_the_selected_cli() -> TestResult
+{
+    let f = Fixture::new()?;
+    write_json(
+        &f.home.join("mise-data"),
+        &json!({
+            "fixture-tool":[{"version":"3.1.4","install_path":f.home.join("tool/3.1.4"),"active":false}],
+            "fixture-mise":[{"version":"5.0.0","install_path":f.home.join("bin/mise"),"active":true}]
+        }),
+    )?;
+    let manager = f.script(
+        "mise",
+        r#"case "$1" in
+ls) /bin/cat "$MACOPS_TEST_HOME/mise-data" ;;
+where|which) exit 8 ;;
+*) touch "$MACOPS_TEST_HOME/invoked-shim"; exit 9 ;;
+esac"#,
+    )?;
+    let bin = f.home.join(".local/bin");
+    fs::create_dir_all(&bin)?;
+    let claude = f.script(
+        "claude",
+        r#"test "$1" = --version
+printf 'claude 8.7.6\n'
+printf 'called\n' >> "$MACOPS_TEST_HOME/version-probe""#,
+    )?;
+    let unrelated = f.script(
+        "unrelated",
+        r#"touch "$MACOPS_TEST_HOME/invoked-unrelated""#,
+    )?;
+    fs::rename(claude, bin.join("claude"))?;
+    fs::rename(unrelated, bin.join("unrelated"))?;
+    symlink(manager, bin.join("mimo"))?;
+    let alternate_mise = f.home.join("alternate/mise");
+    fs::create_dir_all(alternate_mise.parent().ok_or("parent")?)?;
+    fs::rename(
+        f.script(
+            "alternate-mise",
+            r#"touch "$MACOPS_TEST_HOME/invoked-shim"; printf 'mise 9.0.0\n'"#,
+        )?,
+        &alternate_mise,
+    )?;
+    symlink(alternate_mise, bin.join("dsh"))?;
+    let (out, value) = f.run(&["app", "resources"])?;
+    assert_code(&out, 0);
+    let mimo = value["data"]["resources"]
+        .as_array()
+        .ok_or("resources")?
+        .iter()
+        .find(|item| item["name"] == "mimo")
+        .ok_or("expected mimo entry")?;
+    assert_eq!(mimo["releases"], json!([]));
+    chezmoi_native::run_browser_pty(&f, &["app"], "app-version-evidence", &f.home, "48", "0")?;
+    assert_eq!(
+        fs::read_to_string(f.home.join("version-probe"))?,
+        "called\n"
+    );
+    assert!(!f.home.join("invoked-unrelated").exists());
+    assert!(!f.home.join("invoked-shim").exists());
     assert!(!f.file("state").exists());
     Ok(())
 }
@@ -4621,10 +4689,18 @@ fn unified_agent_resolution_uses_profile_and_project_context_without_launching_h
         &helper,
         "claude_resolved_bin() {\n  mise which claude\n}\nprintf 'BAD' > invoked-helper\n",
     )?;
+    fs::set_permissions(&helper, fs::Permissions::from_mode(0o755))?;
     let release1 = f.home.join("releases/1.0.0");
     let release2 = f.home.join("releases/2.0.0");
     fs::create_dir_all(&release1)?;
     fs::create_dir_all(&release2)?;
+    let executable = f.script(
+        "fixture-claude",
+        r#"touch "$MACOPS_TEST_HOME/invoked-claude"; exit 9"#,
+    )?;
+    for release in [&release1, &release2] {
+        fs::copy(&executable, release.join("claude"))?;
+    }
     write_json(
         &f.home.join("mise-data"),
         &json!({"claude":[{"version":"1.0.0","install_path":release1,"active":true},{"version":"2.0.0","install_path":release2,"active":false}]}),
@@ -4638,13 +4714,16 @@ esac"#)?;
         let dir = f.home.join(format!(".claude-{profile}"));
         fs::create_dir_all(&dir)?;
         write_json(&dir.join("settings.json"), &json!({"model":profile}))?;
+        let wrapper = f.home.join(format!(".local/bin/claude-{profile}"));
         fs::write(
-            f.home.join(format!(".local/bin/claude-{profile}")),
+            &wrapper,
             format!(
                 "#!/bin/sh\nset -eu\nexec {} run {profile} \"$@\"\n",
                 helper.display()
             ),
         )?;
+        fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755))?;
+        symlink(wrapper, f.home.join(format!("bin/claude-{profile}")))?;
     }
     let p1 = f.file("project-one");
     let p2 = f.file("project-two");
@@ -4667,6 +4746,7 @@ esac"#)?;
                 .iter()
                 .all(|r| r["runtime"]["install_ref"].is_string())
         );
+        assert!(profiles.iter().all(|r| r["runtime"]["version"] == version));
     }
     let contexts = fs::read_to_string(f.home.join("query-context"))?;
     for line in contexts.lines() {
@@ -4674,9 +4754,112 @@ esac"#)?;
         assert_eq!(values[0], values[1]);
         assert!(values[2].contains(".claude-"));
     }
+    fs::remove_file(f.home.join("bin/claude-mi"))?;
+    let selected = f.script("claude-mi", "exit 9")?;
+    fs::remove_file(release2.join("claude"))?;
+    let (out, stale) = f.run(&["agent", "--project", p2.to_str().ok_or("project")?])?;
+    assert_code(&out, 0);
+    let profiles = stale["data"]["resources"].as_array().ok_or("profiles")?;
+    for profile in profiles {
+        let runtime = &profile["runtime"];
+        assert!(runtime["version"].is_null());
+        assert!(runtime["install_ref"].is_null());
+        if profile["name"] == "claude:mi" {
+            assert_eq!(runtime["binary"], selected.display().to_string());
+        } else {
+            assert!(runtime["binary"].is_null());
+        }
+    }
     assert!(!f.file("invoked-helper").exists());
+    assert!(!f.home.join("invoked-claude").exists());
     assert!(!f.file("state").exists());
     assert!(!f.file("cache").exists());
+    Ok(())
+}
+
+#[test]
+fn default_agent_version_follows_the_project_selected_mise_shim_release() -> TestResult {
+    let f = Fixture::new()?;
+    fs::create_dir(f.home.join(".codex"))?;
+    let shims = f.home.join(".local/share/mise/shims");
+    let release = f.home.join("codex-2.0.0");
+    let release_alias = f.home.join("selected-codex");
+    fs::create_dir_all(&shims)?;
+    fs::create_dir(&release)?;
+    symlink(&release, &release_alias)?;
+    let command = f.script(
+        "codex",
+        r#"touch "$MACOPS_TEST_HOME/invoked-codex"; exit 9"#,
+    )?;
+    fs::copy(&command, release.join("codex"))?;
+    write_json(
+        &f.home.join("mise-data"),
+        &json!({"codex":[
+            {"version":"1.0.0","install_path":f.home.join("codex-1.0.0"),"active":true},
+            {"version":"2.0.0","install_path":release_alias,"active":false}
+        ]}),
+    )?;
+    let manager = f.script(
+        "mise",
+        r#"case "$1" in
+ls) /bin/cat "$MACOPS_TEST_HOME/mise-data" ;;
+which) test "$2" = codex; printf '%s/codex-2.0.0/codex\n' "$MACOPS_TEST_HOME" ;;
+*) exit 8 ;;
+esac"#,
+    )?;
+    symlink(manager, shims.join("codex"))?;
+    let out = f
+        .command()
+        .env(
+            "PATH",
+            format!(
+                "{}:{}:/usr/bin:/bin",
+                shims.display(),
+                f.home.join("bin").display()
+            ),
+        )
+        .env("MISE_DATA_DIR", f.home.join(".local/share/mise"))
+        .args(["agent", "resources"])
+        .output()?;
+    assert_code(&out, 0);
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout)?;
+    let profiles = value["data"]["resources"].as_array().ok_or("profiles")?;
+    assert_eq!(profiles.len(), 1);
+    assert_eq!(profiles[0]["name"], "codex:default");
+    assert_eq!(profiles[0]["runtime"]["version"], "2.0.0");
+    assert!(!f.home.join("invoked-codex").exists());
+    assert!(!f.file("state").exists());
+    Ok(())
+}
+
+#[test]
+fn agent_refresh_shows_the_probed_version_only_on_the_matching_profile() -> TestResult {
+    let f = Fixture::new()?;
+    fs::create_dir(f.home.join(".claude"))?;
+    fs::create_dir(f.home.join(".claude-mi"))?;
+    let probed = f.script(
+        "original-claude",
+        r#"test "$1" = --version
+printf 'claude 8.7.6\n'
+printf 'called\n' >> "$MACOPS_TEST_HOME/version-probe""#,
+    )?;
+    symlink(probed, f.home.join("bin/claude"))?;
+    f.script(
+        "claude-mi",
+        r#"touch "$MACOPS_TEST_HOME/invoked-wrapper"; exit 9"#,
+    )?;
+    f.script(
+        "cursor-agent",
+        r#"ln -sf "$MACOPS_TEST_HOME/bin/claude-mi" "$MACOPS_TEST_HOME/bin/claude"
+printf 'cursor-agent 4.5.6\n'"#,
+    )?;
+    chezmoi_native::run_browser_pty(&f, &["agent"], "agent-profile-version", &f.home, "90", "0")?;
+    assert_eq!(
+        fs::read_to_string(f.home.join("version-probe"))?,
+        "called\n"
+    );
+    assert!(!f.home.join("invoked-wrapper").exists());
+    assert!(!f.file("state").exists());
     Ok(())
 }
 

@@ -120,6 +120,8 @@ pub struct RuntimeBinding {
     pub context: PathBuf,
     pub binary: Option<PathBuf>,
     pub install_ref: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
     pub evidence: Option<PathBuf>,
 }
 #[derive(Clone, Debug, Serialize)]

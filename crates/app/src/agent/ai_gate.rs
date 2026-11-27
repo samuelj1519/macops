@@ -39,12 +39,27 @@ pub fn query(scope: &Scope, program: &Path, args: Vec<String>) -> Result<String>
     Ok(output.stdout.trim().into())
 }
 pub fn version(ctx: &Context, program: &Path, tool: &str) -> Result<String> {
-    policy::running_version(&probe(
+    observed_version(ctx, program, tool).map(|(_, version)| version)
+}
+
+pub(crate) fn observed_version(
+    ctx: &Context,
+    program: &Path,
+    tool: &str,
+) -> Result<(PathBuf, String)> {
+    let mut evidence = Evidence::default();
+    let output = probe_captured(
         ctx,
         None,
         program,
         vec![if tool == "mimo" { "-v" } else { "--version" }.into()],
-    )?)
+        &mut evidence,
+    )?;
+    evidence.verify()?;
+    Ok((
+        evidence.resolved_file(program)?.into(),
+        policy::running_version(&output)?,
+    ))
 }
 
 pub fn managed_version(ctx: &Context, mise: &Path, tool: &str, target: &str) -> Result<String> {
@@ -239,12 +254,6 @@ fn payload_file(root: &Path, path: &Path, executable: bool, evidence: &mut Evide
     evidence.file(path)
 }
 
-fn probe(ctx: &Context, mise: Option<&Path>, binary: &Path, args: Vec<String>) -> Result<String> {
-    let mut evidence = Evidence::default();
-    let result = probe_captured(ctx, mise, binary, args, &mut evidence)?;
-    evidence.verify()?;
-    Ok(result)
-}
 fn interpreter(ctx: &Context, mise: Option<&Path>, header: &[u8]) -> Result<Option<PathBuf>> {
     if !header.starts_with(b"#!") {
         return Ok(None);

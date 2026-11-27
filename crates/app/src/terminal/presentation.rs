@@ -77,12 +77,17 @@ pub(crate) fn table_width() -> usize {
     columns().saturating_sub(5).min(92)
 }
 
-pub(crate) fn column_widths(
+fn column_widths(
     headers: &[&str],
     rows: &[Vec<String>],
     budget: usize,
+    minimum_widths: &[usize],
 ) -> Option<Vec<usize>> {
-    let minimum: Vec<_> = headers.iter().map(|label| width(label).max(2)).collect();
+    let minimum: Vec<_> = headers
+        .iter()
+        .enumerate()
+        .map(|(index, label)| width(label).max(*minimum_widths.get(index).unwrap_or(&2)))
+        .collect();
     let available = budget.checked_sub(headers.len().saturating_sub(1) * 2)?;
     if minimum.iter().sum::<usize>() > available {
         return None;
@@ -112,12 +117,13 @@ pub(crate) fn visible_columns<'a>(
     headers: &'a [&str],
     rows: &[Vec<String>],
     budget: usize,
+    minimum_widths: &[usize],
 ) -> (&'a [&'a str], Vec<usize>) {
     (1..=headers.len())
         .rev()
         .find_map(|count| {
             let headers = &headers[..count];
-            column_widths(headers, rows, budget).map(|widths| (headers, widths))
+            column_widths(headers, rows, budget, minimum_widths).map(|widths| (headers, widths))
         })
         .unwrap_or((&headers[..1], vec![budget]))
 }
@@ -146,7 +152,7 @@ pub(super) fn picker_labels(
                 .collect()
         })
         .collect();
-    let (headers, widths) = visible_columns(headers, &rows, budget);
+    let (headers, widths) = visible_columns(headers, &rows, budget, &[]);
     let mut header = String::new();
     pad_row(&mut header, headers.iter().copied(), &widths);
     header.pop();
@@ -179,7 +185,7 @@ pub(crate) fn table(headers: &[&str], rows: &[Vec<String>], budget: usize) -> St
         })
         .collect();
     let mut out = String::new();
-    let Some(widths) = column_widths(headers, &rows, budget) else {
+    let Some(widths) = column_widths(headers, &rows, budget, &[]) else {
         for (index, row) in rows.iter().enumerate() {
             if index > 0 {
                 out.push('\n');
