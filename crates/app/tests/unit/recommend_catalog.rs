@@ -220,8 +220,14 @@ fn recommendation_explains_manual_installation_when_no_plan_can_run() {
         "documents":[{"path":"README.md"}, {"path":"INSTALL.md"}],
         "manualInstall":[{"manager":"Skills CLI","document":0,"commands":["npx skills add example/kit"]}],
     });
-    let text = recommendation_sections(&data, &[]);
-    assert!(text.starts_with("手动安装") && !text.contains("错误表现"));
+    let text = crate::terminal::presentation::section_text(
+        "安装方案",
+        &installation_notes(&data, &[], false),
+        None,
+        false,
+        false,
+    );
+    assert!(text.contains("◆ 手动安装") && !text.contains("错误表现"));
     assert!(text.contains("Skills CLI · README.md") && text.contains("npx skills add example/kit"));
     let fallback =
         no_install_plan(&json!({"documents":[{"path":"README.md"}, {"path":"INSTALL.md"}]}));
@@ -230,7 +236,7 @@ fn recommendation_explains_manual_installation_when_no_plan_can_run() {
             && fallback.contains("错误原因")
             && fallback.contains("正确用法")
     );
-    assert!(fallback.contains("打开上面的 INSTALL.md"));
+    assert!(fallback.contains("打开 INSTALL.md"));
     let limited = no_install_plan(&json!({"reason":"recommend_github_rate_limited"}));
     assert!(
         limited.contains("GitHub 匿名 API 查询额度已用完")
@@ -264,14 +270,27 @@ fn recommendations_group_verified_profiles_and_manual_agents_without_model_dupli
             {"manager":"Claude Code","document":2,"commands":["claude plugin marketplace add example/kit#v1.11.0","claude plugin install toolkit@local"]}
         ]
     });
-    let summary = recommendation_sections(
-        &data,
-        &[InstallChoice::Plugin(plugin_install::Offer::Claude(
-            Box::new(offer),
-            "/fixture/claude".into(),
-        ))],
+    let choices = [InstallChoice::Plugin(plugin_install::Offer::Claude(
+        Box::new(offer),
+        "/fixture/claude".into(),
+    ))];
+    let text = |choices: &[InstallChoice], verbose| {
+        crate::terminal::presentation::section_text(
+            "安装方案",
+            &installation_notes(&data, choices, verbose),
+            None,
+            false,
+            verbose,
+        )
+    };
+    assert_eq!(
+        choices[0].label(false),
+        "安装插件 toolkit · Claude Code · 1.11.0"
     );
-    assert!(summary.starts_with("可直接安装\n  1 toolkit@local · Claude Code · 1.11.0"));
+    let summary = text(&choices, true);
+    assert!(summary.contains(
+        "◆ 可直接安装\n  1 安装插件 toolkit · Claude Code · 1.11.0 · 插件 ID toolkit@local"
+    ));
     assert_eq!(
         summary
             .matches("https://github.com/example/kit/blob/fixed/README.md")
@@ -287,7 +306,7 @@ fn recommendations_group_verified_profiles_and_manual_agents_without_model_dupli
     assert!(summary.contains("多选客户端"));
     assert!(!summary.contains("repeated model explanation"));
     assert!(!summary.contains("claude plugin install"));
-    let fallback = recommendation_sections(&data, &[]);
+    let fallback = text(&[], false);
     assert!(fallback.contains("claude plugin install toolkit@local"));
     assert!(!fallback.contains("可直接安装"));
     Ok(())
@@ -370,15 +389,15 @@ fn verified_agent_offers_appear_as_recommendation_choices_in_order() -> TestResu
         (
             vec![codex(), claude()],
             vec![
-                "item@market · Codex · 1.0.0",
-                "item@market · Claude Code · 1.0.0",
+                "安装插件 item · Codex · 1.0.0",
+                "安装插件 item · Claude Code · 1.0.0",
             ],
         ),
-        (vec![claude()], vec!["item@market · Claude Code · 1.0.0"]),
+        (vec![claude()], vec!["安装插件 item · Claude Code · 1.0.0"]),
         (vec![], vec![]),
     ] {
         let choices = install_choices(&ctx, &evidence, &[], || offers)?;
-        let labels: Vec<_> = choices.iter().map(InstallChoice::label).collect();
+        let labels: Vec<_> = choices.iter().map(|choice| choice.label(false)).collect();
         assert_eq!(labels, expected);
     }
     assert!(!ctx.state.exists());
@@ -480,7 +499,7 @@ fn recommendation_offers_shared_install_only_with_supported_local_runner() -> Te
         matches!(options.as_slice(), [InstallChoice::PublicSkills(source, Ok(RepositoryAction::Install))]
         if source == "owner/repo@v2.0.0")
     );
-    assert!(options[0].label().contains("用户共享目录"));
+    assert!(options[0].label(false).contains("用户共享目录"));
     assert!(!ctx.state.exists());
     Ok(())
 }
@@ -506,10 +525,10 @@ fn source_failure_guidance_is_specific_and_prefers_install_document_when_present
     assert!(repository.contains("打开 https://github.com/owner/repo"));
     assert!(no_install_plan(&json!({})).contains("mo recommend OWNER/REPO"));
     let docs = no_install_plan(&json!({"documents":[{"path":"README.md"},{"path":"INSTALL.md"}]}));
-    assert!(docs.contains("打开上面的 INSTALL.md"));
+    assert!(docs.contains("在「来源文档」打开 INSTALL.md"));
     assert!(
         no_install_plan(&json!({"documents":[{"path":"README.md"}]}))
-            .contains("打开上面的 README.md")
+            .contains("在「来源文档」打开 README.md")
     );
 }
 

@@ -12,6 +12,44 @@ compare_baseline = runpy.run_path(str(TOOLS / "check_coverage.py"))["compare_bas
 
 
 class WorkflowTests(unittest.TestCase):
+    def test_focused_checks_select_the_target_and_isolate_coverage(self):
+        with tempfile.TemporaryDirectory() as raw:
+            area = Path(raw)
+            command = area / "cargo"
+            command.write_text(
+                '#!/bin/sh\nprintf "%s|%s|%s|%s|%s\\n" "$RUST_TEST_THREADS" '
+                '"$CARGO_TARGET_DIR" "$CARGO_LLVM_COV_TARGET_DIR" "$CARGO_LLVM_COV_BUILD_DIR" "$*"\n'
+            )
+            command.chmod(0o700)
+            env = {
+                **os.environ, "PATH": f'{area}:{os.environ["PATH"]}',
+                "CARGO_TARGET_DIR": str(area / "target"),
+                "CARGO_LLVM_COV_TARGET_DIR": "formal-target", "CARGO_LLVM_COV_BUILD_DIR": "formal-build",
+            }
+
+            def check(*args):
+                return subprocess.run(
+                    ["bash", str(TOOLS / "check.sh"), *args], env=env,
+                    capture_output=True, text=True, timeout=10,
+                )
+
+            flags = "--workspace --all-features --locked --offline"
+            for args, threads, build, invoked in [
+                (("focus", "lib", "terminal::"), 1, "target", f"test {flags} --lib -- terminal::"),
+                (("focus-coverage", "cli", "skill_browser"), 4, "target/focus-coverage", f"llvm-cov {flags} --test cli --show-missing-lines -- skill_browser"),
+            ]:
+                with self.subTest(args=args):
+                    result = check(*args)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    coverage = str(area / build / "llvm-cov-target")
+                    cov_dirs = f"{coverage}|{coverage}" if args[0] == "focus-coverage" else "formal-target|formal-build"
+                    self.assertEqual(result.stdout.strip(), f"{threads}|{area / build}|{cov_dirs}|{invoked}")
+            for args in [("focus", "lib"), ("focus", "lib", ""), ("focus", "cli", "--list"), ("focus-coverage", "any", "term")]:
+                with self.subTest(args=args):
+                    result = check(*args)
+                    self.assertEqual(result.returncode, 2)
+                    self.assertEqual(result.stdout, "")
+
     def test_release_requires_both_successful_jobs_on_exact_main_push(self):
         commit = "a" * 40
         info = {

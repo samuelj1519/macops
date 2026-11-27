@@ -1425,3 +1425,24 @@ fn cursor_upgrade_refuses_an_active_mise_environment_override_before_native_exec
     assert!(!f.file("state/active.json").exists());
     Ok(())
 }
+
+#[test]
+fn agent_cli_detail_requires_confirmation_before_upgrade() -> TestResult {
+    let f = setup("claude", "1.0.0")?;
+    f.script("claude", "printf 'claude 1.0.0\n'")?;
+    super::chezmoi_native::run_browser_pty(
+        &f,
+        &["agent"],
+        "detail-agent-upgrade",
+        &f.home,
+        "160",
+        "3",
+    )?;
+    assert!(!f.file("state/active.json").exists());
+    assert!(
+        !fs::read_to_string(f.home.join("mise-calls"))
+            .unwrap_or_default()
+            .contains("\"use\"")
+    );
+    Ok(())
+}

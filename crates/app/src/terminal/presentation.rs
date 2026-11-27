@@ -1,9 +1,13 @@
-use ratatui::text::Line;
+use ratatui::{
+    style::Style,
+    text::{Line, Span},
+};
 use std::{fmt::Write as _, io::IsTerminal as _};
 
 #[derive(Clone, Copy)]
 pub(super) enum Tone {
     Active,
+    Emphasis,
     Success,
     Warning,
     Muted,
@@ -24,6 +28,7 @@ pub(super) fn paint(text: &str, tone: Tone, color: bool) -> String {
     }
     let style = match tone {
         Tone::Active => "1;36",
+        Tone::Emphasis => "1",
         Tone::Success => "1;32",
         Tone::Warning => "1;33",
         Tone::Muted => "2",
@@ -220,35 +225,182 @@ pub(crate) fn panel(title: &str, content: &str) {
 }
 
 fn panel_text(title: &str, content: &str, columns: usize, color: bool) -> String {
-    let border = |text: &str| paint(text, Tone::Muted, color);
-    let inner = columns - 4;
-    let title = fit(title, inner - 2);
-    let mut out = String::new();
-    let top = format!(" {}╮", "─".repeat(inner - width(&title) - 1));
-    let _ = writeln!(
-        out,
-        "{}{}{}",
-        border("╭─ "),
-        paint(&title, Tone::Active, color),
-        border(&top)
-    );
-    let mut row = |part: &str| {
-        let padding = " ".repeat(inner.saturating_sub(width(part)));
-        let _ = writeln!(out, "{}{part}{padding}{}", border("│ "), border(" │"));
-    };
+    let mut out = Panel::new(title, columns, color);
     for line in content.lines() {
-        let mut rest = line;
-        while width(rest) > inner {
-            let (head, tail) = rest.split_at(prefix_len(rest, inner));
-            row(head);
-            rest = tail;
-        }
-        row(rest);
+        out.line("", line, None, None);
     }
-    let _ = writeln!(out, "{}", border(&format!("╰{}╯", "─".repeat(columns - 2))));
+    out.finish()
+}
+
+pub(crate) enum PanelLine {
+    Section(&'static str),
+    Item(String),
+    Command(String),
+    Note(String),
+    Text(String),
+    Document { name: String, url: String },
+}
+
+pub(crate) fn section_panel(title: &str, lines: &[PanelLine], show_urls: bool) {
+    let columns = columns().saturating_sub(1).min(96);
+    let framed = interactive() && columns >= 24;
+    eprint!(
+        "{}",
+        section_text(title, lines, framed.then_some(columns), color(), show_urls)
+    );
+}
+
+pub(crate) fn section_text(
+    title: &str,
+    lines: &[PanelLine],
+    columns: Option<usize>,
+    color: bool,
+    show_urls: bool,
+) -> String {
+    use crate::output::sanitize;
+
+    let columns = columns.filter(|columns| {
+        lines.iter().all(|line| match line {
+            PanelLine::Command(text) => width(&sanitize(text, false)) + 8 <= *columns,
+            _ => true,
+        })
+    });
+    let mut panel = Panel::new(&sanitize(title, false), columns.unwrap_or(0), color);
+    let mut has_document = false;
+    let mut urls = Vec::new();
+    for (index, line) in lines.iter().enumerate() {
+        match line {
+            PanelLine::Section(label) => {
+                if index != 0 {
+                    panel.line("", "", None, None);
+                }
+                panel.line("◆ ", label, Some(Tone::Active), None);
+            }
+            PanelLine::Item(text) => {
+                panel.line("  ", &sanitize(text, false), Some(Tone::Emphasis), None);
+            }
+            PanelLine::Command(text) => {
+                panel.line("  ▸ ", &sanitize(text, false), Some(Tone::Emphasis), None);
+            }
+            PanelLine::Note(text) => {
+                panel.line("    ", &sanitize(text, false), Some(Tone::Muted), None);
+            }
+            PanelLine::Text(text) => panel.line("  ", &sanitize(text, false), None, None),
+            PanelLine::Document { name, url } => {
+                let link =
+                    url.starts_with("https://") && url.bytes().all(|byte| byte.is_ascii_graphic());
+                panel.line(
+                    "  ↗ ",
+                    &sanitize(name, false),
+                    Some(Tone::Active),
+                    link.then_some(url),
+                );
+                if link && (show_urls || !color) {
+                    urls.push((sanitize(name, false), url));
+                }
+                has_document |= link;
+            }
+        }
+    }
+    if has_document && color && !show_urls {
+        panel.line("    ", "--verbose 显示完整链接", Some(Tone::Muted), None);
+    }
+    let mut out = panel.finish();
+    for (name, url) in urls {
+        let _ = writeln!(out, "  {name}  {url}");
+    }
     out
 }
 
+struct Panel {
+    out: String,
+    inner: Option<usize>,
+    color: bool,
+}
+
+impl Panel {
+    fn new(title: &str, columns: usize, color: bool) -> Self {
+        let inner = columns.checked_sub(4).filter(|width| *width >= 20);
+        let mut out = String::new();
+        if let Some(inner) = inner {
+            let title = fit(title, inner - 2);
+            let top = format!(" {}╮", "─".repeat(inner.saturating_sub(width(&title) + 1)));
+            let _ = writeln!(
+                out,
+                "{}{}{}",
+                paint("╭─ ", Tone::Muted, color),
+                paint(&title, Tone::Active, color),
+                paint(&top, Tone::Muted, color)
+            );
+        } else {
+            let _ = writeln!(out, "{}", paint(title, Tone::Active, color));
+        }
+        Self { out, inner, color }
+    }
+
+    fn line(&mut self, prefix: &str, text: &str, tone: Option<Tone>, link: Option<&str>) {
+        let lead = width(prefix);
+        let columns = self.inner.map_or(usize::MAX, |inner| inner - lead);
+        let hanging = " ".repeat(lead);
+        let mut prefix = prefix;
+        let mut rest = text;
+        loop {
+            let (part, tail) = panel_line_chunk(rest, columns);
+            let styled = tone.map_or_else(|| part.into(), |tone| paint(part, tone, self.color));
+            let styled = match link.filter(|_| self.color) {
+                Some(url) => format!("\x1b]8;;{url}\x1b\\{styled}\x1b]8;;\x1b\\"),
+                None => styled,
+            };
+            if self.inner.is_some() {
+                let padding = " ".repeat(columns.saturating_sub(width(part)));
+                let _ = writeln!(
+                    self.out,
+                    "{}{prefix}{styled}{padding}{}",
+                    paint("│ ", Tone::Muted, self.color),
+                    paint(" │", Tone::Muted, self.color)
+                );
+            } else {
+                let _ = writeln!(self.out, "{prefix}{styled}");
+            }
+            if tail.is_empty() {
+                break;
+            }
+            prefix = &hanging;
+            rest = tail;
+        }
+    }
+
+    fn finish(mut self) -> String {
+        if let Some(inner) = self.inner {
+            let border = format!("╰{}╯", "─".repeat(inner + 2));
+            let _ = writeln!(self.out, "{}", paint(&border, Tone::Muted, self.color));
+        }
+        self.out
+    }
+}
+
+fn panel_line_chunk(text: &str, columns: usize) -> (&str, &str) {
+    if width(text) <= columns {
+        return (text, "");
+    }
+    let span = Span::raw(text);
+    let mut graphemes = span.styled_graphemes(Style::default()).peekable();
+    let first_len = graphemes
+        .peek()
+        .map_or(text.len(), |item| item.symbol.len());
+    let mut remaining = columns;
+    let split = graphemes
+        .map_while(|grapheme| {
+            remaining = remaining.checked_sub(width(grapheme.symbol))?;
+            Some(grapheme.symbol.len())
+        })
+        .sum();
+    if split == 0 {
+        ("…", &text[first_len..])
+    } else {
+        text.split_at(split)
+    }
+}
 #[cfg(test)]
 #[path = "../../tests/unit/presentation.rs"]
 mod tests;

@@ -25,6 +25,13 @@ mod sources;
 
 const CACHE: &str = "chezmoi-metadata.json";
 
+pub(super) fn supports_forget(ctx: &Context, cache: &Cache) -> bool {
+    cache.complete
+        && sources::check_scope(ctx)
+            .and_then(|fixture| sources::verify_owner(ctx, &cache.binding, fixture))
+            .is_ok()
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Publication {

@@ -20,7 +20,7 @@ use crate::{
     terminal::{
         install::report_install,
         plan::{plan_scope, source_label},
-        presentation::panel,
+        presentation::{PanelLine, panel, section_panel},
     },
 };
 use candidate::{self as policy, Candidate, Scope};
@@ -297,15 +297,11 @@ fn choose(ctx: &Context, data: Value, verbose: bool) -> Result<Value> {
         );
     }
     panel("本机状态", local.status().trim_end());
-    let notes = if verbose {
-        recommendation_sections(&data, &installs)
-    } else {
-        installation_notes(&data, &installs)
-    };
+    let notes = installation_notes(&data, &installs, verbose);
     if notes.is_empty() {
         terminal(TerminalLine::Section, "安装方案");
     } else {
-        panel("安装方案", notes.trim_end());
+        section_panel("安装方案", &notes, verbose);
     }
     if !local.views.is_empty() {
         panel("维护入口", local.maintenance(installs.len() + 1).trim_end());
@@ -334,7 +330,7 @@ fn choose(ctx: &Context, data: Value, verbose: bool) -> Result<Value> {
     };
     let labels = installs
         .iter()
-        .map(InstallChoice::label)
+        .map(|choice| choice.label(false))
         .chain(local.views.iter().map(|(kind, _)| {
             if *kind == crate::browser::Kind::Apps {
                 "查看和维护软件".into()
@@ -364,22 +360,14 @@ fn safe_text(value: &Value) -> String {
     crate::browser::sanitize(value.as_str().unwrap_or_default(), false)
 }
 
-fn recommendation_sections(data: &Value, choices: &[InstallChoice]) -> String {
-    use std::fmt::Write as _;
-    let mut text = String::new();
-    if !choices.is_empty() {
-        text.push_str("可直接安装\n");
-        for (index, choice) in choices.iter().enumerate() {
-            let _ = writeln!(text, "  {} {}", index + 1, choice.label());
-        }
+fn installation_notes(data: &Value, choices: &[InstallChoice], verbose: bool) -> Vec<PanelLine> {
+    let mut lines = Vec::new();
+    if verbose && !choices.is_empty() {
+        lines.push(PanelLine::Section("可直接安装"));
+        lines.extend(choices.iter().enumerate().map(|(index, choice)| {
+            PanelLine::Item(format!("{} {}", index + 1, choice.label(true)))
+        }));
     }
-    text.push_str(&installation_notes(data, choices));
-    text
-}
-
-fn installation_notes(data: &Value, choices: &[InstallChoice]) -> String {
-    use std::fmt::Write as _;
-    let mut text = String::new();
     let has_claude = choices.iter().any(|choice| {
         matches!(
             choice,
@@ -396,26 +384,35 @@ fn installation_notes(data: &Value, choices: &[InstallChoice]) -> String {
         } else {
             "手动安装"
         };
-        let _ = writeln!(text, "{heading}{manual}");
+        lines.push(PanelLine::Section(heading));
     }
+    if choices.is_empty() && manual.is_empty() {
+        lines.extend(
+            no_install_plan(data)
+                .lines()
+                .map(|line| PanelLine::Text(line.into())),
+        );
+    }
+    lines.extend(manual);
     if let Some(documents) = data["documents"].as_array().filter(|rows| !rows.is_empty()) {
-        text.push_str("来源文档\n");
+        lines.push(PanelLine::Section("来源文档"));
         let mut seen = std::collections::BTreeSet::new();
         for doc in documents {
-            if seen.insert(safe_text(&doc["url"])) {
-                let _ = writeln!(
-                    text,
-                    "  {}  {}",
-                    safe_text(&doc["path"]),
-                    safe_text(&doc["url"])
-                );
+            let name = safe_text(&doc["path"]);
+            let url = doc["url"].as_str().unwrap_or_default();
+            if seen.insert(if url.is_empty() {
+                name.clone()
+            } else {
+                url.into()
+            }) {
+                lines.push(PanelLine::Document {
+                    name,
+                    url: url.into(),
+                });
             }
         }
     }
-    if choices.is_empty() && manual.is_empty() {
-        let _ = writeln!(text, "{}", no_install_plan(data));
-    }
-    text
+    lines
 }
 
 fn show_model_details(data: &Value) {
@@ -446,10 +443,9 @@ fn show_model_details(data: &Value) {
     }
 }
 
-fn manual_commands(data: &Value, has_claude: bool) -> String {
-    use std::fmt::Write as _;
+fn manual_commands(data: &Value, has_claude: bool) -> Vec<PanelLine> {
     let documents = data["documents"].as_array().map_or(&[][..], Vec::as_slice);
-    let mut text = String::new();
+    let mut lines = Vec::new();
     for item in data["manualInstall"].as_array().into_iter().flatten() {
         if let (Some(manager), Some(document), Some(commands)) = (
             item["manager"].as_str(),
@@ -461,26 +457,26 @@ fn manual_commands(data: &Value, has_claude: bool) -> String {
         ) && let Some(path) = document["path"].as_str()
             && !(has_claude && manager == "Claude Code")
         {
-            let _ = write!(
-                text,
-                "\n  {} · {}",
-                crate::browser::sanitize(manager, false),
-                crate::browser::sanitize(path, false)
+            lines.push(PanelLine::Item(format!("{manager} · {path}")));
+            lines.extend(
+                commands
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(|command| PanelLine::Command(command.into())),
             );
-            for command in commands.iter().filter_map(Value::as_str) {
-                let _ = write!(text, "\n    {}", crate::browser::sanitize(command, false));
-            }
             if manager == "Skills CLI"
                 && commands
                     .iter()
                     .filter_map(Value::as_str)
                     .any(|command| command.split_ascii_whitespace().count() == 4)
             {
-                text.push_str("\n    按 Skills CLI 提示多选客户端，再确认安装范围。");
+                lines.push(PanelLine::Note(
+                    "按 Skills CLI 提示多选客户端，再确认安装范围。".into(),
+                ));
             }
         }
     }
-    text
+    lines
 }
 
 fn no_install_plan(data: &Value) -> String {
@@ -523,7 +519,7 @@ fn no_install_plan(data: &Value) -> String {
         .unwrap_or("项目文档");
     let _ = write!(
         text,
-        "\n正确用法　打开上面的 {}，按你使用的客户端选择安装方式。",
+        "\n正确用法　在「来源文档」打开 {}，按你使用的客户端选择安装方式。",
         sanitize(path, false)
     );
     text
@@ -730,7 +726,7 @@ enum InstallChoice {
 }
 
 impl InstallChoice {
-    fn label(&self) -> String {
+    fn label(&self, verbose: bool) -> String {
         use crate::browser::sanitize;
         match self {
             Self::Application(package) => format!(
@@ -743,7 +739,7 @@ impl InstallChoice {
                 "{} · Skills CLI · Codex 用户级 · 共享技能目录 · {}@{}",
                 recipe.install_name, recipe.source.repository, recipe.source.commit
             ),
-            Self::Plugin(offer) => offer.label(),
+            Self::Plugin(offer) => offer.label(verbose),
             Self::PublicSkills(source, Ok(RepositoryAction::Install)) => {
                 format!("安装技能 · {source} · 用户共享目录")
             }

@@ -804,6 +804,7 @@ fn skill_browser_shows_installed_locations_and_shared_profile_visibility() -> Te
     ] {
         chezmoi_native::run_browser_pty(&f, &["skill"], scenario, &f.home, "140", "0")?;
     }
+    chezmoi_native::run_browser_pty(&f, &["skill"], "skill-location-groups", &f.home, "68", "0")?;
     assert!(!f.file("state").exists());
     Ok(())
 }
@@ -8409,5 +8410,47 @@ fn cursor_project_plugin_coverage_reports_malformed_and_unbound_settings() -> Te
     fs::remove_file(&settings)?;
     std::os::unix::fs::symlink(&f.catalog, &settings)?;
     assert_eq!(status()?["issues"][0], "cursor_project_settings_unreadable");
+    Ok(())
+}
+
+#[test]
+fn app_details_do_not_offer_mutation_for_a_discovered_cargo_installation() -> TestResult {
+    let f = Fixture::new()?;
+    f.script(
+        "cargo",
+        r#"case "$*" in
+"install --list "*) printf 'detail-fixture v1.0.0:\n    detail-fixture\n' ;;
+*) printf attempted > "$MACOPS_TEST_HOME/unsafe-mutation"; exit 8 ;;
+esac"#,
+    )?;
+    chezmoi_native::run_browser_pty(
+        &f,
+        &["app"],
+        "detail-app-readonly",
+        std::path::Path::new("detail-fixture"),
+        "160",
+        "0",
+    )?;
+    assert!(!f.home.join("unsafe-mutation").exists());
+    assert!(!f.file("state").exists());
+    Ok(())
+}
+
+#[test]
+fn app_details_execute_the_same_declared_upgrade_after_confirmation() -> TestResult {
+    let f = Fixture::new()?;
+    fs::write(f.file("version"), "1.0.0")?;
+    let (out, _) = f.run(&["app", "adopt", "--id", "fixture:demo", "--yes"])?;
+    assert_code(&out, 0);
+    chezmoi_native::run_browser_pty(
+        &f,
+        &["app"],
+        "detail-declared-upgrade",
+        std::path::Path::new("demo"),
+        "160",
+        "0",
+    )?;
+    assert_eq!(fs::read_to_string(f.file("version"))?, "2.0.0");
+    assert_eq!(fs::read_to_string(f.file("calls"))?, "upgrade\n");
     Ok(())
 }

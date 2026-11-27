@@ -9,6 +9,8 @@ use crate::{
 use serde_json::Value;
 use std::fmt::Write as _;
 
+const INLINE_ITEMS: usize = 10;
+
 pub(super) struct Related {
     pub views: Vec<(Kind, View)>,
     incomplete: bool,
@@ -76,7 +78,7 @@ impl Related {
                 view.items.len()
             );
             let mut rows = Vec::new();
-            for item in view.items.iter().take(3) {
+            for item in view.items.iter().take(INLINE_ITEMS) {
                 let Some(info) = item.inventory.as_ref() else {
                     continue;
                 };
@@ -104,7 +106,11 @@ impl Related {
                     "—"
                 };
                 rows.push(vec![
-                    item.name.clone(),
+                    if matches!(info.manager.as_str(), "claude-plugin" | "codex-config") {
+                        crate::agent::plugin_install::display_name(&item.name).into()
+                    } else {
+                        item.name.clone()
+                    },
                     state.into(),
                     version.into(),
                     place,
@@ -121,8 +127,12 @@ impl Related {
                 }
             }
             text.push_str(&table(&headers, &rows, table_width()));
-            if view.items.len() > 3 {
-                let _ = writeln!(text, "    另有 {} 项，见维护入口。", view.items.len() - 3);
+            if view.items.len() > INLINE_ITEMS {
+                let _ = writeln!(
+                    text,
+                    "    另有 {} 项，可在维护入口查看。",
+                    view.items.len() - INLINE_ITEMS
+                );
             }
         }
         if self.incomplete {

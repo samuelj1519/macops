@@ -203,8 +203,8 @@ fn assert_compatible_plugin_offers(
         |_| Ok(binary.to_path_buf()),
     );
     assert_eq!(choices.len(), 2);
-    assert!(choices[0].label().contains("Codex"));
-    assert!(choices[1].label().contains("Claude Code"));
+    assert!(choices[0].label(false).contains("Codex"));
+    assert!(choices[1].label(false).contains("Claude Code"));
     let one = offers_using(
         ctx,
         &report,
@@ -212,7 +212,7 @@ fn assert_compatible_plugin_offers(
         |_| Ok(binary.to_path_buf()),
     );
     assert_eq!(one.len(), 1);
-    assert!(one[0].label().contains("Claude Code"));
+    assert!(one[0].label(false).contains("Claude Code"));
 }
 
 fn assert_install_route(
@@ -477,12 +477,18 @@ fn isolated_claude_preview_requires_confirmation_and_keeps_the_selected_mode() -
         plugin,
     )?;
     let binary = ctx.home.join("fixed-claude");
-    let display = Offer::Claude(Box::new(offer.clone()), binary.clone()).label();
+    let choice = Offer::Claude(Box::new(offer), binary.clone());
+    let display = choice.label(false);
     assert!(display.contains("Claude Code"));
     assert!(!display.contains("独立"));
-    assert!(display.contains("fixture@example-market"));
+    assert!(display.contains("安装插件 fixture"));
+    assert!(!display.contains("example-market"));
+    assert!(
+        choice
+            .label(true)
+            .contains("插件 ID fixture@example-market")
+    );
     assert!(display.contains("2.1.1"));
-    let choice = Offer::Claude(Box::new(offer), binary.clone());
     let refusal = install_isolated_using(
         &ctx,
         &choice,

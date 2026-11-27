@@ -45,7 +45,7 @@ fn inventory_filters_managers_and_actual_skill_locations() {
     assert_eq!(app.visible().len(), 2);
     app.switch_group(true);
     assert!(
-        app.group_tabs(32)
+        app.group_filter()
             .is_some_and(|tabs| tabs.contains("[Homebrew]"))
     );
     assert_eq!(app.selected().as_deref(), Some("brew-jq"));
@@ -81,6 +81,24 @@ fn inventory_filters_managers_and_actual_skill_locations() {
     assert_eq!(skills.visible().len(), 1);
     skills.switch_group(true);
     assert_eq!(skills.selected().as_deref(), Some("unverified"));
+
+    skills
+        .view
+        .items
+        .extend((0..10).map(|n| item(&format!("added-{n}"), "skills-cli", &[])));
+    skills.view.note = "技能清单".into();
+    let before = skills.header_lines(15, true);
+    skills.search = "一个很长的搜索词 @claude:mi".into();
+    skills.typing = true;
+    let searching = skills.header_lines(1, true);
+    assert_eq!(before.len(), searching.len());
+    assert_eq!(before[1].find("技能清单"), searching[1].find("技能清单"));
+    assert_eq!(before[2], searching[2]);
+    assert!(searching[3].starts_with("/ 搜索 · 一个很长的搜索词"));
+    skills.switch_group(true);
+    let switched = skills.header_lines(0, true);
+    assert_eq!(switched[2], "←/→ 安装位置 · [全部]");
+    assert_eq!(switched[3], searching[3]);
 }
 
 #[test]
@@ -165,6 +183,7 @@ fn agent_details_announce_the_managed_session_without_claiming_it_is_loaded() {
         agent_session: None,
         agent_removable: false,
         skills_native: false,
+        target: DetailTarget::Other,
     }));
     assert!(browser.agent_action('e').is_none());
     let session = crate::agent::codex_install::session::Details {
@@ -185,6 +204,7 @@ fn agent_details_announce_the_managed_session_without_claiming_it_is_loaded() {
         agent_session: Some(session),
         agent_removable: true,
         skills_native: false,
+        target: DetailTarget::Other,
     }));
     assert!(keys(Kind::Agents, &browser.page, false).contains("e 插件设置"));
     assert!(
@@ -261,6 +281,7 @@ fn agent_browser_actions_use_highlighted_identity_and_archive_only_managed_confi
         agent_session: None,
         agent_removable: false,
         skills_native: false,
+        target: DetailTarget::Other,
     }));
     assert!(browser.agent_action('x').is_none());
     assert!(browser.agent_action('l').is_none());
@@ -282,5 +303,28 @@ fn agent_browser_actions_use_highlighted_identity_and_archive_only_managed_confi
     assert!(
         matches!(browser.agent_action('l'),Some(NativeAction::AgentLaunch(target)) if target==id)
     );
+    Ok(())
+}
+
+#[test]
+fn inventory_preview_keeps_requested_version_separate_from_provider_resolution()
+-> crate::test_support::TestResult {
+    let view = View {
+        scope: "global".into(),
+        items: vec![],
+        coverage: "observed",
+        difference_coverage: "not_applicable",
+        observed_at: None,
+        note: String::new(),
+        incomplete: false,
+    };
+    let mut browser = Browser::new(view, Kind::Apps);
+    let mut plan = crate::test_support::journal()?.plan;
+    plan.target = Some("2.0.0".into());
+    browser.preview_plan(Ok(plan.clone()), None);
+    assert!(matches!(&browser.page, Page::Operation(displayed, None)
+        if displayed.target.as_deref() == Some("2.0.0")));
+    browser.preview_plan(Ok(plan), Some("2.0.0".into()));
+    assert!(matches!(&browser.page, Page::Operation(_, Some(version)) if version=="2.0.0"));
     Ok(())
 }

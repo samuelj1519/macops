@@ -5,17 +5,23 @@
 ## 从改动到验证
 
 ```sh
-cargo build --locked
+bash tools/check.sh focus lib terminal::
+bash tools/check.sh focus cli skill_browser_shows_installed_locations
 bash tools/check.sh quick
-bash tools/check.sh tests
+bash tools/check.sh static
 ```
 
 | 命令 | 检查内容 |
 | --- | --- |
+| `bash tools/check.sh focus lib 关键词` | 运行命中的单元测试。换成 `cli` 可运行命中的 CLI 集成测试 |
+| `bash tools/check.sh focus-coverage cli 关键词` | 用单独的构建目录运行定向覆盖率，定位漏测的代码 |
 | `bash tools/check.sh quick` | Cargo 格式和严格 Clippy |
+| `bash tools/check.sh static` | 公开源码、工具测试、拼写、TOML 和依赖检查 |
 | `bash tools/check.sh tests` | 全目标测试和单独的文档测试 |
-| `bash tools/check.sh quality` | 公开源码、工具测试、拼写、TOML、依赖和覆盖率 |
-| `bash tools/check.sh full` | 以上检查和 Release 构建 |
+| `bash tools/check.sh quality` | 静态检查和正式覆盖率 |
+| `bash tools/check.sh full` | 格式、静态检查、全目标与文档测试、正式覆盖率、Release 构建 |
+
+补测试时运行新增和直接受影响的用例，确认过滤词实际命中了测试。可以用定向覆盖率发现漏测分支。正式覆盖率使用完整测试结果。行为、定向检查和复审稳定后，对定稿版本执行一次完整验收。需要合入主干时，由集成脚本对比主干基线并执行完整验收。
 
 全目标执行和覆盖率通过 `tools/run_ci_tests.sh` 并行运行两组 Cargo 测试。库、二进制、示例和基准目标使用 1 个线程，避免子进程继承其他单元测试持有的文件锁。集成测试使用 4 个线程。两组都结束后才汇报结果。
 

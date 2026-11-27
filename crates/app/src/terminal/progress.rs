@@ -97,39 +97,65 @@ fn draw_install_progress(stages: &mpsc::Receiver<ProgressEvent>) {
         return;
     };
     let color = presentation::color();
-    let frames = ["◒", "◐", "◓", "◑"];
     let mut frame = 0;
     loop {
-        let shown = fit(label, presentation::columns().saturating_sub(6));
-        render_progress(frames[frame], Tone::Active, &shown, color, "");
+        render_progress(label, ProgressPhase::Working(frame), color, "");
         match stages.recv_timeout(Duration::from_millis(100)) {
             Ok(ProgressEvent::Stage(next)) => {
-                render_progress("◇", Tone::Success, &shown, color, "\n");
+                render_progress(label, ProgressPhase::Complete, color, "\n");
                 label = next;
                 frame = 0;
             }
-            Err(RecvTimeoutError::Timeout) => frame = (frame + 1) % frames.len(),
+            Err(RecvTimeoutError::Timeout) => frame = (frame + 1) % DOTS.len(),
             Ok(ProgressEvent::Finished(success)) => {
-                let (symbol, tone) = if success {
-                    ("◇", Tone::Success)
+                let phase = if success {
+                    ProgressPhase::Complete
                 } else {
-                    ("!", Tone::Warning)
+                    ProgressPhase::Incomplete
                 };
-                render_progress(symbol, tone, &shown, color, "\n");
+                render_progress(label, phase, color, "\n");
                 return;
             }
             Err(RecvTimeoutError::Disconnected) => {
-                render_progress("!", Tone::Warning, &shown, color, "\n");
+                render_progress(label, ProgressPhase::Incomplete, color, "\n");
                 return;
             }
         }
     }
 }
 
-fn render_progress(symbol: &str, tone: Tone, label: &str, color: bool, end: &str) {
+const DOTS: [&str; 3] = ["·", "··", "···"];
+
+#[derive(Clone, Copy)]
+enum ProgressPhase {
+    Working(usize),
+    Complete,
+    Incomplete,
+}
+
+fn progress_line(label: &str, phase: ProgressPhase, columns: usize, color: bool) -> String {
+    let (suffix, tone) = match phase {
+        ProgressPhase::Working(frame) => (DOTS[frame], Tone::Active),
+        ProgressPhase::Complete => ("已完成", Tone::Success),
+        ProgressPhase::Incomplete => ("未完成", Tone::Warning),
+    };
+    let symbol = paint("○", tone, color);
+    if columns < 5 {
+        return if columns == 0 { String::new() } else { symbol };
+    }
     let rail = paint("│", Tone::Muted, color);
-    let symbol = paint(symbol, tone, color);
-    eprint!("\r\x1b[2K{rail} {symbol}  {label}{end}");
+    let label = fit(label, columns.saturating_sub(13));
+    let suffix = paint(&fit(suffix, columns - 5), tone, color);
+    if label.is_empty() {
+        format!("{rail} {symbol}  {suffix}")
+    } else {
+        format!("{rail} {symbol}  {label}  {suffix}")
+    }
+}
+
+fn render_progress(label: &str, phase: ProgressPhase, color: bool, end: &str) {
+    let line = progress_line(label, phase, presentation::columns(), color);
+    eprint!("\r\x1b[2K{line}{end}");
 }
 
 pub(crate) struct LiveProgress {

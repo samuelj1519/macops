@@ -46,6 +46,7 @@ pub(crate) fn recommend(ctx: &Context, source: &str, kind: Operation) -> Result<
 #[derive(Clone, Copy)]
 struct Request<'a> {
     name: &'a str,
+    display_name: &'a str,
     kind: Operation,
     agents: &'a SkillAgents,
     revision: Option<&'a str>,
@@ -56,6 +57,7 @@ impl<'a> Request<'a> {
     fn for_target(name: &'a str, kind: Operation, agents: &'a SkillAgents) -> Self {
         Self {
             name,
+            display_name: name,
             kind,
             agents,
             revision: None,
@@ -121,11 +123,13 @@ pub(crate) fn run(cli: &Cli, ctx: &Context) -> Result<Option<Value>> {
             ..
         } => Request::for_target(name, Operation::Install, agents),
         SkillCmd::Upgrade(selection) if selection.name.is_some() => Request {
-            name: selection.name.as_deref().unwrap_or_default(),
-            kind: Operation::Upgrade,
-            agents: &selection.agents,
             revision: selection.revision.as_deref(),
             switch_source: selection.switch_source,
+            ..Request::for_target(
+                selection.name.as_deref().unwrap_or_default(),
+                Operation::Upgrade,
+                &selection.agents,
+            )
         },
         SkillCmd::Remove { id, agents } => Request::for_target(id, Operation::Uninstall, agents),
         SkillCmd::Enable { id, agents } => Request::for_target(id, Operation::Enable, agents),
@@ -827,8 +831,89 @@ fn execute(
         );
     }
     check_target_scope(&mut sites, &agents, request.agents.shared || interactive);
-    let shared = plan_shared_work(ctx, &request, &mut sites);
-    let planned = preview(ctx, &request, &sites, &offers, &agents);
+    apply_sites(ctx, &request, sites, &offers, &agents, dry, yes)
+}
+
+pub(crate) fn maintain_from_inventory(ctx: &Context, id: &str, kind: Operation) -> Result<Value> {
+    if ctx.chezmoi.source.is_some()
+        || ctx.chezmoi.destination.is_some()
+        || ctx.chezmoi.config.is_some()
+    {
+        return Err(Error::attention(
+            "agent_skill_scope_unsupported",
+            "请用对应的用户配置目录维护插件",
+        ));
+    }
+    if crate::migration::migration_tx::pending(ctx)? {
+        return Err(crate::migration::migration_tx::recovery_required(ctx));
+    }
+    let profiles = supported_profiles(ctx)?;
+    let agents = agents(&profiles);
+    let (local, _) =
+        crate::capability::resource_capabilities::collect_observed(ctx, &profiles, None, false)?;
+    let unavailable =
+        || Error::attention("plan_stale", "所选插件或用户级安装位置已变化，请刷新清单");
+    let resource = local
+        .iter()
+        .find(|item| item.id == id)
+        .ok_or_else(unavailable)?;
+    let Data::Capability {
+        origin,
+        deployments,
+        ..
+    } = &resource.data
+    else {
+        return Err(unavailable());
+    };
+    if !matches!(origin.manager.as_str(), "claude-plugin" | "codex-config")
+        || !(resource.status == State::Present
+            || (origin.manager == "codex-config" && resource.status == State::Declared))
+        || kind == Operation::Install
+        || (origin.manager == "codex-config" && kind != Operation::Uninstall)
+    {
+        return Err(unavailable());
+    }
+    let selection = SkillAgents::default();
+    let request = Request {
+        display_name: &resource.name,
+        ..Request::for_target(id, kind, &selection)
+    };
+    let mut sites = agents
+        .iter()
+        .filter(|agent| {
+            deployments
+                .iter()
+                .any(|site| site.scope == "user" && site.harness == agent.profile.id)
+        })
+        .map(|agent| {
+            classify(
+                ctx,
+                &request,
+                agent,
+                &[],
+                std::slice::from_ref(resource),
+                None,
+            )
+        })
+        .collect::<Vec<_>>();
+    if sites.is_empty() {
+        return Err(unavailable());
+    }
+    check_target_scope(&mut sites, &agents, false);
+    apply_sites(ctx, &request, sites, &[], &agents, false, false)
+}
+
+fn apply_sites(
+    ctx: &Context,
+    request: &Request<'_>,
+    mut sites: Vec<Site<'_>>,
+    offers: &[plugin_install::Offer],
+    agents: &[Agent<'_>],
+    dry: bool,
+    yes: bool,
+) -> Result<Value> {
+    let shared = plan_shared_work(ctx, request, &mut sites);
+    let planned = preview(ctx, request, &sites, offers, agents);
     if dry {
         return Ok(
             json!({"agentBatch":true,"mode":"dry-run","verb":request.kind.label(),"results":planned,"persistentWrites":false}),
@@ -844,10 +929,11 @@ fn execute(
         } else {
             request.kind.label()
         };
-        crate::operations::confirm(&format!("{action} {}\n{text}", request.name), yes)?;
+        let name = crate::output::sanitize(request.display_name, false);
+        crate::operations::confirm(&format!("{action} {name}\n{text}"), yes)?;
         crate::operations::recover_before_write(ctx, None)?;
     }
-    perform(ctx, &request, sites, &offers, planned, shared)
+    perform(ctx, request, sites, offers, planned, shared)
 }
 
 fn plan_shared_work(

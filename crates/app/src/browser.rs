@@ -67,6 +67,7 @@ pub(crate) enum ListDetail {
     Application {
         scope: String,
         version_count: usize,
+        recipe: Option<String>,
     },
     Agent {
         command: String,
@@ -189,6 +190,7 @@ pub(crate) fn list_row(kind: Kind, item: &Item) -> Vec<String> {
             ListDetail::Application {
                 scope,
                 version_count,
+                ..
             },
         ) => {
             vec![
@@ -683,6 +685,7 @@ fn resource_item(resource: crate::domain::resource::Resource, show_scope: bool) 
             list = ListDetail::Application {
                 scope: scope.clone(),
                 version_count: releases.len(),
+                recipe: recipe_ref,
             };
             inventory = Some(InventoryInfo {
                 manager,

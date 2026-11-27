@@ -4,6 +4,25 @@ use crate::test_support::TestResult;
 use std::fs::{self, File, OpenOptions};
 
 #[test]
+fn progress_keeps_the_same_circle_and_label_start_with_and_without_color() {
+    let label = "核验新市场与插件";
+    for (phase, suffix) in [
+        (ProgressPhase::Working(0), "·"),
+        (ProgressPhase::Working(2), "···"),
+        (ProgressPhase::Complete, "已完成"),
+        (ProgressPhase::Incomplete, "未完成"),
+    ] {
+        let line = progress_line(label, phase, 50, false);
+        assert_eq!(line, format!("│ ○  {label}  {suffix}"));
+    }
+    let narrow = progress_line(label, ProgressPhase::Incomplete, 16, false);
+    assert_eq!(narrow, "│ ○  核…  未完成");
+    assert_eq!(progress_line(label, ProgressPhase::Complete, 1, false), "○");
+    let colored = progress_line(label, ProgressPhase::Complete, 50, true);
+    assert!(colored.contains("\x1b[1;32m○\x1b[0m"));
+}
+
+#[test]
 fn native_progress_reassembles_split_unicode_and_strips_control_sequences() -> TestResult {
     let temp = tempfile::tempdir()?;
     let output = temp.path().join("terminal");

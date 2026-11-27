@@ -124,7 +124,7 @@ fn static_config(binding: &Binding) -> Result<()> {
     Ok(())
 }
 
-fn verify_owner(ctx: &Context, binding: &Binding, fixture: bool) -> Result<()> {
+pub(super) fn verify_owner(ctx: &Context, binding: &Binding, fixture: bool) -> Result<()> {
     if binding.scope != ctx.scope
         || binding.record_state != ctx.state
         || binding.destination != ctx.home

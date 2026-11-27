@@ -43,13 +43,7 @@ fn physical_install_is_executed_once_and_unknown_stops_only_unattempted_writes()
     let agents = agents(&profiles);
     assert_eq!(agents.len(), 2);
     let options = SkillAgents::default();
-    let request = Request {
-        name: "owner/repo",
-        kind: Operation::Install,
-        agents: &options,
-        revision: None,
-        switch_source: false,
-    };
+    let request = Request::for_target("owner/repo", Operation::Install, &options);
     let candidates = [offer()?];
     for pending in [false, true] {
         let sites = [0, 0, 1]
@@ -144,13 +138,7 @@ fn plugin_catalog_keeps_only_verified_target_commit_and_uses_exact_fallback() ->
     let profiles = resource_agents::profile_roots_matching(&ctx, |client, _| client == "claude")?;
     let agents = agents(&profiles);
     let names = SkillAgents::default();
-    let mut request = Request {
-        name: "owner/repo",
-        kind: Operation::Install,
-        agents: &names,
-        revision: None,
-        switch_source: false,
-    };
+    let mut request = Request::for_target("owner/repo", Operation::Install, &names);
     let sources = PluginSources {
         initial: |_, source| {
             assert_eq!(source, "owner/repo");
@@ -223,11 +211,8 @@ fn source_switch_requires_authorization_and_reuses_one_failed_source_check_for_a
         crate::capability::resource_capabilities::collect_observed(&ctx, &profiles, None, false)?;
     let names = SkillAgents::default();
     let request = Request {
-        name: "owner/repo",
-        kind: Operation::Upgrade,
-        agents: &names,
-        revision: None,
         switch_source: true,
+        ..Request::for_target("owner/repo", Operation::Upgrade, &names)
     };
     let offers = [offer()?];
     for allow_change in [false, true] {
@@ -274,13 +259,7 @@ fn selected_plugin_plans_are_blocked_if_configuration_roots_overlap() -> TestRes
     agents[1].path = &nested;
     let installed = [offer()?];
     let names = SkillAgents::default();
-    let request = Request {
-        name: "owner/repo",
-        kind: Operation::Install,
-        agents: &names,
-        revision: None,
-        switch_source: false,
-    };
+    let request = Request::for_target("owner/repo", Operation::Install, &names);
     let mut sites = agents
         .iter()
         .map(|agent| classify(&ctx, &request, agent, &installed, &[], Some("owner/repo")))

@@ -1199,3 +1199,66 @@ fn config_query_refuses_to_start_when_the_group_observer_is_unavailable() -> Tes
     assert_eq!(f.calls()?, before, "no underlying query may start");
     Ok(())
 }
+
+#[test]
+fn config_details_query_the_selected_file_and_keep_state_when_apply_is_cancelled() -> TestResult {
+    let native = Native::new()?;
+    let target = native.destination.join(".demo");
+    fs::write(&target, "local\n")?;
+    native.enroll()?;
+    let (out, _) = native.run(&["config", "list", "--refresh"])?;
+    assert_code(&out, 0);
+    let metadata = native.fixture.file("state/chezmoi-metadata.json");
+    let before = fs::read(&metadata)?;
+    let baseline = native.calls()?.lines().count();
+    run_browser_pty(
+        &native.fixture,
+        &["config"],
+        "detail-config-operations",
+        &target,
+        "160",
+        "0",
+    )?;
+    assert_eq!(fs::read(metadata)?, before);
+    assert_eq!(fs::read_to_string(target)?, "local\n");
+    let calls = native.calls()?;
+    let new = calls.lines().skip(baseline).collect::<Vec<_>>();
+    assert!(new.contains(&"status"));
+    assert!(new.contains(&"verify"));
+    assert!(!new.contains(&"apply"));
+    assert!(!native.fixture.file("state/active.json").exists());
+    Ok(())
+}
+
+#[test]
+fn config_details_apply_only_the_confirmed_native_target() -> TestResult {
+    let native = Native::new()?;
+    let target = native.destination.join(".demo");
+    fs::write(&target, "local\n")?;
+    native.enroll()?;
+    let (out, _) = native.run(&["config", "list", "--refresh"])?;
+    assert_code(&out, 0);
+    run_browser_pty(
+        &native.fixture,
+        &["config"],
+        "detail-config-apply",
+        &target,
+        "160",
+        "0",
+    )?;
+    assert_eq!(fs::read_to_string(target)?, "fixture\n");
+    assert!(!native.destination.join(".other").exists());
+    assert_eq!(
+        native
+            .calls()?
+            .lines()
+            .filter(|line| *line == "apply")
+            .count(),
+        1
+    );
+    assert_eq!(
+        native.fixture.read_json("state/active.json")?["phase"],
+        "succeeded"
+    );
+    Ok(())
+}

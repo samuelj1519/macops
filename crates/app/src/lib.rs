@@ -112,18 +112,63 @@ fn run(cli: &cli::Cli, warnings: &mut Vec<String>) -> error::Result<CommandOutpu
     if let Some(output) = browser::run(cli, &ctx)? {
         return Ok(CommandOutput::Browser(output));
     }
+    run_direct(cli, &ctx, chezmoi_requested).map(CommandOutput::Data)
+}
+
+fn run_direct(
+    cli: &cli::Cli,
+    ctx: &context::Context,
+    chezmoi_requested: bool,
+) -> error::Result<Value> {
     if !cli.dry_run
         && writes_managed_state(&cli.command)
-        && let Some(recovered) = recover_for_command(cli, &ctx)?
+        && let Some(recovered) = recover_for_command(cli, ctx)?
     {
-        if !skills::portfolio::routed(cli) && repeats_recovered(&ctx, &cli.command, &recovered)? {
-            return Ok(CommandOutput::Data(recovered.result));
+        if !skills::portfolio::routed(cli) && repeats_recovered(ctx, &cli.command, &recovered)? {
+            return Ok(recovered.result);
         }
         if !cli.json {
             eprintln!("已检查上一次操作。现在准备本次操作。");
         }
     }
-    run_scoped(cli, &ctx, chezmoi_requested).map(CommandOutput::Data)
+    run_scoped(cli, ctx, chezmoi_requested)
+}
+
+fn run_inventory_command(ctx: &context::Context, command: cli::Command) -> error::Result<String> {
+    let cli = cli::Cli {
+        command,
+        timeout_secs: ctx.timeout_secs,
+        json: false,
+        dry_run: false,
+        yes: false,
+        verbose: 0,
+        home: None,
+        settings: None,
+        config_dir: None,
+        data_dir: None,
+        state_dir: None,
+        cache_dir: None,
+        catalog: None,
+        chezmoi_source: ctx.chezmoi.source.clone(),
+        chezmoi_destination: ctx.chezmoi.destination.clone(),
+        chezmoi_config: ctx.chezmoi.config.clone(),
+    };
+    let explicit = cli.chezmoi_source.is_some()
+        || cli.chezmoi_destination.is_some()
+        || cli.chezmoi_config.is_some();
+    policy::cli::config_scope(&cli.command, explicit)?;
+    if migration_tx::pending(ctx)? {
+        return Err(migration_tx::recovery_required(ctx));
+    }
+    let result = run_direct(&cli, ctx, explicit)?;
+    Ok(output::command_human(
+        output::TextLayout {
+            columns: terminal::presentation::table_width(),
+            terminal: true,
+        },
+        &cli.command,
+        &result,
+    ))
 }
 
 fn recover_for_command(
@@ -197,6 +242,8 @@ fn may_request_confirmation(ctx: &context::Context, command: &cli::Command) -> b
                         }
                         | SkillCmd::Upgrade(_)
                         | SkillCmd::Remove { .. }
+                        | SkillCmd::Enable { .. }
+                        | SkillCmd::Disable { .. }
                         | SkillCmd::Sync(_)
                         | SkillCmd::Policy {
                             command: Policy::Sync { .. }

@@ -12,6 +12,7 @@ import subprocess
 import sys
 import termios
 import time
+import unicodedata
 
 scenario, target, width, exit_code, *command = sys.argv[1:]
 reader, writer = pty.openpty()
@@ -65,6 +66,45 @@ def type_key(key):
     return offset
 
 
+def expect_screen_row(number, expected, *, exact=True):
+    def read_row():
+        cells = [" "] * int(width)
+        screen = bytes(capture).rsplit(b"\x1b[?1049h", 1)[-1].decode(errors="replace")
+        row, column = 1, 0
+        for text in re.split(r"(\x1b\[[0-?]*[ -/]*[@-~])", screen):
+            if text.startswith("\x1b["):
+                if match := re.fullmatch(r"\x1b\[(\d+);(\d+)H", text):
+                    row, column = map(int, match.groups())
+                    column -= 1
+                elif text == "\x1b[2J":
+                    cells = [" "] * int(width)
+                continue
+            for char in text:
+                if char == "\r":
+                    column = 0
+                elif char == "\n":
+                    row += 1
+                elif char.isprintable():
+                    size = 2 if unicodedata.east_asian_width(char) in ("W", "F") else 1
+                    if row == number and 0 <= column < len(cells):
+                        cells[column:column + size] = [char] + [""] * (size - 1)
+                    column += size
+        return "".join(cells).rstrip()
+
+    def matches(row):
+        return row == expected if exact else expected in row
+
+    limit = time.monotonic() + 12
+    row = read_row()
+    while not matches(row) and time.monotonic() < limit:
+        if select.select([reader], [], [], 0.1)[0]:
+            receive()
+            row = read_row()
+        elif process.poll() is not None:
+            break
+    assert matches(row), (expected, row)
+
+
 try:
     if scenario in ("skill-agent-picker-cancel", "skill-agent-picker-all-cancel"):
         expect("全部 Agent")
@@ -86,16 +126,20 @@ try:
         offset = type_key(b"\r")
         expect("已取消", offset)
     elif scenario in ("skill-adopt-style", "skill-adopt-no-color"):
-        expect("◒")
-        expect("◇")
+        expect("已完成")
         expect("╭─")
         expect("确认操作")
         expect("╰─")
         expect("● 取消")
         expect("○ 确认执行")
+        plain = re.sub(rb"\x1b\[[0-?]*[ -/]*[@-~]", b"", bytes(capture)).decode(errors="replace")
+        progress = [line for line in plain.splitlines() if line.startswith("│ ○  ")]
+        assert any(line.endswith(("  ·", "  ··", "  ···")) for line in progress), progress
+        assert any(line.endswith("  已完成") for line in progress), progress
         if scenario == "skill-adopt-style":
             expect("\x1b[1;36m●")
-            expect("\x1b[1;32m◇")
+            expect("\x1b[1;36m○")
+            expect("\x1b[1;32m○")
         else:
             assert not re.search(rb"\x1b\[[0-9;]*m", capture)
         offset = type_key(b"\x1b[B")
@@ -350,6 +394,80 @@ try:
         offset = type_key(b"a")
         expect("config_scope_unsupported", offset)
         type_key(b"q")
+    elif scenario in ("detail-app-readonly", "detail-declared-upgrade"):
+        expect("软件")
+        offset = type_key(b"/" + target.encode() + b"\r")
+        expect(target, offset)
+        offset = type_key(b"\r")
+        if scenario == "detail-app-readonly":
+            expect("只读", offset)
+            offset = type_key(b"u")
+            expect("暂无已核验的维护入口", offset)
+        else:
+            expect("u 升级", offset)
+            offset = type_key(b"u")
+            expect("Enter 确认升级", offset)
+            offset = type_key(b"\r")
+            expect("升级结果 已完成", offset)
+        type_key(b"q")
+    elif scenario in ("detail-config-operations", "detail-config-apply"):
+        expect("受管配置清单")
+        offset = type_key(b"/.demo\r")
+        expect(".demo", offset)
+        offset = type_key(b"\r")
+        expect("p 应用", offset)
+        offset = type_key(b"d")
+        expect("配置差异", offset)
+        offset = type_key(b"\x1b")
+        expect("v 核验", offset)
+        offset = type_key(b"v")
+        expect("配置核验结果", offset)
+        offset = type_key(b"\x1b")
+        expect("p 应用", offset)
+        offset = type_key(b"p")
+        expect("Native apply", offset)
+        if scenario == "detail-config-apply":
+            offset = type_key(b"\x1b[B\r")
+            expect("配置应用结果", offset)
+        else:
+            offset = type_key(b"\r")
+            expect("已取消", offset)
+        type_key(b"q")
+    elif scenario == "detail-agent-upgrade":
+        expect("Agent")
+        offset = type_key(b"r")
+        expect("1.0.0", offset)
+        offset = type_key("/本机固定版本 claude\r".encode())
+        expect("claude", offset)
+        offset = type_key(b"\r")
+        expect("u 升级 Agent CLI", offset)
+        offset = type_key(b"u")
+        expect("升级 Agent CLI claude", offset)
+        offset = type_key(b"\r")
+        expect("已取消", offset)
+        type_key(b"q")
+    elif scenario == "detail-codex-remove":
+        expect("软件")
+        offset = type_key(b"\t")
+        expect("widget@fixture", offset)
+        offset = type_key(b"/widget\r")
+        expect("widget", offset)
+        offset = type_key(b"\r")
+        expect("卸载插件", offset)
+        offset = type_key(b"x")
+        expect("暂不能操作", offset)
+        type_key(b"q")
+    elif scenario == "detail-plugin-scope":
+        expect("软件")
+        offset = type_key(b"\t")
+        expect("能力", offset)
+        offset = type_key(b"/widget @claude:mi\r")
+        expect("widget @claude:mi", offset)
+        offset = type_key(b"\r")
+        expect("e 启用", offset)
+        offset = type_key(b"e")
+        expect("已达到目标", offset)
+        type_key(b"q")
     elif scenario in ("inventory-adopt", "inventory-adopt-cancel", "inventory-remove", "inventory-upgrade-cancel", "inventory-upgrade-migration"):
         expect("Tab 切换")
         offset = type_key(b"/" + target.encode() + b"\r")
@@ -599,18 +717,20 @@ try:
             expect("可发现 claude:default", offset)
         type_key(b"q")
     elif scenario == "skill-location-groups":
-        expect("安装位置")
-        expect("[全部]")
+        expect_screen_row(2, "←/→ 安装位置 · [全部]")
         for label in ("Claude Code", "claude:glm", "claude:mi", "Codex", "Cursor", "共享技能"):
             offset = type_key(b"\x1b[C")
-            expect(f"[{label}]", offset)
+            expect_screen_row(2, f"←/→ 安装位置 · [{label}]")
             if label == "Cursor":
-                expect("cursor-only", offset)
+                expect_screen_row(6, "cursor-only", exact=False)
                 assert all(name not in capture[offset:] for name in (b"claude-import", b"codex-import", b"fixture-skill"))
             elif label == "claude:glm":
-                expect("glm-only", offset)
+                expect_screen_row(6, "glm-only", exact=False)
             elif label in ("claude:mi", "共享技能"):
-                expect("fixture-skill", offset)
+                expect_screen_row(6, "fixture-skil" if int(width) < 80 else "fixture-skill", exact=False)
+        type_key("/一个很长的搜索词 @claude:mi\r".encode())
+        expect_screen_row(3, "/ 搜索 · 一个很长的搜索词 @claude:mi")
+        expect_screen_row(2, "←/→ 安装位置 · [共享技能]")
         type_key(b"q")
     elif scenario == "skill-partial":
         expect("能力盘点不完整")

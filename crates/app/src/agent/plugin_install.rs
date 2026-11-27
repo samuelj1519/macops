@@ -49,16 +49,33 @@ impl Offer {
         }
     }
 
-    pub(crate) fn label(&self) -> String {
-        match self {
-            Self::Codex(offer, _) => {
-                format!("{} · Codex · {}", offer.native_id(), offer.declared_version)
-            }
-            Self::Claude(offer, _) => {
-                format!("{} · Claude Code · {}", offer.native_id(), offer.version)
-            }
+    pub(crate) fn label(&self, verbose: bool) -> String {
+        let (name, market, client, version) = match self {
+            Self::Codex(offer, _) => (
+                &offer.plugin,
+                &offer.marketplace,
+                "Codex",
+                &offer.declared_version,
+            ),
+            Self::Claude(offer, _) => (
+                &offer.plugin,
+                &offer.marketplace,
+                "Claude Code",
+                &offer.version,
+            ),
+        };
+        if verbose {
+            format!("安装插件 {name} · {client} · {version} · 插件 ID {name}@{market}")
+        } else {
+            format!("安装插件 {name} · {client} · {version}")
         }
     }
+}
+
+pub(crate) fn display_name(native_id: &str) -> &str {
+    native_id
+        .rsplit_once('@')
+        .map_or(native_id, |(name, _)| name)
 }
 
 pub(crate) fn offers(ctx: &Context, data: &Value) -> Vec<Offer> {
@@ -299,6 +316,7 @@ fn install_profiles_using(
     install: impl FnMut(InitialActivation, InstallTarget) -> Result<Value>,
 ) -> Result<Value> {
     let (plugin, version, url, commit) = choice.plugin_info()?;
+    let plugin = display_name(&plugin);
     profile_install::execute(
         ctx,
         targets,
@@ -522,6 +540,7 @@ fn install_isolated_using(
     install: impl FnOnce(InitialActivation) -> Result<Value>,
 ) -> Result<Value> {
     let (plugin, version, url, commit) = choice.plugin_info()?;
+    let plugin = display_name(&plugin);
     terminal(
         TerminalLine::Heading,
         &format!("在新建的单独配置中安装 {plugin} · {version}"),

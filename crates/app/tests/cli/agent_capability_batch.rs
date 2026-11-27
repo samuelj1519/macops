@@ -696,3 +696,50 @@ fn resource_query_refuses_a_file_in_place_of_project_directory() -> TestResult {
     assert!(!f.file("state").exists());
     Ok(())
 }
+
+#[test]
+fn plugin_details_use_only_the_selected_user_deployment() -> TestResult {
+    let f = Fixture::new()?;
+    for (name, enabled) in [("mi", true), ("glm", false)] {
+        let profile = f.home.join(format!(".claude-{name}"));
+        claude_plugin(&profile, "fixture", "1.0.0")?;
+        write_json(
+            &profile.join("settings.json"),
+            &json!({"enabledPlugins":{"widget@fixture":enabled}}),
+        )?;
+    }
+    let other = f.home.join(".claude-glm/settings.json");
+    let bytes = fs::read(&other)?;
+    super::chezmoi_native::run_browser_pty(
+        &f,
+        &["app"],
+        "detail-plugin-scope",
+        &f.home,
+        "160",
+        "0",
+    )?;
+    assert_eq!(fs::read(other)?, bytes);
+    assert!(!f.file("state").exists());
+    Ok(())
+}
+
+#[test]
+fn plugin_details_route_configured_codex_plugin_to_its_native_guard() -> TestResult {
+    let f = Fixture::new()?;
+    let profile = f.home.join(".codex");
+    fs::create_dir_all(profile.join("plugins/cache/fixture/widget/1.0.0"))?;
+    let config = profile.join("config.toml");
+    let original = "[plugins.'widget@fixture']\nenabled=true\n";
+    fs::write(&config, original)?;
+    super::chezmoi_native::run_browser_pty(
+        &f,
+        &["app"],
+        "detail-codex-remove",
+        &f.home,
+        "160",
+        "0",
+    )?;
+    assert_eq!(fs::read_to_string(config)?, original);
+    assert!(!f.file("state").exists());
+    Ok(())
+}

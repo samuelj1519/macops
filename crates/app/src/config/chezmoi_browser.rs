@@ -340,6 +340,14 @@ impl ConfigBrowser {
             path: path.clone(),
         })
     }
+
+    pub(crate) fn supports_forget(&self, ctx: &Context) -> bool {
+        self.knowledge != Knowledge::Historical
+            && self
+                .cache
+                .as_ref()
+                .is_some_and(|cache| super::source::supports_forget(ctx, cache))
+    }
 }
 
 fn visible_configs(

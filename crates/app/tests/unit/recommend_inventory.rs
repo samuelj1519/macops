@@ -205,7 +205,7 @@ fn recommendation_reports_market_declaration_as_evidence_and_keeps_overflow_reac
             repository: None,
         }),
     };
-    let related = Related {
+    let mut related = Related {
         views: vec![(
             Kind::Capabilities,
             View {
@@ -214,8 +214,14 @@ fn recommendation_reports_market_declaration_as_evidence_and_keeps_overflow_reac
                     plugin("declared", State::Declared, vec!["claude:mi".into()]),
                     plugin("unknown", State::Unknown, vec![]),
                     plugin("missing", State::Missing, vec![]),
-                    plugin("extra", State::Present, vec![]),
-                ],
+                    plugin("extra@feature@local-market", State::Present, vec![]),
+                ]
+                .into_iter()
+                .chain(
+                    (5..=10)
+                        .map(|index| plugin(&format!("plugin-{index}"), State::Present, vec![])),
+                )
+                .collect(),
                 coverage: "partial",
                 difference_coverage: "not_applicable",
                 observed_at: None,
@@ -233,11 +239,20 @@ fn recommendation_reports_market_declaration_as_evidence_and_keeps_overflow_reac
         "已声明",
         "待核验",
         "载荷缺失",
-        "另有 1 项",
+        "extra@feature",
+        "plugin-10",
     ] {
         assert!(status.contains(label), "{label}\n{status}");
     }
-    assert!(!status.contains("extra"));
+    assert!(!status.contains("另有"));
+    assert!(!status.contains("local-market"));
+    related.views[0]
+        .1
+        .items
+        .push(plugin("plugin-11", State::Present, vec![]));
+    let status = related.status();
+    assert!(status.contains("plugin-10") && status.contains("另有 1 项"));
+    assert!(!status.contains("plugin-11"));
     assert!(related.maintenance(1).contains("查看技能与插件"));
 }
 
