@@ -472,3 +472,37 @@ fn shared_skill_name_does_not_also_select_an_unrelated_native_plugin() -> TestRe
     assert!(!f.home.join(".agents/skills/widget").exists());
     Ok(())
 }
+
+#[test]
+fn tagged_upgrade_first_records_current_shared_skill_and_preserves_requested_tag() -> TestResult {
+    let f = Fixture::new()?;
+    native_skill_fixture(&f, &["widget"])?;
+    super::public_skill_runner(&f)?;
+    let source = "owner/repo@v2.0.0";
+    let (out, incompatible) =
+        f.run(&["skill", "upgrade", source, "--only", "widget", "--dry-run"])?;
+    assert_code(&out, 3);
+    assert_eq!(incompatible["error"]["code"], "source_revision_selection");
+    let (out, preview) = f.run(&["skill", "upgrade", source, "--dry-run"])?;
+    assert_code(&out, 0);
+    assert_eq!(preview["data"]["skillAction"], "adopt");
+    assert_eq!(
+        preview["data"]["next"],
+        format!("mo skill upgrade {source}")
+    );
+    assert!(!f.file("state").exists());
+    let (out, adopted) = f.run(&["skill", "upgrade", source, "--yes"])?;
+    assert_code(&out, 0);
+    assert_eq!(
+        adopted["data"]["results"][0]["journal"]["phase"],
+        "succeeded"
+    );
+    assert_eq!(
+        adopted["data"]["next"],
+        format!("mo skill upgrade {source}")
+    );
+    assert!(!f.home.join("native-calls.jsonl").exists());
+    let lock: Value = serde_json::from_slice(&fs::read(f.home.join(".agents/.skill-lock.json"))?)?;
+    assert_eq!(lock["skills"]["widget"]["commit"], "a".repeat(40));
+    Ok(())
+}

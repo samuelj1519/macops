@@ -240,3 +240,42 @@ fn recommendation_reports_market_declaration_as_evidence_and_keeps_overflow_reac
     assert!(!status.contains("extra"));
     assert!(related.maintenance(1).contains("查看技能与插件"));
 }
+
+#[test]
+fn registered_market_without_a_verified_github_origin_never_supplies_repository_identity()
+-> crate::test_support::TestResult {
+    use crate::agent::plugin_marketplaces::registered_github_repository;
+    use std::fs;
+    let root = tempfile::tempdir_in("/private/tmp")?;
+    let ctx = fixture_context(root.path())?;
+    let config = ctx.home.join("config.toml");
+    let query = |id| registered_github_repository(&ctx, "codex-config", &config, id);
+    let id = "widget@fixture";
+    for options in [
+        "model = 'example'",
+        "[marketplaces.other]\nsource_type = 'git'\nsource = 'https://github.com/owner/repo.git'",
+        "[marketplaces.fixture]\nsource_type = 'directory'\nsource = '/fixture/local'",
+        "[marketplaces.fixture]\nsource_type = 'git'\nsource = 'https://example.org/foreign/repo'",
+    ] {
+        fs::write(&config, options)?;
+        assert!(query(id)?.is_none());
+    }
+    for invalid in [
+        "[broken",
+        "marketplaces = []",
+        "[marketplaces.fixture]\nsource_type = 'git'\nsource = 'https://github.com/owner/repo/extra'",
+        "[marketplaces.fixture]\nsource_type = 'git'",
+    ] {
+        fs::write(&config, invalid)?;
+        assert!(query(id).is_err());
+    }
+    fs::write(
+        &config,
+        "[marketplaces.fixture]\nsource_type = 'git'\nsource='https://github.com/owner/repo.git'",
+    )?;
+    assert_eq!(query(id)?.ok_or("repository")?.key(), "owner/repo");
+    assert!(query("widget")?.is_none());
+    assert!(registered_github_repository(&ctx, "other", &config, id)?.is_none());
+    assert!(!ctx.state.exists());
+    Ok(())
+}

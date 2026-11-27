@@ -708,3 +708,43 @@ fn recovered_skill_operation_reuses_only_matching_recipe_identity_and_revision()
     assert!(!ctx.home.join("check-called").exists());
     Ok(())
 }
+
+#[test]
+fn recommendation_shows_recorded_recipe_only_after_its_native_installation_is_absent() -> TestResult
+{
+    let (_temp, ctx, recipe) = fixture()?;
+    adopt(&ctx, &recipe)?;
+    assert_eq!(recommended_recipes(&ctx, "owner/repo")?, [] as [Recipe; 0]);
+    let payload = disk::payload(&ctx, "alpha")?;
+    let native_registry = disk::lock_path(&ctx);
+    fs::remove_file(&native_registry)?;
+    assert_eq!(recommended_recipes(&ctx, "alpha")?, [] as [Recipe; 0]);
+    fs::remove_dir_all(&payload)?;
+    let published = recommended_recipes(&ctx, "ALPHA")?;
+    assert_eq!(published.len(), 1);
+    assert_eq!(published[0].source.repository, "owner/repo");
+    assert_eq!(recommended_recipes(&ctx, "owner/repo")?, published);
+    assert_eq!(recommended_recipes(&ctx, "unrelated")?, [] as [Recipe; 0]);
+    Ok(())
+}
+
+#[test]
+fn installed_skill_supplies_a_read_only_outdated_hint_before_recipe_registration() -> TestResult {
+    let (_temp, ctx, _recipe) = fixture()?;
+    let payload = disk::payload(&ctx, "alpha")?;
+    let id = policy::installation_id(&payload)?;
+    let before = fs::read(disk::lock_path(&ctx))?;
+    for key in ["alpha", "skill:alpha", "source:owner/repo", id.as_str()] {
+        let view = outdated(&ctx, Some(key), &[])?;
+        let row = &view["resources"][0];
+        assert_eq!(row["id"], id);
+        assert_eq!(row["reason"], "recipe_required");
+        assert_eq!(view["persistentWrites"], false);
+        assert_eq!(view["networkInvoked"], false);
+    }
+    let empty = outdated(&ctx, Some("unrelated"), &[])?;
+    assert_eq!(empty["resources"], json!([]));
+    assert_eq!(fs::read(disk::lock_path(&ctx))?, before);
+    assert!(!ctx.state.exists() && !ctx.cache.exists() && !ctx.home.join("check-called").exists());
+    Ok(())
+}

@@ -106,3 +106,35 @@ fn failed_tracking_candidate_preserves_the_last_complete_candidate_cache() -> Te
     assert_eq!(fs::read(cache_path)?, settled);
     Ok(())
 }
+
+#[test]
+fn refresh_labels_a_native_tracking_ref_and_preserves_cache_if_runner_changes() -> TestResult {
+    let (_temp, ctx, mut recipe) = fixture()?;
+    let recorded = disk::lock_path(&ctx);
+    let mut register: Value = serde_json::from_slice(&fs::read(&recorded)?)?;
+    register["skills"]["alpha"]["ref"] = json!("HEAD");
+    fs::write(&recorded, serde_json::to_vec(&register)?)?;
+    recipe.source.tracking_ref = Some("HEAD".into());
+    adopt(&ctx, &recipe)?;
+    let mock = |_: &Context, candidate: &Recipe| {
+        Ok((
+            candidate.source.commit.clone(),
+            "e".repeat(64),
+            "b".repeat(40),
+        ))
+    };
+    let viewed = refresh_with_candidate(&ctx, &selection(), false, mock)?;
+    assert_eq!(
+        viewed["results"][0]["nativePinCheck"]["scope"],
+        "registered-ref"
+    );
+    fs::remove_file(ctx.home.join("check-called"))?;
+    let cache = ctx.cache.join("native-skills-checks.json");
+    let original = fs::read(&cache)?;
+    fs::write(&recipe.runner.entry, b"changed during maintenance")?;
+    let next = refresh_with_candidate(&ctx, &selection(), false, mock);
+    assert!(next.is_err());
+    assert_eq!(fs::read(cache)?, original);
+    assert!(!ctx.home.join("check-called").exists());
+    Ok(())
+}

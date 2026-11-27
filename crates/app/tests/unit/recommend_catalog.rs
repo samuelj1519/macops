@@ -484,3 +484,58 @@ fn recommendation_offers_shared_install_only_with_supported_local_runner() -> Te
     assert!(!ctx.state.exists());
     Ok(())
 }
+
+#[test]
+fn source_failure_guidance_is_specific_and_prefers_install_document_when_present() {
+    for (reason, guidance) in [
+        ("recommend_github_rate_limited", "等 GitHub 查询额度恢复"),
+        (
+            "recommend_github_not_found",
+            "核对 GitHub 仓库名称和访问权限",
+        ),
+        ("recommend_source_unavailable", "核对来源地址和网络连接"),
+    ] {
+        let message = no_install_plan(&json!({"reason":reason}));
+        assert!(
+            message.contains("错误表现")
+                && message.contains("错误原因")
+                && message.contains(guidance)
+        );
+    }
+    let repository = no_install_plan(&json!({"repository":"owner/repo"}));
+    assert!(repository.contains("打开 https://github.com/owner/repo"));
+    assert!(no_install_plan(&json!({})).contains("mo recommend OWNER/REPO"));
+    let docs = no_install_plan(&json!({"documents":[{"path":"README.md"},{"path":"INSTALL.md"}]}));
+    assert!(docs.contains("打开上面的 INSTALL.md"));
+    assert!(
+        no_install_plan(&json!({"documents":[{"path":"README.md"}]}))
+            .contains("打开上面的 README.md")
+    );
+}
+
+#[test]
+fn recommendation_model_fallback_explains_each_recovery_action() {
+    for (status, guidance) in [
+        ("profile-unavailable", "检查设置"),
+        ("transport-unavailable", "检查网络"),
+        ("deadline", "可以重试"),
+        ("http-status", "测试连接"),
+        ("unverified-response", "按来源文档"),
+        ("output-limit", "按来源文档"),
+        ("suggested", "没有返回可引用"),
+        ("keychain-authorization-required", "允许访问"),
+        ("keychain-missing", "重新设置或绑定密钥"),
+        ("keychain-unavailable", "检查已保存的密钥"),
+    ] {
+        let response = json!({"status":status,"candidates":[]});
+        assert!(
+            recommendation_model_hint(&response).is_some_and(|hint| hint.contains(guidance)),
+            "{status}"
+        );
+    }
+    assert!(
+        recommendation_model_hint(&json!({"status":"suggested","candidates":[{"name":"widget"}]}))
+            .is_none()
+    );
+    assert!(recommendation_model_hint(&json!({})).is_none());
+}

@@ -293,3 +293,60 @@ fn selected_plugin_plans_are_blocked_if_configuration_roots_overlap() -> TestRes
     assert!(!ctx.state.exists());
     Ok(())
 }
+
+#[test]
+fn verified_source_switch_previews_new_version_and_skips_already_verified_target() -> TestResult {
+    for installed in [false, true] {
+        let (_temp, ctx, offer, basis) =
+            crate::test_support::PluginTargetFixture::planned_switch(installed)?;
+        let roots = supported_profiles(&ctx)?;
+        let agents = agents(&roots);
+        let (local, _) =
+            crate::capability::resource_capabilities::collect_observed(&ctx, &roots, None, false)?;
+        let target = "owner/repo";
+        let names = SkillAgents::default();
+        let request = Request {
+            switch_source: true,
+            ..Request::for_target(target, Operation::Upgrade, &names)
+        };
+        let offers = [plugin_install::Offer::Claude(
+            Box::new(offer),
+            "/fixture/native".into(),
+        )];
+        let mut sites = agents
+            .iter()
+            .map(|agent| classify(&ctx, &request, agent, &offers, &local, Some(target)))
+            .collect::<Vec<_>>();
+        let mut prepared = Some(basis);
+        plan_source_switches(
+            &ctx,
+            &request,
+            &mut sites,
+            &offers,
+            &local,
+            SwitchRequest {
+                repository: target,
+                allow_change: true,
+            },
+            |_, _| prepared.take().ok_or_else(selector_error),
+        );
+        let rows = preview(&ctx, &request, &sites, &offers, &agents);
+        if installed {
+            assert_eq!(rows[0]["status"], "current");
+            assert!(sites[0].work.is_none());
+        } else {
+            assert_eq!(rows[0]["status"], "planned");
+            assert_eq!(rows[0]["targetVersion"], "2.0.0");
+            assert!(
+                rows[0]["reason"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("换源并升级")
+            );
+            assert!(matches!(sites[0].work, Some(Work::Switch(_))));
+        }
+        assert!(prepared.is_none());
+        assert!(!ctx.state.exists());
+    }
+    Ok(())
+}

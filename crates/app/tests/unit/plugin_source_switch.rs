@@ -135,7 +135,7 @@ const INITIAL: &[u8] = br#"{"name":"widget","version":"1.0.0"}"#;
 const UPDATED: &[u8] = br#"{"name":"widget","version":"2.0.0"}"#;
 
 struct SwitchFixture {
-    _temp: tempfile::TempDir,
+    temp: tempfile::TempDir,
     profile: PathBuf,
     old: PathBuf,
     ctx: Context,
@@ -183,7 +183,7 @@ impl SwitchFixture {
         files.reverse();
         let basis = SwitchOffer::from_checkout(&offer, &binary, &checkout, files)?;
         let fixture = Self {
-            _temp: temp,
+            temp,
             profile,
             old,
             ctx,
@@ -388,4 +388,28 @@ fn switch_refuses_stale_settings_and_new_market_with_additional_plugins() -> Tes
     let facts = capability_local::claude_market_files(&checkout)?;
     assert!(SwitchOffer::from_checkout(&f.basis.offer, &f.basis.binary, &checkout, facts).is_err());
     Ok(())
+}
+
+impl crate::test_support::PluginTargetFixture {
+    pub(crate) fn planned_switch(
+        installed: bool,
+    ) -> std::result::Result<
+        (tempfile::TempDir, Context, Offer, SwitchOffer),
+        Box<dyn std::error::Error>,
+    > {
+        let f = SwitchFixture::new()?;
+        if installed {
+            let market = &f.basis.market;
+            let slot = market_slot(&f.target, MARKET)?;
+            SwitchFixture::populate(&slot, UPDATED)?;
+            f.register_market(&slot, &market.declaration())?;
+            let settings = f.profile.join(SETTINGS);
+            let mut bytes = std::fs::read(&settings)?;
+            change_source(&mut bytes, MARKET, &market.declaration())?;
+            std::fs::write(settings, bytes)?;
+            SwitchFixture::populate(&f.cache("2.0.0"), UPDATED)?;
+            f.register("2.0.0")?;
+        }
+        Ok((f.temp, f.ctx, f.basis.offer.clone(), f.basis))
+    }
 }

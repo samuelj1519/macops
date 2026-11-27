@@ -442,3 +442,53 @@ fn invalid_or_non_unique_native_plugin_evidence_stays_read_only() -> TestResult 
     assert!(!f.ctx.state.exists());
     Ok(())
 }
+
+#[test]
+fn cli_recovery_previews_and_closes_a_prepared_plugin_stage_without_launching_it() -> TestResult {
+    let f = Fixture::new("claude")?;
+    f.claude_install("1.0.0")?;
+    f.claude_settings(&json!(true))?;
+    let original = fs::read(f.path("settings.json"))?;
+    let intent = f.intent(Desired::Enabled(false))?;
+    let store = Store::lock(&f.ctx)?;
+    let stopped = intent.run_locked_with(&f.ctx, &store, |_, _, _| {
+        Err(Error::attention("fixture_stopped", "no native launch"))
+    });
+    assert!(stopped.is_err());
+    let saved = crate::operations::store::active(&f.ctx)?.ok_or("prepared journal")?;
+    assert_eq!(saved.phase, Phase::Prepared);
+    drop(store);
+    let run = |args: &[&str]| -> std::result::Result<Value, Box<dyn std::error::Error>> {
+        let cli = Cli::try_parse_from(
+            [
+                "mo",
+                "--json",
+                "--home",
+                f.ctx.home.to_str().ok_or("fixture home")?,
+                "recover",
+            ]
+            .into_iter()
+            .chain(args.iter().copied()),
+        )?;
+        match crate::run(&cli, &mut vec![])? {
+            crate::CommandOutput::Data(value) => Ok(value),
+            crate::CommandOutput::Browser(_) => Err("unexpected browser".into()),
+        }
+    };
+    let listed = run(&[])?;
+    assert_eq!(listed["pending"][0]["id"], saved.id);
+    let report = run(&[&saved.id, "--dry-run"])?;
+    assert_eq!(report["persistentWrites"], false);
+    assert_eq!(
+        crate::operations::store::active(&f.ctx)?
+            .ok_or("still pending")?
+            .phase,
+        Phase::Prepared
+    );
+    let finished = run(&[&saved.id])?;
+    assert_eq!(finished["journal"]["id"], saved.id);
+    assert_eq!(finished["journal"]["phase"], "failed");
+    assert_eq!(fs::read(f.path("settings.json"))?, original);
+    assert!(read_facts(&f.target, ID)?.installed);
+    Ok(())
+}

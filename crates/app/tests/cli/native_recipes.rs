@@ -496,3 +496,29 @@ fn compiled_schema3_malformed_commit_or_skill_path_refuses_before_native_and_pre
     }
     Ok(())
 }
+
+#[test]
+fn legacy_app_upgrade_uses_exact_skill_installation_without_writing_on_preview() -> TestResult {
+    let native = NativeFixture::new()?;
+    let (out, installed) = native.install()?;
+    assert_code(&out, 0);
+    let id = installed["data"]["journal"]["plan"]["package"]["id"]
+        .as_str()
+        .ok_or("skill identity")?;
+    let before = fs::read(native.f.file("state/active.json"))?;
+    let request = "b".repeat(40);
+    let (out, planned) =
+        native
+            .f
+            .run(&["app", "upgrade", id, "--version", &request, "--dry-run"])?;
+    assert_code(&out, 0);
+    assert_eq!(
+        planned["data"]["results"][0]["recipe"]["source"]["commit"], request,
+        "{planned}"
+    );
+    assert_eq!(planned["data"]["results"][0]["networkInvoked"], false);
+    assert_eq!(planned["data"]["results"][0]["persistentWrites"], false);
+    assert_eq!(native.calls()?.len(), 1);
+    assert_eq!(fs::read(native.f.file("state/active.json"))?, before);
+    Ok(())
+}

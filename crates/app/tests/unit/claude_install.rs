@@ -2280,6 +2280,7 @@ fn uninstall_archives_a_verified_profile_without_rewriting_its_receipt() -> Test
         .nth(2)
         .ok_or("allocation")?
         .to_path_buf();
+    fs::write(profile.join("user-notes.txt"), b"preserve")?;
     let selected = crate::agent::resource_agents::profile_roots(&ctx)?.into_iter()
         .find(|item| matches!(&item.data, crate::domain::resource::Data::Agent{config_dir,..} if config_dir==&profile))
         .ok_or("profile")?;
@@ -2324,6 +2325,10 @@ fn uninstall_archives_a_verified_profile_without_rewriting_its_receipt() -> Test
     assert_eq!(done["phase"], "succeeded");
     assert!(!root.exists());
     assert!(archive.join("home/.claude/settings.json").is_file());
+    assert_eq!(
+        fs::read(archive.join("home/.claude/user-notes.txt"))?,
+        b"preserve"
+    );
     assert!(ctx.home.join(".claude-glm").exists());
     assert!(
         crate::agent::resource_agents::profile_roots(&ctx)?
@@ -2335,5 +2340,41 @@ fn uninstall_archives_a_verified_profile_without_rewriting_its_receipt() -> Test
         crate::catalog::target::receipts(&ctx)?.installations.len(),
         0
     );
+    Ok(())
+}
+
+#[test]
+fn published_checkout_identity_cannot_be_reused_for_a_different_target_or_changed_tree()
+-> TestResult {
+    let (_tmp, ctx, offer, binary) = fixture()?;
+    let result = install_using(&ctx, offer.clone(), binary, true, &FIXTURE)?;
+    let profile = Path::new(result["claudeConfigDir"].as_str().ok_or("profile")?);
+    let markets: Value =
+        serde_json::from_slice(&fs::read(profile.join("plugins/known_marketplaces.json"))?)?;
+    let checkout = Path::new(
+        markets[&offer.marketplace]["installLocation"]
+            .as_str()
+            .ok_or("market checkout")?,
+    );
+    let plugin = offer.native_id();
+    let recorded =
+        registered_checkout_source(&ctx, profile, &plugin, checkout)?.ok_or("recorded source")?;
+    assert_eq!(recorded.0.key(), offer.repository);
+    assert_eq!(recorded.1, offer.commit);
+    assert!(
+        registered_checkout_source(&ctx, &ctx.home.join(".claude-glm"), &plugin, checkout)?
+            .is_none()
+    );
+    assert!(registered_checkout_source(&ctx, profile, "other@fixture-market", checkout)?.is_none());
+
+    fs::write(checkout.join("skills/fixture/SKILL.md"), b"modified")?;
+    assert!(registered_checkout_source(&ctx, profile, &plugin, checkout).is_err());
+    let payload = profile.join("plugins/cache/fixture-market/fixture-plugin/1.0.0");
+    for (relative, _, _) in FILES {
+        fs::set_permissions(
+            payload.join(relative),
+            fs::metadata(checkout.join(relative))?.permissions(),
+        )?;
+    }
     Ok(())
 }
