@@ -885,16 +885,6 @@ pub(crate) fn recovery_target(journal: &Journal) -> Result<Option<InstallTarget>
     }
 }
 
-#[cfg(test)]
-pub(crate) fn recovery_matches(
-    journal: &Journal,
-    selected: Option<&InstallTarget>,
-) -> Result<bool> {
-    Ok(recovery_target(journal)?
-        .as_ref()
-        .is_none_or(|original| selected == Some(original)))
-}
-
 pub(crate) fn previous(
     ctx: &Context,
     store: &Store,

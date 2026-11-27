@@ -358,7 +358,7 @@ fn existing_claude_target_resumes_market_or_activation_without_repeating_verifie
             },
             &FIXTURE,
         )?;
-        assert!(crate::agent::plugin_target::recovery_matches(
+        assert!(crate::test_support::recovery_matches(
             &market,
             Some(&target)
         )?);

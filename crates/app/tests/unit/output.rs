@@ -73,7 +73,14 @@ fn human_fallbacks_and_legacy_output_keep_information() {
 fn journey(args: &[&str], value: &Value) -> Result<String, clap::Error> {
     use clap::Parser;
     let cli = crate::cli::Cli::try_parse_from(std::iter::once("mo").chain(args.iter().copied()))?;
-    Ok(command_human(&cli.command, value))
+    Ok(command_human(
+        TextLayout {
+            columns: 80,
+            terminal: false,
+        },
+        &cli.command,
+        value,
+    ))
 }
 
 fn assert_journeys(cases: &[(&[&str], Value, &str)]) -> crate::test_support::TestResult {
@@ -530,6 +537,10 @@ fn agent_uninstall_reports_the_archive_location_for_preview_and_completion()
     for (mode, title) in [("dry-run", "卸载预览"), ("live", "已归档")] {
         let data = json!({"mode":mode,"profile":"Codex · example","location":"/fixture/profile","archive":"/fixture/.archived-profile"});
         let summary = agent_summary(
+            TextLayout {
+                columns: 80,
+                terminal: false,
+            },
             &AgentCmd::Uninstall {
                 profile: "fixture".into(),
             },
@@ -540,4 +551,46 @@ fn agent_uninstall_reports_the_archive_location_for_preview_and_completion()
         assert!(summary.contains("归档目录 /fixture/.archived-profile"));
     }
     Ok(())
+}
+
+#[test]
+fn command_tables_use_the_supplied_terminal_width() {
+    let layout = TextLayout {
+        columns: 40,
+        terminal: true,
+    };
+    let text = command_human(
+        layout,
+        &Command::History { query: None },
+        &json!([{"id": "OP-fixture", "plan": {"package": {"name": "配置"}, "action": "install"}}]),
+    );
+    assert!(text.contains("操作号"));
+    assert!(text.contains("OP-fixture"));
+    assert!(text.contains("配置"));
+    assert!(!text.contains('\t'));
+}
+
+#[test]
+fn agent_batch_summary_distinguishes_work_done_from_existing_state() {
+    let mut data = json!({
+        "agentBatch": true,
+        "verb": "升级",
+        "results": [
+            {"agent": "claude-mi", "status": "current"},
+            {"agent": "claude-glm", "status": "changed"},
+            {"agent": "claude-kimi", "status": "not-installed"},
+        ],
+    });
+    let layout = TextLayout {
+        columns: 80,
+        terminal: false,
+    };
+    let command = Command::Search {
+        query: "fixture".into(),
+    };
+    let text = command_human(layout, &command, &data);
+    assert!(text.contains("2/2 个适用 Agent 已达到目标"));
+    assert!(text.contains("本次修改 1 · 已达目标 1 · 未安装 1"));
+    data["mode"] = json!("dry-run");
+    assert!(command_human(layout, &command, &data).starts_with("预演 · 升级\n"));
 }

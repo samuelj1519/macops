@@ -104,3 +104,12 @@ pub fn book() -> Book {
 
 #[path = "brew_support.rs"]
 pub(crate) mod brew;
+
+pub(crate) fn recovery_matches(
+    journal: &crate::domain::Journal,
+    selected: Option<&crate::agent::resource_agents::InstallTarget>,
+) -> crate::error::Result<bool> {
+    Ok(crate::agent::plugin_target::recovery_target(journal)?
+        .as_ref()
+        .is_none_or(|original| selected == Some(original)))
+}

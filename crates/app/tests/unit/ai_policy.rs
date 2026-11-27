@@ -98,8 +98,42 @@ node = "24.0.0"
     let drift = next.replace("x64/{{ version }}", "other/{{ version }}");
     assert!(matches!(
         config_tx::evaluate_mise_reconcile(&drift, old, Some("cursor"))?,
-        config_tx::MiseReconcilePlan::Drift { .. }
+        config_tx::MiseReconcilePlan::Drift { reason, .. } if reason == "tool_options_drifted"
+    ));
+    assert!(matches!(
+        config_tx::evaluate_mise_reconcile(&drift, &next, None)?,
+        config_tx::MiseReconcilePlan::Drift { rows, .. }
+            if rows.iter().any(|row| row.key == "http:cursor-agent" && row.live.contains("下载选项"))
     ));
     assert!(pin(&old.replace("version_regex", "postinstall"), "cursor").is_err());
+    Ok(())
+}
+
+#[test]
+fn cursor_http_pin_requires_a_complete_string_download_descriptor() -> TestResult {
+    let parse = |value| {
+        pin(
+            &format!("[tools]\n\"http:cursor-agent\" = {value}\n"),
+            "cursor",
+        )
+    };
+    assert_eq!(
+        parse("{ version = '1.0.0', url = 'https://example.test/cursor' }")?,
+        "1.0.0"
+    );
+    for descriptor in [
+        "{ version = '1.0.0', version_list_url = 'https://example.test/releases' }",
+        "{ version = '1.0.0', url = 9 }",
+        "{ version = '1.0.0', platforms = [] }",
+        "{ version = '1.0.0', platforms = {} }",
+        "{ version = '1.0.0', platforms = { macos-arm64 = false } }",
+        "{ version = '1.0.0', platforms = { macos-arm64 = { url = 9 } } }",
+        "{ version = '1.0.0', platforms = { macos-arm64 = { url = 'here', path = 'there' } } }",
+    ] {
+        assert_eq!(
+            parse(descriptor).err().ok_or(descriptor)?.code,
+            "unsupported_mise_pin_shape"
+        );
+    }
     Ok(())
 }

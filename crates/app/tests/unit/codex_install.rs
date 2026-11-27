@@ -293,13 +293,11 @@ fn existing_codex_target_continues_verified_market_and_never_replaces_an_already
         assert_eq!(market.phase, Phase::Succeeded);
         fs::create_dir(checkout.join(".git"))?;
         fs::write(checkout.join(".git/HEAD"), b"ref: refs/heads/main\n")?;
-        assert!(crate::agent::plugin_target::recovery_matches(
+        assert!(crate::test_support::recovery_matches(
             &market,
             Some(&target)
         )?);
-        assert!(!crate::agent::plugin_target::recovery_matches(
-            &market, None
-        )?);
+        assert!(!crate::test_support::recovery_matches(&market, None)?);
         if plugin_done {
             let installed = stage(
                 &ctx,

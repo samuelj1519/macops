@@ -2,6 +2,12 @@ use crate::cli::{AgentCmd, AppCmd, Command, Config, Manifest, SkillCmd};
 use serde_json::Value;
 use std::fmt::Write;
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct TextLayout {
+    pub columns: usize,
+    pub terminal: bool,
+}
+
 type Fields = &'static [(&'static str, &'static str)];
 
 const ID_NAME: Fields = &[("/id", "ID"), ("/name", "名称")];
@@ -200,16 +206,14 @@ fn record(title: &str, value: &Value, fields: Fields) -> String {
     text
 }
 
-fn table(title: &str, value: &Value, fields: Fields) -> String {
-    use std::io::IsTerminal as _;
+fn table(layout: TextLayout, title: &str, value: &Value, fields: Fields) -> String {
     let mut text = format!("{title}\n");
     let rows = value.as_array().map_or(&[][..], Vec::as_slice);
     if rows.is_empty() {
         text.push_str("  本次没有记录。\n");
         return text;
     }
-    if std::io::stdout().is_terminal() {
-        use crate::terminal::presentation::{table, table_width};
+    if layout.terminal {
         let headers = fields.iter().map(|(_, name)| *name).collect::<Vec<_>>();
         let data = rows
             .iter()
@@ -220,7 +224,11 @@ fn table(title: &str, value: &Value, fields: Fields) -> String {
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
-        text.push_str(&table(&headers, &data, table_width()));
+        text.push_str(&crate::terminal::presentation::table(
+            &headers,
+            &data,
+            layout.columns,
+        ));
         return text;
     }
     let _ = writeln!(
@@ -242,7 +250,7 @@ fn table(title: &str, value: &Value, fields: Fields) -> String {
     text
 }
 
-fn resource_detail(value: &Value) -> String {
+fn resource_detail(layout: TextLayout, value: &Value) -> String {
     let fields: Fields = match value["kind"].as_str() {
         Some("application") => &[
             ("/manager", "维护渠道"),
@@ -271,6 +279,7 @@ fn resource_detail(value: &Value) -> String {
     };
     let extra = match value["kind"].as_str() {
         Some("application") => table(
+            layout,
             "本机版本",
             &value["releases"],
             &[
@@ -280,6 +289,7 @@ fn resource_detail(value: &Value) -> String {
             ],
         ),
         Some("capability") => table(
+            layout,
             "部署范围",
             &value["deployments"],
             &[
@@ -289,6 +299,7 @@ fn resource_detail(value: &Value) -> String {
             ],
         ),
         Some("config") => table(
+            layout,
             "候选来源",
             &value["source_candidates"],
             &[("/path", "路径")],
@@ -388,8 +399,8 @@ pub(crate) fn recovery_hint(data: &Value) -> Option<&'static str> {
     original_operation(data).map(|_| "重试时会先检查这次结果。运行 mo recover 可查看记录。")
 }
 
-fn batches(title: &str, data: &Value, fields: Fields) -> String {
-    let mut text = table(title, &data["results"], fields);
+fn batches(layout: TextLayout, title: &str, data: &Value, fields: Fields) -> String {
+    let mut text = table(layout, title, &data["results"], fields);
     for row in data["results"].as_array().into_iter().flatten() {
         if let Some(hint) = recovery_hint(row.get("operation").unwrap_or(row)) {
             let _ = writeln!(text, "  {hint}");
@@ -409,9 +420,11 @@ fn batches(title: &str, data: &Value, fields: Fields) -> String {
     text
 }
 
-fn config_summary(command: &Config, data: &Value) -> Option<String> {
+fn config_summary(layout: TextLayout, command: &Config, data: &Value) -> Option<String> {
     match command {
-        Config::Reconcile { .. } if data["reconcile_state"].is_string() => Some(reconcile(data)),
+        Config::Reconcile { .. } if data["reconcile_state"].is_string() => {
+            Some(reconcile(layout, data))
+        }
         Config::Restore { .. } if data["mode"] == "no-op" => {
             Some("配置已是还原后的状态。\n".into())
         }
@@ -435,7 +448,12 @@ fn config_summary(command: &Config, data: &Value) -> Option<String> {
                 }
                 _ => {
                     let paths = data.get("matches").unwrap_or(&data["candidates"]);
-                    text.push_str(&table("已观察路径", &paths["shown"], &[("", "路径")]));
+                    text.push_str(&table(
+                        layout,
+                        "已观察路径",
+                        &paths["shown"],
+                        &[("", "路径")],
+                    ));
                     text.push_str(&record(
                         "显示范围",
                         paths,
@@ -449,6 +467,7 @@ fn config_summary(command: &Config, data: &Value) -> Option<String> {
             if data["results"].is_array() =>
         {
             let mut text = table(
+                layout,
                 "配置差异方向",
                 &data["results"],
                 &[
@@ -497,7 +516,7 @@ fn config_summary(command: &Config, data: &Value) -> Option<String> {
     }
 }
 
-fn reconcile(data: &Value) -> String {
+fn reconcile(layout: TextLayout, data: &Value) -> String {
     record(
         "Agent 版本配置核对",
         data,
@@ -511,13 +530,14 @@ fn reconcile(data: &Value) -> String {
             ("/to", "目标版本"),
         ],
     ) + &table(
+        layout,
         "版本差异",
         &data["rows"],
         &[("/key", "工具"), ("/live", "本机"), ("/declared", "管理源")],
     )
 }
 
-fn credentials(data: &Value) -> String {
+fn credentials(layout: TextLayout, data: &Value) -> String {
     if let Some(program) = data["command"]["program"].as_str() {
         let args = data["command"]["args"]
             .as_array()
@@ -531,6 +551,7 @@ fn credentials(data: &Value) -> String {
         return format!("凭据由原生工具交互处理\n  {}\n", words.join(" "));
     }
     table(
+        layout,
         "档案凭据状态",
         data,
         &[
@@ -542,9 +563,9 @@ fn credentials(data: &Value) -> String {
     )
 }
 
-fn specialized(command: &Command, data: &Value) -> Option<String> {
+fn specialized(layout: TextLayout, command: &Command, data: &Value) -> Option<String> {
     match command {
-        Command::History { .. } => Some(table("操作历史", data, JOURNALS)),
+        Command::History { .. } => Some(table(layout, "操作历史", data, JOURNALS)),
         Command::Dirs { roots: true, .. } => Some(record(
             "当前目录范围",
             data,
@@ -561,6 +582,7 @@ fn specialized(command: &Command, data: &Value) -> Option<String> {
         Command::Manifest {
             command: Manifest::Plan { .. },
         } => Some(table(
+            layout,
             "清单差异与重放条件",
             &data["entries"],
             &[
@@ -580,14 +602,16 @@ fn specialized(command: &Command, data: &Value) -> Option<String> {
         )),
         Command::Cleanup { .. } if data["candidates"].is_array() => Some(
             table(
+                layout,
                 "可清理的自有缓存",
                 &data["candidates"],
                 &[("/name", "文件")],
-            ) + &table("保留供核对", &data["review"], &[("", "文件")]),
+            ) + &table(layout, "保留供核对", &data["review"], &[("", "文件")]),
         ),
         Command::Migrate { .. } if data["blocked"].is_array() => Some(
             record("迁移预检（只读）", data, &[("/ready", "具备迁移条件")])
                 + &table(
+                    layout,
                     "阻断项",
                     &data["blocked"],
                     &[("/path", "路径"), ("/reason", "原因")],
@@ -607,26 +631,27 @@ fn specialized(command: &Command, data: &Value) -> Option<String> {
         Command::App {
             command: Some(command),
             ..
-        } => app_summary(command, data),
+        } => app_summary(layout, command, data),
         Command::Config {
             command: Some(command),
             ..
-        } => config_summary(command, data),
+        } => config_summary(layout, command, data),
         Command::Skill {
             command: Some(command),
             ..
-        } => skill_summary(command, data),
+        } => skill_summary(layout, command, data),
         Command::Agent {
             command: Some(command),
             ..
-        } => agent_summary(command, data),
+        } => agent_summary(layout, command, data),
         _ => None,
     }
 }
 
-fn app_summary(command: &AppCmd, data: &Value) -> Option<String> {
+fn app_summary(layout: TextLayout, command: &AppCmd, data: &Value) -> Option<String> {
     match command {
         AppCmd::Discover { .. } if data.is_array() => Some(table(
+            layout,
             "管理器发现",
             data,
             &[
@@ -645,14 +670,17 @@ fn app_summary(command: &AppCmd, data: &Value) -> Option<String> {
                     ("/status", "状态"),
                     ("/coverage/state", "覆盖"),
                 ],
-            ) + &table("发现的安装", &data["packages"], RESOURCES),
+            ) + &table(layout, "发现的安装", &data["packages"], RESOURCES),
         ),
-        AppCmd::Doctor { .. } if data.is_array() => Some(table("软件诊断", data, OBSERVATIONS)),
-        AppCmd::Outdated { .. } if data.is_array() => {
-            Some(table("可用版本检查", data, VERSIONS) + "索引无证据时运行 mo app refresh。\n")
+        AppCmd::Doctor { .. } if data.is_array() => {
+            Some(table(layout, "软件诊断", data, OBSERVATIONS))
         }
+        AppCmd::Outdated { .. } if data.is_array() => Some(
+            table(layout, "可用版本检查", data, VERSIONS) + "索引无证据时运行 mo app refresh。\n",
+        ),
         AppCmd::Upgrade { id: None, .. } | AppCmd::Refresh { .. } if data["results"].is_array() => {
             Some(batches(
+                layout,
                 if data["mode"] == "dry-run" {
                     "软件维护预演"
                 } else {
@@ -681,15 +709,17 @@ fn app_summary(command: &AppCmd, data: &Value) -> Option<String> {
     }
 }
 
-fn skill_summary(command: &SkillCmd, data: &Value) -> Option<String> {
+fn skill_summary(layout: TextLayout, command: &SkillCmd, data: &Value) -> Option<String> {
     match command {
         SkillCmd::Refresh(_) if data["recipes"].is_array() => Some(table(
+            layout,
             "技能索引预演",
             &data["recipes"],
             &[("/install_name", "安装名"), ("/source/commit", "来源提交")],
         )),
         SkillCmd::Refresh(_) | SkillCmd::Outdated { .. } if data["results"].is_array() => {
             Some(table(
+                layout,
                 "技能版本证据",
                 &data["results"],
                 &[
@@ -701,6 +731,7 @@ fn skill_summary(command: &SkillCmd, data: &Value) -> Option<String> {
             ))
         }
         SkillCmd::Plugins { .. } if data["results"].is_array() => Some(table(
+            layout,
             "本地插件证据",
             &data["results"],
             &[
@@ -733,6 +764,7 @@ fn skill_summary(command: &SkillCmd, data: &Value) -> Option<String> {
                 return Some(text);
             }
             Some(batches(
+                layout,
                 "技能维护结果",
                 data,
                 &[
@@ -757,6 +789,7 @@ fn skill_summary(command: &SkillCmd, data: &Value) -> Option<String> {
                     data,
                     &[("/status", "状态"), ("/scope", "范围")],
                 ) + &table(
+                    layout,
                     "变更路径",
                     data.get("plan")
                         .map_or(&data["changes"], |plan| &plan["changes"]),
@@ -768,12 +801,12 @@ fn skill_summary(command: &SkillCmd, data: &Value) -> Option<String> {
     }
 }
 
-fn agent_summary(command: &AgentCmd, data: &Value) -> Option<String> {
+fn agent_summary(layout: TextLayout, command: &AgentCmd, data: &Value) -> Option<String> {
     match command {
         AgentCmd::Upgrade { tool: None, .. } if data["reconcile_state"].is_string() => {
-            Some(reconcile(data))
+            Some(reconcile(layout, data))
         }
-        AgentCmd::Credential { .. } => Some(credentials(data)),
+        AgentCmd::Credential { .. } => Some(credentials(layout, data)),
         AgentCmd::Launch { .. } if data["profile"].is_string() => Some(record(
             "Agent 启动预演（未启动会话）",
             data,
@@ -802,7 +835,29 @@ fn agent_summary(command: &AgentCmd, data: &Value) -> Option<String> {
     }
 }
 
-pub(crate) fn command_human(command: &Command, data: &Value) -> String {
+fn agent_batch(layout: TextLayout, data: &Value, rows: &[Value]) -> String {
+    let text = crate::skills::portfolio::batch_text(rows, layout.columns);
+    let achieved = rows
+        .iter()
+        .filter(|row| matches!(row["status"].as_str(), Some("changed" | "current")))
+        .count();
+    let unchanged = rows.iter().filter(|row| row["status"] == "current").count();
+    let uninstalled = rows
+        .iter()
+        .filter(|row| row["status"] == "not-installed")
+        .count();
+    if data["mode"] == "dry-run" {
+        format!("预演 · {}\n{text}\n", field(data, "verb"))
+    } else {
+        format!(
+            "{text}\n{achieved}/{} 个适用 Agent 已达到目标 · 本次修改 {} · 已达目标 {unchanged} · 未安装 {uninstalled}\n",
+            rows.len() - uninstalled,
+            achieved - unchanged
+        )
+    }
+}
+
+pub(crate) fn command_human(layout: TextLayout, command: &Command, data: &Value) -> String {
     if data["agentRegistration"] == true {
         let status = match data["status"].as_str() {
             Some("preview") => "登记预演",
@@ -818,36 +873,21 @@ pub(crate) fn command_human(command: &Command, data: &Value) -> String {
     if data["agentBatch"] == true
         && let Some(rows) = data["results"].as_array()
     {
-        let text = crate::skills::portfolio::batch_text(rows);
-        let achieved = rows
-            .iter()
-            .filter(|row| matches!(row["status"].as_str(), Some("changed" | "current")))
-            .count();
-        let unchanged = rows.iter().filter(|row| row["status"] == "current").count();
-        let uninstalled = rows
-            .iter()
-            .filter(|row| row["status"] == "not-installed")
-            .count();
-        return if data["mode"] == "dry-run" {
-            format!("预演 · {}\n{text}\n", field(data, "verb"))
-        } else {
-            format!(
-                "{text}\n{achieved}/{} 个适用 Agent 已达到目标 · 本次修改 {} · 已达目标 {unchanged} · 未安装 {uninstalled}\n",
-                rows.len() - uninstalled,
-                achieved - unchanged
-            )
-        };
+        return agent_batch(layout, data, rows);
     }
     if let Some(text) = skill_journey(data) {
         return text;
     }
-    let summary = specialized(command, data)
+    let summary = specialized(layout, command, data)
         .or_else(|| (data["mode"] == "dry-run").then(|| preview(data)).flatten())
-        .or_else(|| data.get("resource").map(resource_detail))
+        .or_else(|| {
+            data.get("resource")
+                .map(|resource| resource_detail(layout, resource))
+        })
         .or_else(|| {
             data["resources"]
                 .is_array()
-                .then(|| table("资源清单", &data["resources"], RESOURCES))
+                .then(|| table(layout, "资源清单", &data["resources"], RESOURCES))
         })
         .or_else(|| {
             matches!(command, Command::Search { .. })
@@ -855,6 +895,7 @@ pub(crate) fn command_human(command: &Command, data: &Value) -> String {
                 .flatten()
                 .map(|rows| {
                     table(
+                        layout,
                         "找到多个对象，请使用所列 ID 查询",
                         rows,
                         &[("/category", "类型"), ("/name", "名称"), ("/id", "ID")],
@@ -883,7 +924,7 @@ pub(crate) fn command_human(command: &Command, data: &Value) -> String {
         .or_else(|| {
             data["tools"]
                 .is_array()
-                .then(|| table("Agent CLI 版本", &data["tools"], TOOLS))
+                .then(|| table(layout, "Agent CLI 版本", &data["tools"], TOOLS))
         })
         .or_else(|| {
             data["tool"]

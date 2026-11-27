@@ -33,7 +33,10 @@ use source::source_tx;
 
 use clap::{CommandFactory, Parser};
 use serde_json::{Value, json};
-use std::{io::Write, process::ExitCode};
+use std::{
+    io::{IsTerminal as _, Write},
+    process::ExitCode,
+};
 
 pub(crate) fn scoped_retry<'a>(noun: &str, key: &'a str) -> Option<&'a str> {
     let (prefix, rest) = key.split_once(':')?;
@@ -1704,7 +1707,14 @@ fn dispatch(cli: &cli::Cli) -> ExitCode {
                     _ if policy::cli::continuation(&data).is_some() => {
                         operations::recovery_text(&data, false)
                     }
-                    _ => output::command_human(&cli.command, &data),
+                    _ => output::command_human(
+                        output::TextLayout {
+                            columns: terminal::presentation::table_width(),
+                            terminal: std::io::stdout().is_terminal(),
+                        },
+                        &cli.command,
+                        &data,
+                    ),
                 };
                 std::io::stdout().lock().write_all(text.as_bytes())
             };

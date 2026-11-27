@@ -45,7 +45,10 @@ pub(crate) fn recommend(ctx: &Context, source: &str, kind: Operation) -> Result<
         false,
     )?;
     if let Some(rows) = report["results"].as_array() {
-        crate::terminal::presentation::panel("操作结果", &batch_text(rows));
+        crate::terminal::presentation::panel(
+            "操作结果",
+            &batch_text(rows, crate::terminal::presentation::table_width()),
+        );
     }
     Ok(Some(report))
 }
@@ -818,7 +821,7 @@ fn execute(
         );
     }
     if sites.iter().any(|site| site.work.is_some()) {
-        let text = batch_text(&planned);
+        let text = batch_text(&planned, crate::terminal::presentation::table_width());
         let action = if sites
             .iter()
             .any(|site| matches!(site.work, Some(Work::Switch(_))))
@@ -1022,8 +1025,8 @@ fn result_status(ctx: &Context, result: Result<Value>) -> Result<(&'static str, 
     })
 }
 
-pub(crate) fn batch_text(rows: &[Value]) -> String {
-    use crate::terminal::presentation::{table, table_width};
+pub(crate) fn batch_text(rows: &[Value], columns: usize) -> String {
+    use crate::terminal::presentation::table;
     use std::fmt::Write as _;
 
     let fields = ["agent", "currentVersion", "targetVersion", "directory"];
@@ -1050,7 +1053,7 @@ pub(crate) fn batch_text(rows: &[Value]) -> String {
     let mut text = table(
         &["Agent", "状态", "当前版本", "目标版本", "安装位置"],
         &data,
-        table_width(),
+        columns,
     );
     for row in rows {
         if let Some(reason) = row["reason"].as_str().filter(|reason| !reason.is_empty()) {

@@ -167,19 +167,22 @@ fn recovers_after_the_payload_and_first_record_were_published() -> TestResult {
     let other = InstallTarget::capture(&ctx, &other_profile)?;
     drop(store);
     let blocked = crate::operations::recover_before_write_checked(&ctx, None, |journal| {
-        recovery_matches(journal, Some(&other))
+        crate::test_support::recovery_matches(journal, Some(&other))
     })
     .err()
     .ok_or("another target should not finish pending writes")?;
     assert_eq!(blocked.code, "recovery_required");
     assert!(plugin.payload.is_dir());
-    assert!(recovery_matches(&reserved.journal, Some(&target))?);
+    assert!(crate::test_support::recovery_matches(
+        &reserved.journal,
+        Some(&target)
+    )?);
     let store = Store::lock(&ctx)?;
     move_tree(&reserved.publication.trees[0])?;
     crate::source::source_files::publish_checked(&reserved.publication.files[0], || Ok(()))?;
     drop(store);
     let recovered = crate::operations::recover_before_write_checked(&ctx, None, |journal| {
-        recovery_matches(journal, Some(&target))
+        crate::test_support::recovery_matches(journal, Some(&target))
     })?
     .ok_or("recovered operation")?
     .result;
@@ -552,8 +555,14 @@ fn recovery_rejects_a_changed_reservation_and_allows_no_new_target() -> TestResu
     let native = original(&ctx)?;
     let mut record = journal_fixture(&ctx, &store, &native, &target, &plugin)?;
     store.save(&record.journal)?;
-    assert!(!recovery_matches(&record.journal, None)?);
-    assert!(recovery_matches(&native, Some(&target))?);
+    assert!(!crate::test_support::recovery_matches(
+        &record.journal,
+        None
+    )?);
+    assert!(crate::test_support::recovery_matches(
+        &native,
+        Some(&target)
+    )?);
     let name = format!("plugin-target-{}.json", record.journal.id);
     let good = fs::read(ctx.state.join(&name))?;
     for field in ["id", "plan_sha256", "scope"] {
