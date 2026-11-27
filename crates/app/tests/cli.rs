@@ -954,6 +954,14 @@ fn list_opens_a_unified_inventory_in_the_terminal_and_keeps_structured_queries()
 }
 
 #[test]
+fn inventory_table_controls_preserve_navigation_and_restore_mouse_capture() -> TestResult {
+    let f = Fixture::new()?;
+    chezmoi_native::run_browser_pty(&f, &["app"], "inventory-table-controls", &f.home, "42", "0")?;
+    assert!(!f.file("state").exists());
+    Ok(())
+}
+
+#[test]
 fn app_versions_remain_visible_in_a_narrow_terminal_and_probe_only_the_selected_cli() -> TestResult
 {
     let f = Fixture::new()?;

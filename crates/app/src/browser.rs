@@ -8,7 +8,7 @@ use crate::{
 use serde::Serialize;
 use std::{collections::BTreeSet, io::IsTerminal, path::PathBuf};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum Kind {
     Config,
     Skills,

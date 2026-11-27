@@ -181,6 +181,7 @@
     "terminal/picker.rs",
     "terminal/mise_progress.rs",
     "terminal/presentation.rs",
+    "terminal/inventory_table.rs",
     "capability/scoped_files.rs",
     "operations/recovery.rs"
   ],

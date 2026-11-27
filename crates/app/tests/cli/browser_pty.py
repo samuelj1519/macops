@@ -7,6 +7,7 @@ from pathlib import Path
 import pty
 import re
 import select
+import signal
 import struct
 import subprocess
 import sys
@@ -69,30 +70,34 @@ def type_key(key):
     return offset
 
 
+def screen_cells(number):
+    cells = [" "] * int(width)
+    screen = bytes(capture).rsplit(b"\x1b[?1049h", 1)[-1].decode(errors="replace")
+    row, column = 1, 0
+    for text in re.split(r"(\x1b\[[0-?]*[ -/]*[@-~])", screen):
+        if text.startswith("\x1b["):
+            if match := re.fullmatch(r"\x1b\[(\d+);(\d+)H", text):
+                row, column = map(int, match.groups())
+                column -= 1
+            elif text == "\x1b[2J":
+                cells = [" "] * int(width)
+            continue
+        for char in text:
+            if char == "\r":
+                column = 0
+            elif char == "\n":
+                row += 1
+            elif char.isprintable():
+                size = 2 if unicodedata.east_asian_width(char) in ("W", "F") else 1
+                if row == number and 0 <= column < len(cells):
+                    cells[column:column + size] = [char] + [""] * (size - 1)
+                column += size
+    return cells
+
+
 def expect_screen_row(number, expected, *, exact=True):
     def read_row():
-        cells = [" "] * int(width)
-        screen = bytes(capture).rsplit(b"\x1b[?1049h", 1)[-1].decode(errors="replace")
-        row, column = 1, 0
-        for text in re.split(r"(\x1b\[[0-?]*[ -/]*[@-~])", screen):
-            if text.startswith("\x1b["):
-                if match := re.fullmatch(r"\x1b\[(\d+);(\d+)H", text):
-                    row, column = map(int, match.groups())
-                    column -= 1
-                elif text == "\x1b[2J":
-                    cells = [" "] * int(width)
-                continue
-            for char in text:
-                if char == "\r":
-                    column = 0
-                elif char == "\n":
-                    row += 1
-                elif char.isprintable():
-                    size = 2 if unicodedata.east_asian_width(char) in ("W", "F") else 1
-                    if row == number and 0 <= column < len(cells):
-                        cells[column:column + size] = [char] + [""] * (size - 1)
-                    column += size
-        return "".join(cells).rstrip()
+        return "".join(screen_cells(number)).rstrip()
 
     def matches(row):
         return row == expected if exact else expected in row
@@ -106,6 +111,20 @@ def expect_screen_row(number, expected, *, exact=True):
         elif process.poll() is not None:
             break
     assert matches(row), (expected, row)
+
+def wait_for_screen(predicate):
+    deadline = time.monotonic() + 12
+    while True:
+        result = predicate()
+        if result:
+            return result
+        assert time.monotonic() < deadline, capture[-2000:]
+        if select.select([reader], [], [], 0.1)[0]:
+            receive()
+
+
+def mouse_key(button, column, row, end=b"M"):
+    return f"\x1b[<{button};{column + 1};{row}".encode() + end
 
 
 try:
@@ -654,6 +673,65 @@ try:
             offset = type_key(b"\r")
             expect("卸载结果 已完成", offset)
         type_key(b"q")
+    elif scenario == "inventory-table-controls":
+        expect("Shift+←/→ 横移")
+        header = wait_for_screen(lambda: next((
+            row for row in range(3, 10)
+            if "管理状态" in "".join(screen_cells(row))
+        ), None))
+        chosen = "".join(screen_cells(header + 1)).split()[1]
+        type_key(b"\x1b[1;2C")
+        expect_screen_row(header, "安装范围", exact=False)
+        expect_screen_row(header, "软件", exact=False)
+        expect_screen_row(header + 1, f"> {chosen}", exact=False)
+        assert "管理状态" not in "".join(screen_cells(header))
+        offset = type_key(b"\r")
+        expect("原生标识 fixture:demo", offset)
+        type_key(b"\x1b")
+        expect_screen_row(header, "安装范围", exact=False)
+        type_key(b"\t")
+        expect_screen_row(1, "[能力]", exact=False)
+        type_key(b"\x1b[Z")
+        expect_screen_row(1, "[软件]", exact=False)
+        expect_screen_row(header, "安装范围", exact=False)
+        assert "管理状态" not in "".join(screen_cells(header))
+        type_key(b"\x1b[1;2D")
+        expect_screen_row(header, "管理状态", exact=False)
+
+        offset = type_key(b"w")
+        expect("\x1b[?1006h", offset)
+        expect("拖表头")
+        divider = wait_for_screen(lambda: next((
+            x for x, cell in enumerate(screen_cells(header)[1:-1], 1) if cell == "│"
+        ), None))
+        type_key(mouse_key(35, divider, header) +
+                 mouse_key(0, divider, header) +
+                 mouse_key(32, divider + 4, header) +
+                 mouse_key(0, divider + 4, header, b"m"))
+        wait_for_screen(lambda: screen_cells(header)[divider + 4] == "│")
+        type_key(b"\x1b[A")
+        wait_for_screen(lambda: screen_cells(header)[divider + 5] == "│")
+        type_key(mouse_key(0, divider + 5, header) +
+                 mouse_key(32, divider + 7, header))
+        wait_for_screen(lambda: screen_cells(header)[divider + 7] == "│")
+        fcntl.ioctl(writer, termios.TIOCSWINSZ, struct.pack("HHHH", height + 1, int(width), 0, 0))
+        process.send_signal(signal.SIGWINCH)
+        wait_for_screen(lambda: screen_cells(header)[divider + 5] == "│")
+        type_key(mouse_key(0, divider + 5, header) +
+                 mouse_key(32, divider + 7, header))
+        wait_for_screen(lambda: screen_cells(header)[divider + 7] == "│")
+        offset = type_key(b"\x1b")
+        expect("\x1b[?1006l", offset)
+        type_key(b"\t")
+        expect_screen_row(1, "[能力]", exact=False)
+        type_key(b"\x1b[Z")
+        expect_screen_row(1, "[软件]", exact=False)
+        type_key(b"w")
+        wait_for_screen(lambda: screen_cells(header)[divider + 5] == "│")
+        type_key(b"0")
+        wait_for_screen(lambda: screen_cells(header)[divider] == "│")
+        offset = type_key(b"q")
+        expect("\x1b[?1006l", offset)
     elif scenario == "app-version-evidence":
         expect("版本")
         expect("3.1.4")

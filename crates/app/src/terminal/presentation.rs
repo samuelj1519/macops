@@ -88,21 +88,34 @@ fn column_widths(
         .enumerate()
         .map(|(index, label)| width(label).max(*minimum_widths.get(index).unwrap_or(&2)))
         .collect();
-    let available = budget.checked_sub(headers.len().saturating_sub(1) * 2)?;
-    if minimum.iter().sum::<usize>() > available {
-        return None;
-    }
     let mut widths = minimum.clone();
     for row in rows {
         for (current, value) in widths.iter_mut().zip(row) {
-            *current = (*current).max(width(value).min(available));
+            *current = (*current).max(width(value).min(budget));
         }
     }
+    fit_widths(&minimum, &widths, budget)
+}
+
+pub(super) fn fit_widths(
+    minimum: &[usize],
+    desired: &[usize],
+    budget: usize,
+) -> Option<Vec<usize>> {
+    let available = budget.checked_sub(minimum.len().saturating_sub(1) * 2)?;
+    if minimum.iter().sum::<usize>() > available {
+        return None;
+    }
+    let mut widths: Vec<_> = minimum
+        .iter()
+        .zip(desired)
+        .map(|(&floor, &width)| floor.max(width.min(available)))
+        .collect();
     let mut total = widths.iter().sum::<usize>();
     while total > available {
         let index = widths
             .iter()
-            .zip(&minimum)
+            .zip(minimum)
             .enumerate()
             .filter(|(_, (current, floor))| current > floor)
             .max_by_key(|(_, (current, _))| *current)

@@ -232,7 +232,10 @@ fn runtime_version_requires_unique_installation_and_release_evidence() -> TestRe
         }],
     )?;
     assert_eq!(
-        bind_runtime(Path::new("/one/claude"), &[alias, app.clone()]),
+        bind_runtime(
+            Path::new("/one/claude"),
+            &[sample_skill(), alias, app.clone()]
+        ),
         Some((app.id.as_str(), Some("1")))
     );
     let mut overlapping_releases = app.clone();

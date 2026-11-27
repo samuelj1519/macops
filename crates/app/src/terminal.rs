@@ -1,4 +1,5 @@
 pub(crate) mod install;
+mod inventory_table;
 pub(crate) mod mise_progress;
 pub(crate) mod picker;
 pub(crate) mod plan;
@@ -17,7 +18,10 @@ use crate::{
 };
 use crossterm::{
     cursor::Show,
-    event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+        KeyModifiers, MouseEventKind,
+    },
     execute,
     terminal::{self, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -26,9 +30,10 @@ use ratatui::{
     Frame, Terminal,
     backend::CrosstermBackend,
     layout::{Constraint, Layout, Rect},
-    widgets::{Block, Borders, Paragraph, Row, Table, TableState, Wrap},
+    widgets::{Block, Borders, Paragraph, Wrap},
 };
 use std::{
+    collections::HashMap,
     fmt::Write as _,
     io::{self, Stdout},
 };
@@ -64,10 +69,27 @@ impl Drop for SignalHold {
 struct Restore {
     _hold: SignalHold,
     screen: bool,
+    mouse: bool,
+}
+
+impl Restore {
+    fn mouse(&mut self, enabled: bool) -> Result<()> {
+        if enabled {
+            self.mouse = true;
+            execute!(io::stdout(), EnableMouseCapture)?;
+        } else {
+            execute!(io::stdout(), DisableMouseCapture)?;
+            self.mouse = false;
+        }
+        Ok(())
+    }
 }
 
 impl Drop for Restore {
     fn drop(&mut self) {
+        if self.mouse {
+            let _ = self.mouse(false);
+        }
         let _ = terminal::disable_raw_mode();
         if self.screen {
             let _ = execute!(io::stdout(), LeaveAlternateScreen, Show);
@@ -79,6 +101,7 @@ fn screen() -> Result<(Terminal<CrosstermBackend<Stdout>>, Restore)> {
     let mut restore = Restore {
         _hold: SignalHold::enter()?,
         screen: false,
+        mouse: false,
     };
     terminal::enable_raw_mode()?;
     execute!(io::stdout(), EnterAlternateScreen)?;
@@ -241,6 +264,7 @@ struct Browser {
     notice: String,
     offset: usize,
     page_rows: isize,
+    table: inventory_table::State,
 }
 
 fn detail_target(
@@ -455,6 +479,7 @@ impl Browser {
             notice: String::new(),
             offset: 0,
             page_rows: 1,
+            table: inventory_table::State::default(),
         }
     }
 
@@ -1220,12 +1245,14 @@ impl Browser {
 
     fn draw(&mut self, ctx: &Context, frame: &mut Frame, kind: Kind, unified: bool) {
         let visible = self.visible();
-        let inset = if matches!(self.page, Page::List) {
-            3
-        } else {
+        let listing = matches!(self.page, Page::List);
+        let inset = if listing { 3 } else { 2 };
+        let footer_height = if listing && frame.area().height >= 10 {
             2
+        } else {
+            1
         };
-        let below_header = inset + 2;
+        let below_header = inset + footer_height + 1;
         let lines = self.header_lines(
             visible.len(),
             unified,
@@ -1235,8 +1262,13 @@ impl Browser {
         let header_height = u16::try_from(lines.len())
             .unwrap_or(u16::MAX)
             .min(frame.area().height.saturating_sub(2));
-        let [header, main, footer] =
-            layout_with_notice(frame, &self.notice, header_height, below_header);
+        let [header, main, footer] = layout_with_notice(
+            frame,
+            &self.notice,
+            header_height,
+            below_header,
+            footer_height,
+        );
         let page_rows = isize::try_from(main.height.saturating_sub(inset).max(1)).unwrap_or(1);
         let text = lines
             .iter()
@@ -1246,6 +1278,7 @@ impl Browser {
             .join("\n");
         frame.render_widget(Paragraph::new(text), header);
         let mut offset = self.offset;
+        let mut table_layout = inventory_table::Layout::default();
         match &self.page {
             Page::Recovery(preview) => detail(
                 frame,
@@ -1292,20 +1325,45 @@ impl Browser {
                     );
                 }
             }
-            Page::List if main.width >= 100 => {
-                let [list, side] =
-                    Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
-                        .areas(main);
-                self.list(frame, list, &visible);
-                if let Some(item) = visible.get(self.row) {
-                    detail(frame, side, "管理详情", &details(item), &mut offset);
-                }
+            Page::List => {
+                table_layout = self.draw_table(frame, main, &visible, &mut offset);
             }
-            Page::List => self.list(frame, main, &visible),
         }
-        frame.render_widget(Paragraph::new(keys(kind, &self.page, unified)), footer);
+        let keys = keys(kind, &self.page, unified);
+        let help = if self.table.resizing() && footer_height == 2 {
+            "拖表头或 ←/→ 选列  ↑/↓ 调宽\nEsc 返回  0 恢复".into()
+        } else if self.table.resizing() {
+            "Esc 返回  ←/→ 选列  ↑/↓ 调宽".into()
+        } else if footer_height == 2 {
+            format!("{keys}\nShift+←/→ 横移  w 调列宽").into()
+        } else {
+            keys
+        };
+        frame.render_widget(Paragraph::new(help), footer);
+        self.table.layout = table_layout;
         self.page_rows = page_rows;
         self.offset = offset;
+    }
+
+    fn draw_table(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        visible: &[&Item],
+        offset: &mut usize,
+    ) -> inventory_table::Layout {
+        let list = if area.width >= 100 {
+            let [list, side] =
+                Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+                    .areas(area);
+            if let Some(item) = visible.get(self.row) {
+                detail(frame, side, "管理详情", &details(item), offset);
+            }
+            list
+        } else {
+            area
+        };
+        inventory_table::draw(frame, list, self.kind, visible, self.row, Some(&self.table))
     }
 
     fn draw_adoption(&self, frame: &mut Frame) {
@@ -1326,7 +1384,7 @@ impl Browser {
             sanitize(&self.search, false)
         );
         frame.render_widget(Paragraph::new(title), header);
-        self.list(frame, list, &visible);
+        inventory_table::draw(frame, list, self.kind, &visible, self.row, None);
         if let Some(item) = visible.get(self.row) {
             detail(frame, selection, "所选安装项", &details(item), &mut 0);
         }
@@ -1336,37 +1394,44 @@ impl Browser {
         );
     }
 
-    fn list(&self, frame: &mut Frame, area: Rect, visible: &[&Item]) {
-        let headers = crate::browser::list_headers(self.kind);
-        let rows = visible
-            .iter()
-            .map(|item| {
-                crate::browser::list_row(self.kind, item)
-                    .into_iter()
-                    .map(|value| sanitize(&value, false))
-                    .collect::<Vec<_>>()
-            })
-            .collect::<Vec<_>>();
-        let budget = usize::from(area.width.saturating_sub(4));
-        let minimum_widths: &[usize] = match self.kind {
-            Kind::Apps | Kind::Agents => &[0, 0, 8],
-            _ => &[],
-        };
-        let (headers, widths) =
-            presentation::visible_columns(headers, &rows, budget, minimum_widths);
-        let widths = widths
-            .into_iter()
-            .map(|width| Constraint::Length(u16::try_from(width).unwrap_or(area.width)));
-        let mut state = TableState::default().with_selected((!rows.is_empty()).then_some(self.row));
-        let values = rows
-            .into_iter()
-            .map(|row| Row::new(row.into_iter().take(headers.len())));
-        let list = Table::new(values, widths)
-            .header(Row::new(headers.iter().copied()).style(ratatui::style::Modifier::BOLD))
-            .column_spacing(2)
-            .block(Block::default().borders(Borders::ALL))
-            .highlight_symbol("> ");
-        frame.render_stateful_widget(list, area, &mut state);
+    fn read_key(&mut self) -> Result<Option<KeyEvent>> {
+        loop {
+            match event::read()? {
+                Event::Key(event) if event.kind != KeyEventKind::Release => return Ok(Some(event)),
+                Event::Mouse(event) if event.kind == MouseEventKind::Moved => continue,
+                Event::Mouse(event) => self.table.mouse(event),
+                Event::Resize(..) => self.table.cancel_drag(),
+                _ => {}
+            }
+            return Ok(None);
+        }
+    }
+
+    fn table_key(&mut self, event: &KeyEvent, restore: &mut Restore) -> Result<bool> {
+        if !matches!(self.page, Page::List) {
+            return Ok(false);
+        }
+        if self.table.resizing() {
+            match event.code {
+                KeyCode::Char('w') | KeyCode::Esc | KeyCode::Enter => {
+                    restore.mouse(false)?;
+                    self.table.leave_resize();
+                }
+                key => self.table.resize_key(key),
+            }
+            return Ok(true);
+        }
+        match event.code {
+            KeyCode::Char('w') => {
+                restore.mouse(true)?;
+                self.table.enter_resize();
+            }
+            KeyCode::Left | KeyCode::Right if event.modifiers.contains(KeyModifiers::SHIFT) => {
+                self.table.slide(event.code == KeyCode::Right);
+            }
+            _ => return Ok(false),
+        }
+        Ok(true)
     }
 }
 
@@ -1519,6 +1584,7 @@ fn layout_with_notice(
     message: &str,
     header_height: u16,
     below_header: u16,
+    footer_height: u16,
 ) -> [Rect; 3] {
     let limit = frame
         .area()
@@ -1537,7 +1603,7 @@ fn layout_with_notice(
         Constraint::Length(header_height),
         Constraint::Min(1),
         Constraint::Length(height),
-        Constraint::Length(1),
+        Constraint::Length(footer_height),
     ])
     .areas(frame.area());
     if height > 0 {
@@ -1672,14 +1738,31 @@ fn control(event: &KeyEvent, key: char) -> bool {
     event.code == KeyCode::Char(key) && event.modifiers.contains(KeyModifiers::CONTROL)
 }
 
-fn switch_tab(ctx: &Context, session: &mut Session, kind: Kind, forward: bool) -> Result<Browser> {
+fn switch_tab(
+    ctx: &Context,
+    session: &mut Session,
+    browser: &mut Browser,
+    tables: &mut HashMap<Kind, inventory_table::Settings>,
+    forward: bool,
+) {
     let tabs = Kind::TABS;
-    let index = tabs.iter().position(|tab| *tab == kind).unwrap_or_default();
+    let index = tabs
+        .iter()
+        .position(|tab| *tab == browser.kind)
+        .unwrap_or_default();
     let step = if forward { 1 } else { tabs.len() - 1 };
     let next = tabs[(index + step) % tabs.len()];
-    let (loaded, view) = Session::load(ctx, next)?;
+    let (loaded, view) = match Session::load(ctx, next) {
+        Ok(loaded) => loaded,
+        Err(error) => {
+            browser.notice = crate::output::error_text(&error);
+            return;
+        }
+    };
+    tables.insert(browser.kind, std::mem::take(&mut browser.table.settings));
+    *browser = Browser::new(view, next);
+    browser.table.settings = tables.remove(&next).unwrap_or_default();
     *session = loaded;
-    Ok(Browser::new(view, next))
 }
 
 pub(crate) fn pick_adoption(view: View) -> Result<Option<String>> {
@@ -1723,22 +1806,23 @@ pub(crate) fn browse(
     unified: bool,
 ) -> Result<View> {
     let mut browser = Browser::new(view, kind);
+    let mut tables = HashMap::new();
     loop {
-        let (mut terminal, restore) = screen()?;
+        let (mut terminal, mut restore) = screen()?;
         let after = loop {
             let kind = browser.kind;
             terminal.draw(|frame| browser.draw(ctx, frame, kind, unified))?;
-            let Event::Key(event) = event::read()? else {
+            let Some(event) = browser.read_key()? else {
                 continue;
             };
-            if event.kind == KeyEventKind::Release {
-                continue;
-            }
-            if control(&event, 'c') {
+            if control(&event, 'c') || (!browser.typing && event.code == KeyCode::Char('q')) {
                 return Ok(browser.view);
             }
             if browser.typing {
                 browser.type_key(event.code);
+                continue;
+            }
+            if browser.table_key(&event, &mut restore)? {
                 continue;
             }
             if let Some(action) = browser.detail_shortcut(&event) {
@@ -1747,12 +1831,9 @@ pub(crate) fn browse(
             let rows = browser.page_rows;
             match event.code {
                 KeyCode::Tab | KeyCode::BackTab if unified => {
-                    match switch_tab(ctx, session, kind, event.code == KeyCode::Tab) {
-                        Ok(next) => browser = next,
-                        Err(error) => browser.notice = crate::output::error_text(&error),
-                    }
+                    let forward = event.code == KeyCode::Tab;
+                    switch_tab(ctx, session, &mut browser, &mut tables, forward);
                 }
-                KeyCode::Char('q') => return Ok(browser.view),
                 KeyCode::Esc => browser.back(ctx, kind, session),
                 KeyCode::Char('/') if matches!(browser.page, Page::List) => browser.typing = true,
                 KeyCode::Left | KeyCode::Right if matches!(browser.page, Page::List) => {
