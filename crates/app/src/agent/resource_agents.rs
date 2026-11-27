@@ -91,6 +91,49 @@ fn registered_target(ctx: &Context, path: &Path) -> Result<Option<InstallTarget>
     Ok(registered(paths::Directory::open(&ctx.state)?.file())?.remove(path))
 }
 
+fn selected_registration(book: &Registry, id: &str) -> Result<Option<InstallTarget>> {
+    for (path, target) in book {
+        if !managed_root(path)
+            && resource::id("agent", &(&target.client, path))? == id
+            && target.open().is_ok_and(|directory| directory.path == *path)
+        {
+            return Ok(Some(target.clone()));
+        }
+    }
+    Ok(None)
+}
+
+pub(crate) fn can_forget_registration(ctx: &Context, id: &str) -> bool {
+    paths::Directory::open(&ctx.state)
+        .and_then(|state| registered(state.file()))
+        .and_then(|book| selected_registration(&book, id))
+        .is_ok_and(|entry| entry.is_some())
+}
+
+pub(crate) fn forget_registration(ctx: &Context, id: &str) -> Result<()> {
+    let state = paths::Directory::open(&ctx.state)?;
+    let chosen =
+        selected_registration(&registered(state.file())?, id)?.ok_or_else(target_changed)?;
+    crate::operations::confirm(
+        &format!(
+            "停止接管 {}\n配置目录 {}\n保留本机程序、配置和插件。",
+            crate::output::sanitize(&chosen.name, false),
+            crate::output::sanitize(&chosen.directory.canonical.display().to_string(), false),
+        ),
+        false,
+    )?;
+    let store = crate::operations::lock_after_recovery(ctx)?;
+    let mut book = registered(&store.root)?;
+    if selected_registration(&book, id)?.as_ref() != Some(&chosen) {
+        return Err(target_changed());
+    }
+    let directory = chosen.open()?;
+    book.remove(&chosen.directory.canonical);
+    store.verify_namespace()?;
+    directory.verify()?;
+    crate::operations::store::Store::atomic(&store.root, PROFILE_REGISTRY, &book)
+}
+
 pub(crate) fn add(
     ctx: &Context,
     name: &str,

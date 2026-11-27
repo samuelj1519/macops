@@ -1446,3 +1446,21 @@ fn agent_cli_detail_requires_confirmation_before_upgrade() -> TestResult {
     );
     Ok(())
 }
+
+#[test]
+fn agent_details_prompt_for_explicit_versions_before_installing() -> TestResult {
+    let f = setup("dsh", "1.0.0")?;
+    f.script("dsh", "printf 'dsh 1.0.0\\n'")?;
+    super::chezmoi_native::run_browser_pty(
+        &f,
+        &["agent"],
+        "detail-agent-version-cancel",
+        &f.home,
+        "160",
+        "3",
+    )?;
+    assert_eq!(pin(&f, false)?, config("dsh", "1.0.0"));
+    assert!(!calls(&f)?.iter().any(|call| call[0][0] == "use"));
+    assert!(!f.file("state/active.json").exists());
+    Ok(())
+}

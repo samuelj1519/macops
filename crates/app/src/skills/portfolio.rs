@@ -865,6 +865,7 @@ pub(crate) fn maintain_from_inventory(ctx: &Context, id: &str, kind: Operation) 
         .find(|item| item.id == id)
         .ok_or_else(unavailable)?;
     let Data::Capability {
+        native_id,
         origin,
         deployments,
         ..
@@ -885,6 +886,11 @@ pub(crate) fn maintain_from_inventory(ctx: &Context, id: &str, kind: Operation) 
         display_name: &resource.name,
         ..Request::for_target(id, kind, &selection)
     };
+    let (repository, offers) = if kind == Operation::Upgrade && origin.manager == "claude-plugin" {
+        inventory_plugin_offers(ctx, origin, native_id, PUBLIC_PLUGIN_SOURCES.initial)?
+    } else {
+        (None, vec![])
+    };
     let mut sites = agents
         .iter()
         .filter(|agent| {
@@ -897,17 +903,62 @@ pub(crate) fn maintain_from_inventory(ctx: &Context, id: &str, kind: Operation) 
                 ctx,
                 &request,
                 agent,
-                &[],
+                &offers,
                 std::slice::from_ref(resource),
-                None,
+                repository
+                    .as_ref()
+                    .map(crate::policy::source_git::Repository::key),
             )
         })
         .collect::<Vec<_>>();
     if sites.is_empty() {
         return Err(unavailable());
     }
+    if let Some(repo) = repository.as_ref() {
+        plan_source_switches(
+            ctx,
+            &request,
+            &mut sites,
+            &offers,
+            std::slice::from_ref(resource),
+            SwitchRequest {
+                repository: repo.key(),
+                allow_change: true,
+            },
+            crate::agent::plugin_lifecycle::SwitchOffer::prepare,
+        );
+    }
     check_target_scope(&mut sites, &agents, false);
-    apply_sites(ctx, &request, sites, &[], &agents, false, false)
+    apply_sites(ctx, &request, sites, &offers, &agents, false, false)
+}
+
+fn inventory_plugin_offers(
+    ctx: &Context,
+    origin: &crate::domain::resource::Origin,
+    native_id: &str,
+    initial: impl FnOnce(&Context, &str) -> Result<Vec<plugin_install::Offer>>,
+) -> Result<(
+    Option<crate::policy::source_git::Repository>,
+    Vec<plugin_install::Offer>,
+)> {
+    let repository = match &origin.repository {
+        Some(repo) => Some(repo.clone()),
+        None => crate::agent::plugin_marketplaces::registered_github_repository(
+            ctx,
+            &origin.manager,
+            &origin.record,
+            native_id,
+        )?,
+    };
+    let Some(repo) = repository else {
+        return Ok((None, vec![]));
+    };
+    let mut offers = crate::terminal::progress::during("核对选中插件的来源", || {
+        initial(ctx, repo.key())
+    })?;
+    offers.retain(|choice| matches!(choice, plugin_install::Offer::Claude(offer, _)
+        if offer.native_id() == native_id && crate::policy::source_git::Repository::parse(&offer.repository).is_ok_and(|source| source == repo)));
+    Ok(((!offers.is_empty()).then_some(repo), offers))
 }
 
 fn apply_sites(

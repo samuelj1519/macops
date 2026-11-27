@@ -3022,6 +3022,24 @@ esac"#,
         fs::read_to_string(f.home.join("installed"))?,
         "demo@1.0.0\ndemo@2.0.0\n"
     );
+    assert_code(
+        &f.run(&["app", "install", "demo", "--version", "3.0.0"])?.0,
+        0,
+    );
+    chezmoi_native::run_browser_pty(
+        &f,
+        &["app"],
+        "detail-app-uninstall",
+        std::path::Path::new("demo"),
+        "160",
+        "0",
+    )?;
+    assert!(!f.home.join("npm-prefix/lib/node_modules/demo").exists());
+    assert!(
+        f.read_json("state/receipts.json")?["installations"]
+            .get("fixture:demo")
+            .is_none()
+    );
     Ok(())
 }
 
@@ -8525,5 +8543,49 @@ fn skill_details_uninstall_only_the_selected_discovered_member() -> TestResult {
     assert!(
         calls.contains("\"remove\"") && calls.contains("\"alpha\"") && !calls.contains("\"beta\"")
     );
+    Ok(())
+}
+
+#[test]
+fn agent_details_forget_only_the_selected_registration() -> TestResult {
+    let f = Fixture::new()?;
+    let first = f.home.join("config-one");
+    let second = f.home.join("config-two");
+    for (name, config) in [("first-wrapper", &first), ("second-wrapper", &second)] {
+        fs::create_dir(config)?;
+        fs::write(config.join("settings.json"), b"{}\n")?;
+        f.script(name, "exit 0")?;
+        let (registered, _) = f.run(&[
+            "agent",
+            "add",
+            name,
+            "--config",
+            config.to_str().ok_or("config")?,
+            "--type",
+            "claude",
+            "--yes",
+        ])?;
+        assert_code(&registered, 0);
+    }
+    let before = f.read_json("state/agent-profiles.json")?;
+    let target = std::path::Path::new("first-wrapper");
+    chezmoi_native::run_browser_pty(
+        &f,
+        &["agent"],
+        "detail-agent-forget-cancel",
+        target,
+        "160",
+        "0",
+    )?;
+    assert_eq!(f.read_json("state/agent-profiles.json")?, before);
+    chezmoi_native::run_browser_pty(&f, &["agent"], "detail-agent-forget", target, "160", "0")?;
+    let after = f.read_json("state/agent-profiles.json")?;
+    assert!(after.get(first.to_str().ok_or("first")?).is_none());
+    assert_eq!(
+        after.get(second.to_str().ok_or("second")?),
+        before.get(second.to_str().ok_or("second")?)
+    );
+    assert_eq!(fs::read(first.join("settings.json"))?, b"{}\n");
+    assert!(f.home.join("bin/first-wrapper").is_file());
     Ok(())
 }

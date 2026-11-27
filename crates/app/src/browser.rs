@@ -110,6 +110,14 @@ pub(crate) fn list_headers(kind: Kind) -> &'static [&'static str] {
 
 fn management_label(item: &Item) -> &'static str {
     use crate::domain::resource::Management;
+    if item.management == Management::Adopted
+        && item
+            .inventory
+            .as_ref()
+            .is_some_and(|info| info.manager == "uv")
+    {
+        return "已记录基线";
+    }
     match item.management {
         Management::Declared => "有声明",
         Management::Native => "原生登记",

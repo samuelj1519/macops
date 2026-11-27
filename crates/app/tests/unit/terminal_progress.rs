@@ -15,7 +15,8 @@ fn a_native_output_banner_omits_local_recipe_arguments() -> TestResult {
         "app",
     ])?;
     let ctx = crate::context::Context::from_cli(&cli, &mut vec![])?;
-    let url = format!("https://actor:{}@example.org/file", "fixture-only");
+    let userinfo = ["actor", "fixture-only"].join(":");
+    let url = format!("https://{userinfo}@example.org/file");
     let command = CommandSpec {
         program: "/fixture/bin/brew".into(),
         args: vec!["install".into(), "--cask".into(), url.clone()],

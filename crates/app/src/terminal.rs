@@ -165,7 +165,15 @@ enum DetailTarget {
     Plugin {
         claude: bool,
     },
+    CodexRecipe {
+        id: String,
+        directory: std::path::PathBuf,
+        recipe: String,
+    },
     AgentCli(String),
+    AgentProfile {
+        registered: bool,
+    },
     Config {
         path: std::path::PathBuf,
         forget: bool,
@@ -186,6 +194,8 @@ enum NativeAction {
     AgentPreference(String),
     AgentLaunch(String),
     AgentUninstall(String),
+    AgentForget(String),
+    AgentVersion(String),
     Skills {
         action: Action,
         id: String,
@@ -197,6 +207,11 @@ enum NativeAction {
     Plugin {
         id: String,
         action: crate::domain::resource::CapabilityAction,
+    },
+    CodexReinstall {
+        id: String,
+        directory: std::path::PathBuf,
+        recipe: String,
     },
     Command {
         command: Box<crate::cli::Command>,
@@ -254,6 +269,22 @@ fn detail_target(
             }
             if manager == "skills-cli:github" {
                 DetailTarget::SharedSkill
+            } else if manager == "codex-config"
+                && !item.agents.is_empty()
+                && let Some(record) = item
+                    .inventory
+                    .as_ref()
+                    .and_then(|info| info.native_record.as_ref())
+                && let Some(directory) = record.parent()
+                && let Some(recipe) = crate::agent::native_plugins::inventory_reinstall_recipe(
+                    ctx, directory, &item.name,
+                )
+            {
+                DetailTarget::CodexRecipe {
+                    id: item.name.clone(),
+                    directory: directory.to_path_buf(),
+                    recipe,
+                }
             } else if !item.agents.is_empty() && matches!(manager, "claude-plugin" | "codex-config")
             {
                 DetailTarget::Plugin {
@@ -263,10 +294,13 @@ fn detail_target(
                 DetailTarget::Other
             }
         }
-        Kind::Agents => crate::agent::ai_policy::upgrade_target(&item.id)
-            .map_or(DetailTarget::Other, |tool| {
-                DetailTarget::AgentCli(tool.to_owned())
-            }),
+        Kind::Agents => crate::agent::ai_policy::upgrade_target(&item.id).map_or_else(
+            || DetailTarget::AgentProfile {
+                registered: item.management == Management::Adopted
+                    && crate::agent::resource_agents::can_forget_registration(ctx, &item.id),
+            },
+            |tool| DetailTarget::AgentCli(tool.to_owned()),
+        ),
         Kind::Config if !item.directory && session.observed(&item.id, true).is_ok() => item
             .path
             .as_ref()
@@ -321,7 +355,10 @@ fn application_detail_target(ctx: &Context, item: &Item, manager: &str) -> Detai
             | Provider::Brew { cask: true, .. }
             | Provider::Mise { .. }
             | Provider::Cargo { .. }
-            | Provider::Bun { .. },
+            | Provider::Bun { .. }
+            | Provider::Npm {
+                authority: None, ..
+            },
         ) => (true, true, true),
         Some(Provider::Npm {
             authority: Some(authority),
@@ -774,9 +811,19 @@ impl Browser {
         };
         let selector = self.visible().get(self.row)?.id.clone();
         if key == 'x' {
-            return details
-                .agent_removable
-                .then_some(NativeAction::AgentUninstall(selector));
+            return if details.agent_removable {
+                Some(NativeAction::AgentUninstall(selector))
+            } else if matches!(
+                details.target,
+                DetailTarget::AgentProfile {
+                    registered: true,
+                    ..
+                }
+            ) {
+                Some(NativeAction::AgentForget(selector))
+            } else {
+                None
+            };
         }
         details.agent_session.as_ref()?;
         Some(if key == 'e' {
@@ -788,35 +835,49 @@ impl Browser {
 
     fn detail_action(&self, key: char) -> Option<NativeAction> {
         use crate::{
-            cli::{AgentCmd, Command, Config, SkillCmd},
+            cli::{Command, SkillCmd},
             domain::resource::CapabilityAction,
         };
         let Page::Detail(details) = &self.page else {
             return None;
         };
         let id = self.selected()?;
-        let (command, title, confirm, report) = match (&details.target, key) {
-            (DetailTarget::SharedSkill, 'u' | 'x') => {
-                return Some(NativeAction::SharedSkill {
+        match (&details.target, key) {
+            (
+                DetailTarget::CodexRecipe {
                     id,
-                    action: if key == 'u' {
-                        Action::Upgrade
-                    } else {
-                        Action::Uninstall
-                    },
-                });
-            }
-            (DetailTarget::SharedSkill, 'a') => (
-                Command::Skill {
+                    directory,
+                    recipe,
+                },
+                'u',
+            ) => Some(NativeAction::CodexReinstall {
+                id: id.clone(),
+                directory: directory.clone(),
+                recipe: recipe.clone(),
+            }),
+            (DetailTarget::CodexRecipe { .. }, 'x') => Some(NativeAction::Plugin {
+                id,
+                action: CapabilityAction::Uninstall,
+            }),
+            (DetailTarget::SharedSkill, 'u' | 'x') => Some(NativeAction::SharedSkill {
+                id,
+                action: if key == 'u' {
+                    Action::Upgrade
+                } else {
+                    Action::Uninstall
+                },
+            }),
+            (DetailTarget::SharedSkill, 'a') => Some(NativeAction::Command {
+                command: Box::new(Command::Skill {
                     project: None,
                     details: false,
                     only: vec![],
                     command: Some(SkillCmd::Adopt { id, recipe: None }),
-                },
-                "技能管理结果",
-                None,
-                false,
-            ),
+                }),
+                title: "技能管理结果",
+                confirm: None,
+                report: false,
+            }),
             (DetailTarget::Plugin { claude }, key) => {
                 let action = match key {
                     'u' if *claude => CapabilityAction::Upgrade,
@@ -825,61 +886,14 @@ impl Browser {
                     'x' => CapabilityAction::Uninstall,
                     _ => return None,
                 };
-                return Some(NativeAction::Plugin { id, action });
+                Some(NativeAction::Plugin { id, action })
             }
-            (DetailTarget::AgentCli(tool), 'u') => (
-                Command::Agent {
-                    project: None,
-                    command: Some(AgentCmd::Upgrade {
-                        tool: Some(tool.clone()),
-                        force_live: false,
-                    }),
-                },
-                "Agent CLI 升级结果",
-                Some(format!(
-                    "升级 Agent CLI {tool}？使用此程序的配置都会使用新版本。"
-                )),
-                false,
-            ),
+            (DetailTarget::AgentCli(tool), 'u') => Some(agent_upgrade_action(tool)),
             (DetailTarget::Config { path, forget }, key) => {
-                let target = || crate::policy::config_local::config_id(path).ok();
-                let (command, title, report) = match key {
-                    'd' => (
-                        Config::Diff {
-                            path: Some(path.clone()),
-                        },
-                        "配置差异",
-                        true,
-                    ),
-                    'v' => (
-                        Config::Verify {
-                            targets: vec![path.clone()],
-                        },
-                        "配置核验结果",
-                        true,
-                    ),
-                    'p' => (Config::Apply { target: target()? }, "配置应用结果", false),
-                    'x' if *forget => (Config::Forget { target: target()? }, "停止管理结果", false),
-                    _ => return None,
-                };
-                (
-                    Command::Config {
-                        project: None,
-                        command: Some(command),
-                    },
-                    title,
-                    None,
-                    report,
-                )
+                config_inventory_action(path, *forget, key)
             }
-            _ => return None,
-        };
-        Some(NativeAction::Command {
-            command: Box::new(command),
-            title,
-            confirm,
-            report,
-        })
+            _ => None,
+        }
     }
 
     fn detail_shortcut(&self, event: &KeyEvent) -> Option<NativeAction> {
@@ -915,7 +929,7 @@ impl Browser {
             if matches!(detail.target, DetailTarget::App { install, upgrade, uninstall, .. }
                 if !(match action { Action::Install => install, Action::Upgrade => upgrade, _ => uninstall }))
             {
-                self.notice = "这份安装暂无已核验的维护入口。请用详情中的原安装工具维护。".into();
+                self.notice = "这份安装暂无已核验的维护入口。按 a 查看接管条件。".into();
                 return None;
             }
             return self.preview_operation(ctx, action);
@@ -924,21 +938,25 @@ impl Browser {
     }
 
     fn run_native(&mut self, ctx: &Context, session: &mut Session, action: NativeAction) {
-        if let NativeAction::AgentUninstall(label) = &action {
-            let result = crate::agent::resource_agents::uninstall(ctx, label, false, false);
-            self.refresh(ctx, session);
-            self.notice = match result {
-                Ok(data) => format!(
-                    "单独配置已归档 · {}",
-                    data["archive"].as_str().unwrap_or("")
-                ),
-                Err(error) => crate::output::error_text(&error),
-            };
-            return;
-        }
         let result = match action {
             NativeAction::AppVersion { package, action } => {
                 self.prompt_app_version(ctx, &package, action);
+                return;
+            }
+            NativeAction::AgentVersion(tool) => {
+                let update = prompt_agent_upgrade(ctx, &tool);
+                self.show_native_result(ctx, session, update);
+                return;
+            }
+            NativeAction::CodexReinstall {
+                id,
+                directory,
+                recipe,
+            } => {
+                let result = crate::agent::native_plugin_tx::reinstall_from_inventory(
+                    ctx, &recipe, &id, &directory,
+                );
+                self.operation_result(ctx, session, Action::Upgrade, result);
                 return;
             }
             NativeAction::Plugin { id, action } => {
@@ -960,27 +978,7 @@ impl Browser {
                 confirm,
                 report,
             } => {
-                let result = (|| {
-                    if let Some(message) = confirm {
-                        crate::operations::confirm(&message, false)?;
-                    }
-                    crate::run_inventory_command(ctx, *command)
-                })();
-                match result {
-                    Ok(text) if report => {
-                        self.notice.clear();
-                        self.offset = 0;
-                        self.page = Page::File {
-                            path: title.into(),
-                            text,
-                        };
-                    }
-                    Ok(text) => {
-                        self.reload_detail(ctx, session);
-                        self.notice = format!("{title}\n{}", text.trim_end());
-                    }
-                    Err(error) => self.notice = crate::output::error_text(&error),
-                }
+                self.run_inventory_action(ctx, session, *command, title, confirm, report);
                 return;
             }
             NativeAction::Brew { action, package } => {
@@ -1008,11 +1006,69 @@ impl Browser {
                 crate::agent::codex_install::session::launch(ctx, &label, None, false, false)
                     .map(|_| ())
             }
-            NativeAction::AgentUninstall(_) => return,
+            NativeAction::AgentUninstall(label) => {
+                let result = crate::agent::resource_agents::uninstall(ctx, &label, false, false)
+                    .map(|data| {
+                        format!(
+                            "单独配置已归档 · {}",
+                            data["archive"].as_str().unwrap_or("")
+                        )
+                    });
+                self.show_native_result(ctx, session, result);
+                return;
+            }
+            NativeAction::AgentForget(id) => {
+                let result = crate::agent::resource_agents::forget_registration(ctx, &id)
+                    .map(|()| "已停止接管。".into());
+                self.show_native_result(ctx, session, result);
+                return;
+            }
         };
         self.refresh(ctx, session);
         self.notice = match result {
             Ok(()) => "已保存下次由 mo 启动时的插件设置".into(),
+            Err(error) => crate::output::error_text(&error),
+        };
+    }
+
+    fn run_inventory_action(
+        &mut self,
+        ctx: &Context,
+        session: &mut Session,
+        command: crate::cli::Command,
+        title: &str,
+        confirm: Option<String>,
+        report: bool,
+    ) {
+        let result = (|| {
+            if let Some(message) = confirm {
+                crate::operations::confirm(&message, false)?;
+            }
+            crate::run_inventory_command(ctx, command)
+        })();
+        match result {
+            Ok(text) if report => {
+                self.notice.clear();
+                self.offset = 0;
+                self.page = Page::File {
+                    path: title.into(),
+                    text,
+                };
+            }
+            Ok(text) => {
+                self.reload_detail(ctx, session);
+                self.notice = format!("{title}\n{}", text.trim_end());
+            }
+            Err(error) => self.notice = crate::output::error_text(&error),
+        }
+    }
+
+    fn show_native_result(&mut self, ctx: &Context, session: &mut Session, result: Result<String>) {
+        self.notice = match result {
+            Ok(text) => {
+                self.refresh(ctx, session);
+                text
+            }
             Err(error) => crate::output::error_text(&error),
         };
     }
@@ -1323,6 +1379,94 @@ impl Browser {
     }
 }
 
+fn agent_upgrade_action(tool: &str) -> NativeAction {
+    use crate::cli::{AgentCmd, Command};
+    if crate::agent::ai_policy::version(tool, None).is_err() {
+        return NativeAction::AgentVersion(tool.into());
+    }
+    NativeAction::Command {
+        command: Box::new(Command::Agent {
+            project: None,
+            command: Some(AgentCmd::Upgrade {
+                tool: Some(tool.into()),
+                force_live: false,
+            }),
+        }),
+        title: "Agent CLI 升级结果",
+        report: false,
+        confirm: Some(format!(
+            "升级 Agent CLI {tool}？使用此程序的配置都会使用新版本。"
+        )),
+    }
+}
+
+fn prompt_agent_upgrade(ctx: &Context, tool: &str) -> Result<String> {
+    use crate::cli::{AgentCmd, Command};
+    eprintln!(
+        "输入 {} 的新版本（直接按 Enter 取消）",
+        sanitize(tool, false)
+    );
+    let mut text = String::new();
+    std::io::stdin().read_line(&mut text)?;
+    let version = text.trim();
+    if version.is_empty() {
+        return Err(Error::attention("cancelled", "已取消操作"));
+    }
+    crate::agent::ai_policy::version(tool, Some(version))?;
+    crate::operations::confirm(
+        &format!("将 {tool} 升级到 {version}。使用此程序的配置都会使用新版本。"),
+        false,
+    )?;
+    crate::run_inventory_command(
+        ctx,
+        Command::Agent {
+            project: None,
+            command: Some(AgentCmd::Install {
+                tool: tool.into(),
+                version: Some(version.into()),
+                force_live: false,
+            }),
+        },
+    )
+}
+
+fn config_inventory_action(
+    path: &std::path::Path,
+    forget: bool,
+    key: char,
+) -> Option<NativeAction> {
+    use crate::cli::{Command, Config};
+    let target = || crate::policy::config_local::config_id(path).ok();
+    let (command, title, report) = match key {
+        'd' => (
+            Config::Diff {
+                path: Some(path.to_path_buf()),
+            },
+            "配置差异",
+            true,
+        ),
+        'v' => (
+            Config::Verify {
+                targets: vec![path.to_path_buf()],
+            },
+            "配置核验结果",
+            true,
+        ),
+        'p' => (Config::Apply { target: target()? }, "配置应用结果", false),
+        'x' if forget => (Config::Forget { target: target()? }, "停止管理结果", false),
+        _ => return None,
+    };
+    Some(NativeAction::Command {
+        command: Box::new(Command::Config {
+            project: None,
+            command: Some(command),
+        }),
+        title,
+        confirm: None,
+        report,
+    })
+}
+
 fn recovery_summary(preview: &RecoveryPreview) -> String {
     let journal = &preview.journal;
     format!(
@@ -1454,28 +1598,6 @@ fn operation_label(action: Action) -> &'static str {
 }
 
 fn keys(kind: Kind, page: &Page, unified: bool) -> std::borrow::Cow<'static, str> {
-    if let Page::Detail(details) = page
-        && let DetailTarget::App {
-            adopt,
-            install,
-            upgrade,
-            uninstall,
-        } = details.target
-        && (adopt || install || upgrade || uninstall)
-    {
-        return [
-            (install, "i 安装"),
-            (adopt, "a 检查管理资格"),
-            (upgrade, "u 升级"),
-            (uninstall, "x 卸载"),
-            (true, "Esc 返回  q 退出"),
-        ]
-        .into_iter()
-        .filter_map(|(enabled, label)| enabled.then_some(label))
-        .collect::<Vec<_>>()
-        .join("  ")
-        .into();
-    }
     let text = match page {
         Page::List if matches!(kind, Kind::Skills | Kind::Capabilities) => {
             "j/k 滚动  / 搜索（@档案）  Enter 详情  a 切换发现项  r 刷新  q 退出"
@@ -1492,42 +1614,65 @@ fn keys(kind: Kind, page: &Page, unified: bool) -> std::borrow::Cow<'static, str
             _ => "Enter 确认卸载  Esc 返回  q 退出",
         },
         Page::Recovery(_) => "Enter 确认核对  Esc 返回  q 退出",
-        Page::Detail(details) if details.recovery.is_some() => "c 核对原操作  Esc 返回  q 退出",
-        Page::Detail(details) if details.agent_session.is_some() => {
-            "e 插件设置  l 启动档案  x 卸载  Esc 返回  q 退出"
+        Page::Detail(details) => return detail_keys(kind, details, unified),
+        Page::File { .. } => "j/k 滚动  Esc 返回  q 退出",
+    };
+    text.into()
+}
+
+fn detail_keys(kind: Kind, details: &Details, unified: bool) -> std::borrow::Cow<'static, str> {
+    if let DetailTarget::App {
+        adopt,
+        install,
+        upgrade,
+        uninstall,
+    } = details.target
+        && (adopt || install || upgrade || uninstall)
+    {
+        return [
+            (install, "i 安装"),
+            (adopt, "a 检查管理资格"),
+            (upgrade, "u 升级"),
+            (uninstall, "x 卸载"),
+            (true, "Esc 返回  q 退出"),
+        ]
+        .into_iter()
+        .filter_map(|(enabled, label)| enabled.then_some(label))
+        .collect::<Vec<_>>()
+        .join("  ")
+        .into();
+    }
+    let text = if details.recovery.is_some() {
+        "c 核对原操作  Esc 返回  q 退出"
+    } else if details.agent_session.is_some() {
+        "e 插件设置  l 启动档案  x 卸载  Esc 返回  q 退出"
+    } else if details.agent_removable {
+        "x 卸载  Esc 返回  q 退出"
+    } else if details.skills_native {
+        "u 升级  x 卸载  Esc 返回  q 退出"
+    } else {
+        match details.target {
+            DetailTarget::SharedSkill => "u 升级  x 卸载  a 接管技能  Esc 返回  q 退出",
+            DetailTarget::Plugin { claude: true } => {
+                "e 启用  d 停用  u 升级  x 卸载  Esc 返回  q 退出"
+            }
+            DetailTarget::Plugin { claude: false } => "x 卸载插件  Esc 返回  q 退出",
+            DetailTarget::CodexRecipe { .. } => {
+                "u 按固定配方检查并重装  x 卸载插件  Esc 返回  q 退出"
+            }
+            DetailTarget::AgentCli(_) => "u 升级 Agent CLI  Esc 返回  q 退出",
+            DetailTarget::AgentProfile { registered: true } => "x 停止接管  Esc 返回  q 退出",
+            DetailTarget::Config { forget: true, .. } => {
+                "o 打开实际文件  s 打开管理源  d 差异  v 核验  p 应用  x 停止管理  Esc 返回  q 退出"
+            }
+            DetailTarget::Config { .. } => {
+                "o 打开实际文件  s 打开管理源  d 差异  v 核验  p 应用  Esc 返回  q 退出"
+            }
+            _ if kind == Kind::Config => "o 打开实际文件  s 打开管理源  Esc 返回  q 退出",
+            _ if kind == Kind::Apps => "仅盘点 · a 检查接管条件  Esc 返回  q 退出",
+            _ if unified && kind == Kind::Capabilities => "a 检查管理资格  Esc 返回  q 退出",
+            _ => "j/k 滚动  Esc 返回  q 退出",
         }
-        Page::Detail(details) if details.agent_removable => "x 卸载  Esc 返回  q 退出",
-        Page::Detail(details) if details.skills_native => "u 升级  x 卸载  Esc 返回  q 退出",
-        Page::Detail(details) if matches!(details.target, DetailTarget::SharedSkill) => {
-            "u 升级  x 卸载  a 接管技能  Esc 返回  q 退出"
-        }
-        Page::Detail(details)
-            if matches!(details.target, DetailTarget::Plugin { claude: true }) =>
-        {
-            "e 启用  d 停用  u 升级  x 卸载  Esc 返回  q 退出"
-        }
-        Page::Detail(details)
-            if matches!(details.target, DetailTarget::Plugin { claude: false }) =>
-        {
-            "x 卸载插件  Esc 返回  q 退出"
-        }
-        Page::Detail(details) if matches!(details.target, DetailTarget::AgentCli(_)) => {
-            "u 升级 Agent CLI  Esc 返回  q 退出"
-        }
-        Page::Detail(details)
-            if matches!(details.target, DetailTarget::Config { forget: true, .. }) =>
-        {
-            "o 打开实际文件  s 打开管理源  d 差异  v 核验  p 应用  x 停止管理  Esc 返回  q 退出"
-        }
-        Page::Detail(details) if matches!(details.target, DetailTarget::Config { .. }) => {
-            "o 打开实际文件  s 打开管理源  d 差异  v 核验  p 应用  Esc 返回  q 退出"
-        }
-        Page::Detail(_) if kind == Kind::Config => "o 打开实际文件  s 打开管理源  Esc 返回  q 退出",
-        Page::Detail(_) if kind == Kind::Apps => "只读 · 请用原安装工具维护  Esc 返回  q 退出",
-        Page::Detail(_) if unified && kind == Kind::Capabilities => {
-            "a 检查管理资格  Esc 返回  q 退出"
-        }
-        Page::Detail(_) | Page::File { .. } => "j/k 滚动  Esc 返回  q 退出",
     };
     text.into()
 }

@@ -344,3 +344,33 @@ fn verified_source_switch_previews_new_version_and_skips_already_verified_target
     }
     Ok(())
 }
+
+#[test]
+fn inventory_offers_match_only_the_selected_market_plugin_and_repository() -> TestResult {
+    use crate::{domain::resource::Origin, policy::source_git::Repository};
+    let (_temp, ctx) = fixture()?;
+    let origin = Origin {
+        repository: Some(Repository::parse("owner/repo")?),
+        manager: "claude-plugin".into(),
+        label: None,
+        record: ctx.home.join(".claude/plugins/installed_plugins.json"),
+        native_key: "widget@fixture".into(),
+    };
+    let mut foreign = offer()?;
+    let plugin_install::Offer::Claude(remote, _) = &mut foreign else {
+        return Err("fixture offer".into());
+    };
+    remote.repository = "other/repo".into();
+    let (repo, found) = inventory_plugin_offers(&ctx, &origin, "widget@fixture", |_, queried| {
+        assert_eq!(queried, "owner/repo");
+        Ok(vec![foreign, offer()?])
+    })?;
+    assert_eq!(repo.as_ref().map(Repository::key), Some("owner/repo"));
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].plugin_info()?.0, "widget@fixture");
+    let (repo, found) =
+        inventory_plugin_offers(&ctx, &origin, "else@fixture", |_, _| Ok(vec![offer()?]))?;
+    assert!(repo.is_none() && found.is_empty());
+    assert!(!ctx.state.exists());
+    Ok(())
+}

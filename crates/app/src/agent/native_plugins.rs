@@ -431,6 +431,28 @@ pub fn run(ctx: &Context, command: &NativePlugins, dry_run: bool, yes: bool) -> 
     ))
 }
 
+pub(crate) fn inventory_reinstall_recipe(
+    ctx: &Context,
+    directory: &Path,
+    id: &str,
+) -> Option<String> {
+    let registry = Registry::read(ctx).ok()?;
+    let instance = registry.instances.get("codex")?;
+    if instance.home != ctx.home
+        || instance.config_root != directory
+        || !crate::agent::native_plugin_tx::certified(instance)
+    {
+        return None;
+    }
+    let mut recipes = registry.recipes.iter().filter(|(_, recipe)| {
+        recipe.instances == ["codex"]
+            && recipe.native_id() == id
+            && matches!(recipe.source, Source::LocalDirectory { .. })
+    });
+    let (first, _) = recipes.next()?;
+    recipes.next().is_none().then(|| first.clone())
+}
+
 #[cfg(test)]
 #[path = "../../tests/unit/native_plugins.rs"]
 mod tests;

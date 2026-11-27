@@ -451,12 +451,40 @@ fn finish(
 }
 
 pub fn upgrade(ctx: &Context, key: &str, dry_run: bool, yes: bool) -> Result<Value> {
+    upgrade_selected(ctx, key, dry_run, yes, None)
+}
+
+pub(crate) fn reinstall_from_inventory(
+    ctx: &Context,
+    key: &str,
+    id: &str,
+    directory: &Path,
+) -> Result<Value> {
+    upgrade_selected(ctx, key, false, false, Some((id, directory)))
+}
+
+fn upgrade_selected(
+    ctx: &Context,
+    key: &str,
+    dry_run: bool,
+    yes: bool,
+    selected: Option<(&str, &Path)>,
+) -> Result<Value> {
     upgrade_with_capture(
         ctx,
         key,
         dry_run,
         yes,
-        |path| capture(&ctx.home, &ctx.state, path, key, ctx.timeout_secs),
+        |path| {
+            let snapshot = capture(&ctx.home, &ctx.state, path, key, ctx.timeout_secs)?;
+            if let Some((id, directory)) = selected
+                && (snapshot.native_id != id
+                    || snapshot.invocation.env.get("CODEX_HOME").map(Path::new) != Some(directory))
+            {
+                return Err(changed());
+            }
+            Ok(snapshot)
+        },
         |store, path, current| {
             let (mut journal, binding) = prepare_upgrade(ctx, store, key, path, current)?;
             let outcome = native_runner::launch(store, &mut journal, &binding)?;
@@ -481,8 +509,7 @@ fn upgrade_with_capture(
         );
     }
     crate::operations::confirm(&format!("按固定配方重新安装 {}", initial.native_id), yes)?;
-    let store = Store::lock(ctx)?;
-    store.check_pending()?;
+    let store = crate::operations::lock_after_recovery(ctx)?;
     let current = capture(&path)?;
     if initial.before != current.before || initial.invocation != current.invocation {
         return Err(changed());
