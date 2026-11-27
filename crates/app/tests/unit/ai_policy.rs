@@ -122,6 +122,7 @@ fn cursor_http_pin_requires_a_complete_string_download_descriptor() -> TestResul
         "1.0.0"
     );
     for descriptor in [
+        "{ version = 1, url = 'https://example.test/cursor' }",
         "{ version = '1.0.0', version_list_url = 'https://example.test/releases' }",
         "{ version = '1.0.0', url = 9 }",
         "{ version = '1.0.0', platforms = [] }",

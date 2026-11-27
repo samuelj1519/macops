@@ -555,19 +555,25 @@ fn agent_uninstall_reports_the_archive_location_for_preview_and_completion()
 
 #[test]
 fn command_tables_use_the_supplied_terminal_width() {
-    let layout = TextLayout {
-        columns: 40,
-        terminal: true,
+    let command = Command::History { query: None };
+    let data =
+        json!([{"id": "OP-fixture", "plan": {"package": {"name": "配置"}, "action": "install"}}]);
+    let render = |columns| {
+        command_human(
+            TextLayout {
+                columns,
+                terminal: true,
+            },
+            &command,
+            &data,
+        )
     };
-    let text = command_human(
-        layout,
-        &Command::History { query: None },
-        &json!([{"id": "OP-fixture", "plan": {"package": {"name": "配置"}, "action": "install"}}]),
-    );
-    assert!(text.contains("操作号"));
-    assert!(text.contains("OP-fixture"));
-    assert!(text.contains("配置"));
-    assert!(!text.contains('\t'));
+    let wide = render(80);
+    assert!(wide.contains("操作号") && wide.contains("OP-fixture") && wide.contains("配置"));
+    assert!(wide.contains('─') && !wide.contains('\t'));
+    let narrow = render(12);
+    assert!(narrow.contains("操作号　OP-fixture") && narrow.contains("目标　配置"));
+    assert!(!narrow.contains('─') && !narrow.contains('\t'));
 }
 
 #[test]
@@ -593,4 +599,95 @@ fn agent_batch_summary_distinguishes_work_done_from_existing_state() {
     assert!(text.contains("本次修改 1 · 已达目标 1 · 未安装 1"));
     data["mode"] = json!("dry-run");
     assert!(command_human(layout, &command, &data).starts_with("预演 · 升级\n"));
+}
+
+#[test]
+fn fixed_versions_point_to_the_repository_once() -> crate::test_support::TestResult {
+    let data = json!({"results": [
+        {"status": "fixed-version", "repository": "owner/repo"},
+        {"status": "fixed-version", "repository": "owner/repo"},
+        {"status": "fixed-version"}
+    ]});
+    let output = journey(&["skill", "upgrade", "fixture"], &data)?;
+    assert!(output.contains("所选技能固定在当前版本"));
+    assert_eq!(output.matches("mo recommend owner/repo").count(), 1);
+    assert_eq!(
+        journey(&["skill", "upgrade", "fixture"], &json!({}))?,
+        "{}\n"
+    );
+    Ok(())
+}
+
+#[test]
+fn registration_report_labels_previous_and_new_records() {
+    let command = Command::Search {
+        query: "claude-mi".into(),
+    };
+    let layout = TextLayout {
+        columns: 80,
+        terminal: false,
+    };
+    for (status, label) in [
+        ("preview", "登记预演"),
+        ("already-registered", "已登记"),
+        ("registered", "登记完成"),
+    ] {
+        let data = json!({"agentRegistration":true,"status":status,"name":"claude-mi","config":"/fixture/.claude-mi"});
+        let output = command_human(layout, &command, &data);
+        assert!(output.contains(&format!("{label} · claude-mi")));
+        assert!(output.contains("配置目录　/fixture/.claude-mi"));
+    }
+}
+
+#[test]
+fn skill_journey_reports_install_preview_and_recovery_without_operation_ids() {
+    let preview = json!({
+        "skillAction": "install", "mode":"dry-run",
+        "available":["new"], "skills":["existing"], "alreadyPresent": [],
+        "directory":"/fixture/skills",
+    });
+    let output = command_human(
+        TextLayout {
+            columns: 80,
+            terminal: false,
+        },
+        &Command::Search {
+            query: "fixture".into(),
+        },
+        &preview,
+    );
+    assert!(output.contains("安装技能 · 预览"));
+    assert!(output.contains("可安装　new") && output.contains("可接管　existing"));
+    assert!(output.contains("位置　/fixture/skills") && !output.contains("已有　"));
+    let no_directory = skill_journey(&json!({"skillAction":"install","mode":"dry-run"}));
+    assert!(!no_directory.unwrap_or_default().contains("位置　"));
+
+    let mut execution = json!({
+        "skillAction":"adopt", "target":"owner/repo", "incomplete": false,
+        "results":[{"journal":{"phase":"succeeded","plan":{"package":{"name":"existing"}}}}],
+    });
+    let output = human(&execution);
+    assert!(output.contains("existing · 已接管，保留现有技能文件"));
+    assert!(output.contains("mo skill upgrade owner/repo"));
+
+    execution["next"] = json!("mo skill upgrade sample");
+    assert!(human(&execution).contains("mo skill upgrade sample"));
+
+    execution["incomplete"] = json!(true);
+    execution["results"][0]["journal"]["phase"] = json!("unknown");
+    execution["results"][0]["journal"]["id"] = json!("OP-fixture");
+    assert!(human(&execution).contains("查看记录可运行 mo recover"));
+    assert!(!human(&execution).contains("OP-fixture"));
+
+    for (status, label) in [
+        ("already-managed", "已经接管"),
+        ("up-to-date", "已是所选版本"),
+    ] {
+        execution["status"] = json!(status);
+        assert!(human(&execution).contains(label));
+    }
+    execution["skillAction"] = json!("unrecognized");
+    assert!(skill_journey(&execution).is_none());
+
+    assert!(terminal_line(TerminalLine::Section, "本机状态", false).contains("──  本机状态"));
 }

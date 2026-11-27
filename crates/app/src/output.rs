@@ -746,7 +746,7 @@ fn skill_summary(layout: TextLayout, command: &SkillCmd, data: &Value) -> Option
                 ("/reason", "原因"),
             ],
         )),
-        SkillCmd::Upgrade(_) if data["results"].is_array() => {
+        SkillCmd::Upgrade(_) => {
             let rows = data["results"].as_array()?;
             if rows.iter().all(|row| row["status"] == "fixed-version") && !rows.is_empty() {
                 let mut text = String::from("所选技能固定在当前版本。\n");
