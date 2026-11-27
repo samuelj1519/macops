@@ -385,7 +385,6 @@ fn evidence<'a>(
                     .aliases
                     .iter()
                     .any(|alias| alias.eq_ignore_ascii_case(request.name))
-                || (belongs && plugin_short_name(&origin.manager, native_id, request.name))
         };
         if !matches {
             if belongs
@@ -421,55 +420,6 @@ fn evidence<'a>(
         unsupported,
         plugins,
     }
-}
-
-fn plugin_short_name(manager: &str, id: &str, query: &str) -> bool {
-    matches!(manager, "claude-plugin" | "codex-config")
-        && id
-            .rsplit_once('@')
-            .is_some_and(|(name, _)| name.eq_ignore_ascii_case(query))
-}
-
-fn check_short_plugin_name(
-    name: &str,
-    local: &[Resource],
-    agents: &[Agent<'_>],
-    picked: &[usize],
-) -> Result<()> {
-    if picked.len() < 2 || name.contains('@') {
-        return Ok(());
-    }
-    let ids: BTreeSet<_> = local
-        .iter()
-        .filter_map(|resource| match &resource.data {
-            Data::Capability {
-                origin,
-                native_id,
-                deployments,
-                ..
-            } if plugin_short_name(&origin.manager, native_id, name)
-                && deployments.iter().any(|deployment| {
-                    deployment.scope == "user"
-                        && picked
-                            .iter()
-                            .any(|index| deployment.harness == agents[*index].profile.id)
-                }) =>
-            {
-                Some(native_id.as_str())
-            }
-            _ => None,
-        })
-        .collect();
-    if ids.len() > 1 {
-        return Err(Error::attention(
-            "skill_plugin_name_ambiguous",
-            format!(
-                "所选 Agent 使用不同市场的同名插件：{}。请指定完整插件名。",
-                ids.into_iter().collect::<Vec<_>>().join("、")
-            ),
-        ));
-    }
-    Ok(())
 }
 
 fn plan_plugin(
@@ -840,9 +790,6 @@ fn execute(
     }
     let (local, _) =
         crate::capability::resource_capabilities::collect_observed(ctx, &profiles, None, false)?;
-    if repository.is_none() {
-        check_short_plugin_name(request.name, &local, &agents, &picked)?;
-    }
     let fetch_offers = || {
         verified_offers(
             ctx,

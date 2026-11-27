@@ -88,13 +88,7 @@ fn preview_resolves_exact_agent_plugin_and_separates_unsupported_and_missing_tar
         "--dry-run",
     ])?;
     assert_code(&out, 0);
-    let row = &result["data"]["results"][0];
-    assert_eq!(row["status"], "blocked");
-    assert!(
-        row["reason"]
-            .as_str()
-            .is_some_and(|s| s.contains("多份安装"))
-    );
+    assert_eq!(result["data"]["results"][0]["status"], "not-installed");
     let (out, result) = f.run(&[
         "skill",
         "enable",
@@ -180,12 +174,13 @@ fn short_plugin_name_does_not_operate_across_distinct_markets() -> TestResult {
     let command = ["skill", "uninstall", "widget", "--agent", "all"];
     for option in ["--dry-run", "--yes"] {
         let (out, report) = f.run(&[&command[..], &[option]].concat())?;
-        assert_code(&out, 3);
-        assert_eq!(report["error"]["code"], "skill_plugin_name_ambiguous");
-        let reason = report["error"]["message"]
-            .as_str()
-            .ok_or("ambiguity details")?;
-        assert!(reason.contains("widget@fixture-a") && reason.contains("widget@fixture-b"));
+        assert_code(&out, 0);
+        assert!(
+            rows(&report)
+                .ok_or("Agent rows")?
+                .iter()
+                .all(|row| row["status"] == "not-installed")
+        );
     }
     let (out, report) = f.run(&[
         "skill",
@@ -439,5 +434,41 @@ fi"#,
                 .is_some_and(|names| names.contains(&json!("codex")))
     }));
     assert!(!f.home.join("launches").exists());
+    Ok(())
+}
+
+#[test]
+fn shared_skill_name_does_not_also_select_an_unrelated_native_plugin() -> TestResult {
+    let f = Fixture::new()?;
+    let claude = f.home.join(".claude-mi");
+    claude_plugin(&claude, "fixture", "1.0.0")?;
+    let book = claude.join("plugins/installed_plugins.json");
+    let before = fs::read(&book)?;
+    fs::create_dir(f.home.join(".codex"))?;
+    native_skill_fixture(&f, &["widget"])?;
+    super::public_skill_runner(&f)?;
+    let (out, report) = f.run(&[
+        "skill",
+        "uninstall",
+        "widget",
+        "--agent",
+        "claude-mi",
+        "--agent",
+        "codex",
+        "--shared",
+        "--yes",
+    ])?;
+    assert_code(&out, 0);
+    let rows = rows(&report).ok_or("batch rows")?;
+    assert!(
+        rows.iter()
+            .any(|row| row["agent"] == "claude-mi" && row["status"] == "not-installed")
+    );
+    assert!(
+        rows.iter()
+            .any(|row| row["agent"] == "codex" && row["status"] == "changed")
+    );
+    assert_eq!(fs::read(book)?, before);
+    assert!(!f.home.join(".agents/skills/widget").exists());
     Ok(())
 }

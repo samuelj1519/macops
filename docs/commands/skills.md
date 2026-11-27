@@ -36,7 +36,7 @@ mo skill upgrade owner/repo --agent all --dry-run
 
 用 macops 安装且核验成功的技能会记录后续维护证据。已有的受支持原生安装在维护时根据实际状态查找。首次维护兼容的共享技能可能先确认现有安装基线。遇到不受支持的原生安装方式，按 `mo recommend OWNER/REPO` 给出的来源指引处理。
 
-插件可按名称查找。选中的配置安装了来自不同市场的同名插件时，使用清单显示的完整名称，例如 `widget@fixture-market`，再预演操作。
+插件可按可核验的来源仓库查找，也可使用清单显示的完整名称，例如 `widget@fixture-market`。预演时核对所选的 Agent 和安装位置。
 
 ## 配方与兼容入口
 
