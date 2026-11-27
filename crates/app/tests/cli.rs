@@ -8547,6 +8547,36 @@ fn skill_details_uninstall_only_the_selected_discovered_member() -> TestResult {
 }
 
 #[test]
+fn skill_details_can_register_an_existing_shared_member_without_reinstalling() -> TestResult {
+    let f = Fixture::new()?;
+    native_skill_fixture(&f, &["alpha", "beta"])?;
+    public_skill_runner(&f)?;
+    let lock = f.home.join(".agents/.skill-lock.json");
+    let payload = f.home.join(".agents/skills/beta/SKILL.md");
+    let original_lock = fs::read(&lock)?;
+    let original_payload = fs::read(&payload)?;
+    chezmoi_native::run_browser_pty(
+        &f,
+        &["skill"],
+        "detail-discovered-skill-adopt",
+        std::path::Path::new("beta"),
+        "160",
+        "0",
+    )?;
+    assert_eq!(fs::read(lock)?, original_lock);
+    assert_eq!(fs::read(payload)?, original_payload);
+    assert!(!f.home.join("native-calls.jsonl").exists());
+    let receipts = f.read_json("state/receipts.json")?;
+    let managed = receipts["installations"].as_object().ok_or("receipts")?;
+    assert_eq!(managed.len(), 1);
+    assert_eq!(
+        managed.values().next().ok_or("receipt")?["package"]["name"],
+        "beta"
+    );
+    Ok(())
+}
+
+#[test]
 fn agent_details_forget_only_the_selected_registration() -> TestResult {
     let f = Fixture::new()?;
     let first = f.home.join("config-one");

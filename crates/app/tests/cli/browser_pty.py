@@ -462,6 +462,17 @@ try:
         expect("fixture Skills CLI removed alpha", offset)
         expect("卸载结果 已完成", offset)
         type_key(b"q")
+    elif scenario == "detail-discovered-skill-adopt":
+        expect("技能清单")
+        type_key(b"/" + target.encode() + b"\r")
+        offset = type_key(b"\r")
+        expect("a 接管技能", offset)
+        offset = type_key(b"a")
+        expect("接管现有技能", offset)
+        expect("确认执行", offset)
+        offset = type_key(b"\x1b[B\r")
+        expect("技能管理结果", offset)
+        type_key(b"q")
     elif scenario in ("detail-config-operations", "detail-config-apply"):
         expect("受管配置清单")
         offset = type_key(b"/.demo\r")
