@@ -569,3 +569,22 @@ fn profile_overlay_hashes_and_nested_registry_are_validated_with_legacy_metadata
     assert!(record(home,br#"{"schema_version":2,"policy_hash":null,"files":{},"profiles":{"/wrong":{"target":"relative","parents":{},"fields":{"format":"claude","plugins":{},"pstack":null}}}}"#).is_err());
     Ok(())
 }
+
+#[test]
+fn skill_name_requires_valid_frontmatter_and_a_string_name() -> TestResult {
+    assert_eq!(
+        skill_name(b"---\nname: fixture\ndescription: example\n---\nBody\n")?,
+        "fixture"
+    );
+    for invalid in [
+        &b"\xff"[..],
+        b"body without a header",
+        b"---\nname: [\n---\n",
+        b"---\n- fixture\n---\n",
+        b"---\ndescription: missing name\n---\n",
+        b"---\nname: 42\n---\n",
+    ] {
+        assert!(skill_name(invalid).is_err());
+    }
+    Ok(())
+}

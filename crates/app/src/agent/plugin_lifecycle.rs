@@ -391,6 +391,32 @@ impl Intent {
         offered: Option<(&str, &str)>,
         require_offer: bool,
     ) -> Result<Option<Self>> {
+        Self::plan_using(
+            ctx,
+            target,
+            id,
+            operation,
+            offered,
+            require_offer,
+            |ctx, client, desired| match client {
+                "claude" => super::claude_install::binary(ctx),
+                "codex" if matches!(desired, Desired::Absent) => super::codex_install::binary(ctx),
+                _ => Err(unavailable(
+                    "该客户端没有已核验的原生启停命令。请用它的插件菜单。",
+                )),
+            },
+        )
+    }
+
+    fn plan_using(
+        ctx: &Context,
+        target: InstallTarget,
+        id: &str,
+        operation: Operation,
+        offered: Option<(&str, &str)>,
+        require_offer: bool,
+        binary_for: impl FnOnce(&Context, &str, &Desired) -> Result<PathBuf>,
+    ) -> Result<Option<Self>> {
         let before = read_facts(&target, id)?;
         let mut market = None;
         let desired = match operation {
@@ -438,15 +464,7 @@ impl Intent {
         if !before.installed {
             return Err(unavailable("所选配置里没有安装这个插件。"));
         }
-        let binary = match target.client.as_str() {
-            "claude" => super::claude_install::binary(ctx)?,
-            "codex" if matches!(desired, Desired::Absent) => super::codex_install::binary(ctx)?,
-            _ => {
-                return Err(unavailable(
-                    "该客户端没有已核验的原生启停命令。请用它的插件菜单。",
-                ));
-            }
-        };
+        let binary = binary_for(ctx, &target.client, &desired)?;
         let binary_digest = digest_binary(&binary)?;
         Ok(Some(Self {
             target,
@@ -564,6 +582,15 @@ impl Intent {
     }
 
     fn run_locked(&self, ctx: &Context, store: &Store) -> Result<Value> {
+        self.run_locked_with(ctx, store, native_runner::launch)
+    }
+
+    fn run_locked_with(
+        &self,
+        ctx: &Context,
+        store: &Store,
+        launch: impl FnOnce(&Store, &mut Journal, &native_runner::RunBinding) -> Result<NativeOutcome>,
+    ) -> Result<Value> {
         store.check_pending()?;
         let current = read_facts(&self.target, &self.id)?;
         if self.reached(&current)? {
@@ -619,10 +646,14 @@ impl Intent {
         store.save(&journal)?;
         let invocation = self.invocation(&ctx.home, ctx.timeout_secs);
         let binding = native_runner::prepare(store, &journal, &invocation)?;
-        let outcome = native_runner::launch(store, &mut journal, &binding)?;
+        let outcome = launch(store, &mut journal, &binding)?;
         finish(store, &mut journal, self, &outcome)
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/unit/plugin_lifecycle.rs"]
+mod tests;
 
 fn state_name(journal: &Journal) -> String {
     format!("agent-plugin-action-{}.json", journal.id)

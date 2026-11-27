@@ -5,7 +5,10 @@ use crate::{
     context::Context,
     domain::{FileId, fingerprint},
     error::Result,
-    operations::store::Store,
+    operations::{
+        native_runner::{self, NativeOutcome, RunBinding},
+        store::Store,
+    },
     platform::fs::Directory,
 };
 use serde::{Deserialize, Serialize};
@@ -457,10 +460,22 @@ impl SourceSwitch {
     }
 
     pub(crate) fn run(self, ctx: &Context) -> Result<Value> {
+        self.run_with(ctx, native_runner::launch)
+    }
+
+    fn run_with(
+        self,
+        ctx: &Context,
+        mut launch: impl FnMut(
+            &Store,
+            &mut crate::domain::Journal,
+            &RunBinding,
+        ) -> Result<NativeOutcome>,
+    ) -> Result<Value> {
         let store = Store::lock(ctx)?;
         store.check_pending()?;
         if let Some(import) = &self.import {
-            let result = import.run_locked(ctx, &store)?;
+            let result = import.run_locked_with(ctx, &store, &mut launch)?;
             if result["journal"]["phase"] != "succeeded" && result["status"] != "current" {
                 return Ok(result);
             }
@@ -483,7 +498,7 @@ impl SourceSwitch {
             binary_digest: self.binary_digest,
             market: None,
         }
-        .run_locked(ctx, &store)
+        .run_locked_with(ctx, &store, launch)
     }
 }
 

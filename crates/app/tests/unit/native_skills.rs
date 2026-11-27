@@ -9,8 +9,8 @@ mod guard_tests;
 #[path = "native_skills_refresh.rs"]
 mod refresh_tests;
 
-fn fixture() -> std::result::Result<(tempfile::TempDir, Context, Recipe), Box<dyn std::error::Error>>
-{
+pub(super) fn fixture()
+-> std::result::Result<(tempfile::TempDir, Context, Recipe), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir_in("/private/tmp")?;
     let home = temp.path().join("home");
     fs::create_dir(&home)?;

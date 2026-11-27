@@ -26,10 +26,13 @@ pub(super) fn install(ctx: &Context, source: &str, dry: bool, yes: bool) -> Resu
 pub(super) fn plan_install(ctx: &Context, source: &str) -> Result<InstallPlan> {
     native_config_scope(ctx)?;
     let request = public_skill::Request::parse(source)?;
-    let mut recipes =
-        crate::terminal::progress::during("查找仓库中可安装的技能", || {
-            request.discover(ctx)
-        })?;
+    let recipes = crate::terminal::progress::during("查找仓库中可安装的技能", || {
+        request.discover(ctx)
+    })?;
+    plan_recipes(ctx, request.repository.key(), recipes)
+}
+
+fn plan_recipes(ctx: &Context, source: &str, recipes: Vec<Recipe>) -> Result<InstallPlan> {
     let (witness, raw) = disk::witness(&disk::lock_path(ctx))?;
     let rows = policy::registry(raw.as_deref())?;
     let (_, book) = load_book(ctx)?;
@@ -37,7 +40,7 @@ pub(super) fn plan_install(ctx: &Context, source: &str) -> Result<InstallPlan> {
     let mut existing_proofs = vec![];
     let mut all_verified = true;
     let mut available = Vec::with_capacity(recipes.len());
-    for recipe in recipes.drain(..) {
+    for recipe in recipes {
         let before = disk::capture(&disk::payload(ctx, &recipe.install_name)?)?;
         if rows.contains_key(&recipe.install_name) || before.present() {
             let verified = before.present()
@@ -73,7 +76,7 @@ pub(super) fn plan_install(ctx: &Context, source: &str) -> Result<InstallPlan> {
         available.push(recipe);
     }
     Ok(InstallPlan {
-        source: request.repository.key().into(),
+        source: source.into(),
         existing,
         existing_proofs,
         available,
@@ -499,3 +502,7 @@ fn scope_guidance(error: Error) -> Error {
         _ => error,
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/unit/native_skills_journey.rs"]
+mod tests;

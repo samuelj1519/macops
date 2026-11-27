@@ -59,32 +59,40 @@ impl Request {
     ) -> Result<Option<crate::agent::claude_install_source::Offer>> {
         with_git(&self.repository, |git| {
             let root = git.fetch_commit(&self.repository, commit)?;
-            let Some(dir) = subtree(git, &root, ".claude-plugin")? else {
-                return Ok(None);
-            };
-            let files = git.tree(&dir)?;
-            let blob = |name: &str| {
-                files
-                    .iter()
-                    .find(|file| {
-                        file.name.as_str() == name && matches!(file.kind, TreeKind::File { .. })
-                    })
-                    .map(|file| git.blob(&file.object))
-                    .transpose()
-            };
-            let (Some(marketplace), Some(plugin)) =
-                (blob("marketplace.json")?, blob("plugin.json")?)
-            else {
-                return Ok(None);
-            };
-            crate::agent::claude_install_source::Offer::identify(
-                self.repository.key(),
-                commit,
-                &marketplace,
-                &plugin,
-            )
-            .map(Some)
+            self.claude_offer_from_tree(git, &root, commit)
         })
+    }
+
+    fn claude_offer_from_tree(
+        &self,
+        git: &Git,
+        root: &ObjectId,
+        commit: &ObjectId,
+    ) -> Result<Option<crate::agent::claude_install_source::Offer>> {
+        let Some(dir) = subtree(git, root, ".claude-plugin")? else {
+            return Ok(None);
+        };
+        let files = git.tree(&dir)?;
+        let blob = |name: &str| {
+            files
+                .iter()
+                .find(|file| {
+                    file.name.as_str() == name && matches!(file.kind, TreeKind::File { .. })
+                })
+                .map(|file| git.blob(&file.object))
+                .transpose()
+        };
+        let (Some(marketplace), Some(plugin)) = (blob("marketplace.json")?, blob("plugin.json")?)
+        else {
+            return Ok(None);
+        };
+        crate::agent::claude_install_source::Offer::identify(
+            self.repository.key(),
+            commit,
+            &marketplace,
+            &plugin,
+        )
+        .map(Some)
     }
 
     pub fn discover(&self, ctx: &Context) -> Result<Vec<Recipe>> {
@@ -92,60 +100,69 @@ impl Request {
         with_git(&self.repository, |git| {
             let commit = git.resolve(&self.repository, &self.reference)?;
             let root = git.fetch_commit(&self.repository, &commit)?;
-            let mut sources = vec![];
-            read_member(git, &root, ".", &mut sources)?;
-            let mut inspected = 1;
-            for folder in ["skills", ".agents/skills"] {
-                let Some(directory) = subtree(git, &root, folder)? else {
-                    continue;
-                };
-                for entry in git.tree(&directory)? {
-                    if entry.kind == TreeKind::Directory {
-                        inspected += 1;
-                        if inspected > 128 {
-                            return Err(Error::attention(
-                                "public_skill_member_limit",
-                                "仓库的技能目录超过核对上限。请运行 mo recommend 查看来源提供的安装方式。",
-                            ));
-                        }
-                        let path = format!("{folder}/{}", entry.name.as_str());
-                        read_member(git, &entry.object, &path, &mut sources)?;
-                    }
-                }
-            }
-            let mut names = BTreeSet::new();
-            if sources.is_empty()
-                || sources.len() > 128
-                || sources
-                    .iter()
-                    .any(|(_, name, _)| !names.insert(name.clone()))
-            {
+            self.skills_from_tree(git, &root, &commit, &runner)
+        })
+    }
+
+    fn skills_from_tree(
+        &self,
+        git: &Git,
+        root: &ObjectId,
+        commit: &ObjectId,
+        runner: &Runner,
+    ) -> Result<Vec<Recipe>> {
+        let mut sources = vec![];
+        read_member(git, root, ".", &mut sources)?;
+        let mut inspected = 1;
+        for folder in ["skills", ".agents/skills"] {
+            let Some(directory) = subtree(git, root, folder)? else {
+                continue;
+            };
+            let mut members = git.tree(&directory)?;
+            members.retain(|entry| entry.kind == TreeKind::Directory);
+            inspected += members.len();
+            if inspected > 128 {
                 return Err(Error::attention(
-                    "public_skill_members_unavailable",
-                    "在该版本的技能目录中找不到唯一可安装的技能。",
-                )
-                .with_guidance(
-                    "没有可选的技能。",
-                    format!(
-                        "运行 mo recommend {} 查看来源提供的安装方式。",
-                        self.repository.key()
-                    ),
+                    "public_skill_member_limit",
+                    "仓库的技能目录超过核对上限。请运行 mo recommend 查看来源提供的安装方式。",
                 ));
             }
-            sources
-                .into_iter()
-                .map(|(directory, name, manual)| {
-                    let source = Source {
-                        repository: self.repository.key().into(),
-                        commit: commit.as_str().into(),
-                        skill_directory: directory,
-                        member_name: name.clone(),
-                        tracking_ref: self.tracking_ref.clone(),
-                    };
-                    recipe(name, source, manual, runner.clone())
-                })
-                .collect()
-        })
+            for entry in members {
+                let path = format!("{folder}/{}", entry.name.as_str());
+                read_member(git, &entry.object, &path, &mut sources)?;
+            }
+        }
+        let mut names = BTreeSet::new();
+        if sources.is_empty()
+            || sources
+                .iter()
+                .any(|(_, name, _)| !names.insert(name.clone()))
+        {
+            return Err(Error::attention(
+                "public_skill_members_unavailable",
+                "在该版本的技能目录中找不到唯一可安装的技能。",
+            )
+            .with_guidance(
+                "没有可选的技能。",
+                format!(
+                    "运行 mo recommend {} 查看来源提供的安装方式。",
+                    self.repository.key()
+                ),
+            ));
+        }
+        sources
+            .into_iter()
+            .map(|(directory, name, manual)| {
+                let source = Source {
+                    repository: self.repository.key().into(),
+                    commit: commit.as_str().into(),
+                    skill_directory: directory,
+                    member_name: name.clone(),
+                    tracking_ref: self.tracking_ref.clone(),
+                };
+                recipe(name, source, manual, runner.clone())
+            })
+            .collect()
     }
 }
 
@@ -356,3 +373,7 @@ fn valid_runner_entry(entry: &Path) -> bool {
             },
         )
 }
+
+#[cfg(test)]
+#[path = "../../tests/unit/public_skill.rs"]
+mod tests;

@@ -1,3 +1,5 @@
+#[path = "cli/agent_capability_batch.rs"]
+mod agent_capability_batch;
 #[path = "cli/ai_native.rs"]
 mod ai_native;
 #[path = "cli/brew_native.rs"]

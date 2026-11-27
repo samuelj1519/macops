@@ -401,6 +401,11 @@ fn evidence<'a>(
                     .aliases
                     .iter()
                     .any(|alias| alias.eq_ignore_ascii_case(request.name))
+                || (belongs
+                    && matches!(origin.manager.as_str(), "claude-plugin" | "codex-config")
+                    && native_id
+                        .rsplit_once('@')
+                        .is_some_and(|(name, _)| name.eq_ignore_ascii_case(request.name)))
         };
         if !matches {
             if belongs
@@ -904,8 +909,28 @@ fn perform(
     request: &Request<'_>,
     sites: Vec<Site<'_>>,
     offers: &[plugin_install::Offer],
-    mut rows: Vec<Value>,
+    rows: Vec<Value>,
     mut shared_plan: Option<native_skills::SharedPlan>,
+) -> Result<Value> {
+    perform_with(ctx, request, sites, offers, rows, |work| match work {
+        Work::Shared => shared_plan.take().ok_or_else(selector_error)?.run(ctx),
+        Work::Install(index, target) => target.open().and_then(|_| {
+            crate::terminal::progress::with_install_progress(|| {
+                plugin_install::install_at_profile_in_batch(ctx, &offers[index], *target)
+            })
+        }),
+        Work::Native(intent) => intent.run(ctx),
+        Work::Switch(plan) => plan.run(ctx),
+    })
+}
+
+fn perform_with(
+    ctx: &Context,
+    request: &Request<'_>,
+    sites: Vec<Site<'_>>,
+    offers: &[plugin_install::Offer],
+    mut rows: Vec<Value>,
+    mut execute: impl FnMut(Work) -> Result<Value>,
 ) -> Result<Value> {
     let mut shared: Option<(&str, String)> = None;
     let mut physical = std::collections::BTreeMap::new();
@@ -943,17 +968,7 @@ fn perform(
             continue;
         }
         let is_shared = matches!(work, Work::Shared);
-        let result = match work {
-            Work::Shared => shared_plan.take().ok_or_else(selector_error)?.run(ctx),
-            Work::Install(index, target) => target.open().and_then(|_| {
-                crate::terminal::progress::with_install_progress(|| {
-                    plugin_install::install_at_profile_in_batch(ctx, &offers[index], *target)
-                })
-            }),
-            Work::Native(intent) => intent.run(ctx),
-            Work::Switch(plan) => plan.run(ctx),
-        };
-        let (status, reason) = result_status(ctx, result)?;
+        let (status, reason) = result_status(ctx, execute(work))?;
         row["status"] = json!(status);
         row["reason"] = json!(reason);
         if is_shared {
@@ -973,6 +988,10 @@ fn perform(
         json!({"agentBatch":true,"verb":request.kind.label(),"results":rows,"incomplete":incomplete}),
     )
 }
+
+#[cfg(test)]
+#[path = "../../tests/unit/portfolio.rs"]
+mod tests;
 
 fn result_status(ctx: &Context, result: Result<Value>) -> Result<(&'static str, String)> {
     Ok(match result {

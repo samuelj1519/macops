@@ -127,3 +127,192 @@ fn a_second_plugin_from_the_market_blocks_the_source_switch() -> TestResult {
     assert_eq!(std::fs::read(profile.join(SETTINGS))?, settings);
     Ok(())
 }
+
+const ID: &str = "widget@fixture-market";
+const MARKET: &str = "fixture-market";
+const CATALOG: &[u8] = br#"{"name":"fixture-market","plugins":[{"name":"widget","source":"./"}]}"#;
+const INITIAL: &[u8] = br#"{"name":"widget","version":"1.0.0"}"#;
+const UPDATED: &[u8] = br#"{"name":"widget","version":"2.0.0"}"#;
+
+struct SwitchFixture {
+    _temp: tempfile::TempDir,
+    profile: PathBuf,
+    old: PathBuf,
+    ctx: Context,
+    target: InstallTarget,
+    basis: SwitchOffer,
+}
+
+impl SwitchFixture {
+    fn new() -> std::result::Result<Self, Box<dyn std::error::Error>> {
+        use crate::cli::Cli;
+        use clap::Parser;
+        use std::fs;
+        let temp = tempfile::tempdir_in("/private/tmp")?;
+        let home = temp.path().join("home");
+        let profile = home.join(".claude");
+        let old = home.join("old-market");
+        let upstream = home.join("fixed-commit");
+        Self::populate(&old, INITIAL)?;
+        Self::populate(&upstream, UPDATED)?;
+        let ctx = Context::from_cli(
+            &Cli::try_parse_from([
+                "mo",
+                "--home",
+                home.to_str().ok_or("fixture home")?,
+                "skill",
+            ])?,
+            &mut vec![],
+        )?;
+        fs::create_dir_all(profile.join("plugins"))?;
+        let target = InstallTarget {
+            client: "claude".into(),
+            name: "claude:default".into(),
+            directory: crate::capability::capability_store::binding(
+                &Directory::open(&profile)?,
+                &profile,
+            )?,
+            command: None,
+        };
+        let commit = crate::policy::source_git::ObjectId::parse(&"a".repeat(40))?;
+        let offer = Offer::identify("owner/repo", &commit, CATALOG, UPDATED)?;
+        let market = GithubMarket {
+            repo: "owner/repo".into(),
+            commit: commit.as_str().into(),
+            files: fingerprint(&capability_local::claude_market_files(&Directory::open(
+                &upstream,
+            )?)?)?,
+        };
+        let binary = home.join("synthetic-claude");
+        fs::copy("/usr/bin/true", &binary)?;
+        let basis = SwitchOffer {
+            offer,
+            market,
+            binary_digest: super::super::digest_binary(&binary)?,
+            binary,
+        };
+        let fixture = Self {
+            _temp: temp,
+            profile,
+            old,
+            ctx,
+            target,
+            basis,
+        };
+        Self::populate(&fixture.cache("1.0.0"), INITIAL)?;
+        fixture.register("1.0.0")?;
+        let directory = json!({"source":"directory","path":fixture.old});
+        fixture.register_market(&fixture.old, &directory)?;
+        fs::write(
+            fixture.profile.join(SETTINGS),
+            serde_json::to_vec(&json!({
+                "extraKnownMarketplaces":{MARKET:{"source":directory,"autoUpdate":false}},
+                "enabledPlugins":{ID:false},"model":"keep"
+            }))?,
+        )?;
+        Ok(fixture)
+    }
+
+    fn populate(root: &std::path::Path, manifest: &[u8]) -> std::io::Result<()> {
+        std::fs::create_dir_all(root.join(".claude-plugin"))?;
+        std::fs::write(root.join(".claude-plugin/plugin.json"), manifest)?;
+        std::fs::write(root.join(".claude-plugin/marketplace.json"), CATALOG)
+    }
+
+    fn cache(&self, version: &str) -> PathBuf {
+        self.profile
+            .join("plugins/cache/fixture-market/widget")
+            .join(version)
+    }
+
+    fn register(&self, version: &str) -> Result<()> {
+        std::fs::write(
+            self.profile.join("plugins/installed_plugins.json"),
+            serde_json::to_vec(&json!({
+                "version":2,"plugins":{ID:[{"scope":"user","version":version,"installPath":self.cache(version)}]}
+            }))?,
+        )?;
+        Ok(())
+    }
+
+    fn register_market(&self, location: &std::path::Path, source: &Value) -> Result<()> {
+        std::fs::write(
+            self.profile.join("plugins/known_marketplaces.json"),
+            serde_json::to_vec(&json!({
+                MARKET:{"source":source,"installLocation":location}
+            }))?,
+        )?;
+        Ok(())
+    }
+
+    fn settings(&self) -> Result<Value> {
+        Ok(serde_json::from_slice(&std::fs::read(
+            self.profile.join(SETTINGS),
+        )?)?)
+    }
+}
+
+#[test]
+fn switch_publishes_verified_market_before_plugin_update_and_retry_is_idempotent() -> TestResult {
+    for complete_import in [true, false] {
+        let f = SwitchFixture::new()?;
+        let wanted = &f.basis.market;
+        assert!(!SourceSwitch::is_bound(&f.target, &f.basis.offer)?);
+        let plan = SourceSwitch::plan(f.target.clone(), &f.basis, true)?.ok_or("source switch")?;
+        assert_eq!(plan.version(), "2.0.0");
+        assert!(plan.detail().contains(f.old.to_str().ok_or("old path")?));
+        assert!(plan.key().2.contains(&wanted.commit));
+        let mut calls = Vec::new();
+        let report = plan.run_with(&f.ctx, |_, journal, binding| {
+            let invocation = &binding.invocation;
+            super::super::worker_guard(journal, invocation)?;
+            let args = &invocation.command.args;
+            assert_eq!(invocation.env["GIT_CONFIG_GLOBAL"], "/dev/null");
+            calls.push(args[1].clone());
+            if args[1] == "marketplace" {
+                let modified = f.settings()?;
+                assert_eq!(
+                    modified["extraKnownMarketplaces"][MARKET]["source"],
+                    wanted.declaration()
+                );
+                assert_eq!(
+                    modified["extraKnownMarketplaces"][MARKET]["autoUpdate"],
+                    false
+                );
+                assert_eq!(modified["model"], "keep");
+                if !complete_import {
+                    return Ok(NativeOutcome::Unknown {
+                        reason: "fixture interruption".into(),
+                    });
+                }
+                let slot = f.profile.join("plugins/marketplaces").join(MARKET);
+                SwitchFixture::populate(&slot, UPDATED)?;
+                f.register_market(&slot, &wanted.declaration())?;
+            } else {
+                assert_eq!(args, &["plugin", "update", ID, "--scope", "user"]);
+                assert!(wanted.verify_cache(&f.target, ID)?);
+                SwitchFixture::populate(&f.cache("2.0.0"), UPDATED)?;
+                f.register("2.0.0")?;
+            }
+            let exited = NativeOutcome::Exited {
+                code: Some(0),
+                signal: None,
+            };
+            super::super::worker_after(journal, invocation, &exited)?;
+            Ok(exited)
+        })?;
+        if complete_import {
+            assert_eq!(calls, ["marketplace", "update"]);
+            assert_eq!(report["journal"]["phase"], "succeeded");
+            assert!(SourceSwitch::is_bound(&f.target, &f.basis.offer)?);
+            assert!(SourceSwitch::plan(f.target.clone(), &f.basis, false)?.is_none());
+        } else {
+            assert_eq!(calls, ["marketplace"]);
+            assert_eq!(report["journal"]["phase"], "unknown");
+            assert!(!SourceSwitch::is_bound(&f.target, &f.basis.offer)?);
+            assert!(!f.cache("2.0.0").exists() && f.cache("1.0.0").exists());
+        }
+        assert_eq!(f.settings()?["enabledPlugins"][ID], false);
+    }
+    Ok(())
+}
