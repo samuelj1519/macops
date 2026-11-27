@@ -366,8 +366,8 @@ try:
         expect("Enter 详情")
         if scenario == "market-browser":
             expect("fixture-codex")
-            offset = type_key(b"/")
-            expect("搜索", offset)
+            type_key(b"/")
+            expect_screen_row(2, "/ 搜索 · ▏")
             type_key(b"two\r")
             member = "two"
         elif scenario == "market-entry":
@@ -461,8 +461,8 @@ try:
         expect("软件")
         offset = type_key(b"\t")
         expect("能力", offset)
-        offset = type_key(b"/widget @claude:mi\r")
-        expect("widget @claude:mi", offset)
+        type_key(b"/widget @claude:mi\r")
+        expect_screen_row(4, "/ 搜索 · widget @claude:mi")
         offset = type_key(b"\r")
         expect("e 启用", offset)
         offset = type_key(b"e")
@@ -688,9 +688,8 @@ try:
     elif scenario == "skill":
         expect("技能清单")
         expect("fixture-skill")
-        original_count = len(capture)
         type_key(b"/@codex\r")
-        expect("@codex", original_count)
+        expect_screen_row(3, "/ 搜索 · @codex")
         offset = type_key(b"\r")
         expect("仅手动触发", offset)
         type_key(b"\x03")
