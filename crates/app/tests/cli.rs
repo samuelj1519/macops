@@ -8454,3 +8454,27 @@ fn app_details_execute_the_same_declared_upgrade_after_confirmation() -> TestRes
     assert_eq!(fs::read_to_string(f.file("calls"))?, "upgrade\n");
     Ok(())
 }
+
+#[test]
+fn app_details_cancel_then_upgrade_to_the_explicit_version() -> TestResult {
+    let f = Fixture::new()?;
+    let mut catalog = f.read_json("catalog.json")?;
+    catalog["packages"][0]["provider"]["available"] = json!(null);
+    write_json(&f.catalog, &catalog)?;
+    fs::write(f.file("version"), "1.0.0")?;
+    assert_code(
+        &f.run(&["app", "adopt", "--id", "fixture:demo", "--yes"])?.0,
+        0,
+    );
+    chezmoi_native::run_browser_pty(
+        &f,
+        &["app"],
+        "detail-version-upgrade",
+        std::path::Path::new("demo"),
+        "160",
+        "0",
+    )?;
+    assert_eq!(fs::read_to_string(f.file("version"))?, "2.4.0");
+    assert_eq!(fs::read_to_string(f.file("calls"))?, "upgrade\n");
+    Ok(())
+}

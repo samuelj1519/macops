@@ -394,7 +394,7 @@ try:
         offset = type_key(b"a")
         expect("config_scope_unsupported", offset)
         type_key(b"q")
-    elif scenario in ("detail-app-readonly", "detail-declared-upgrade"):
+    elif scenario in ("detail-app-readonly", "detail-declared-upgrade", "detail-version-upgrade"):
         expect("软件")
         offset = type_key(b"/" + target.encode() + b"\r")
         expect(target, offset)
@@ -403,9 +403,19 @@ try:
             expect("只读", offset)
             offset = type_key(b"u")
             expect("暂无已核验的维护入口", offset)
+            type_key(b"a")
+            expect_screen_row(27, "这份安装暂无可登记的维护入口。请查看详情中的渠道和安装范围。")
         else:
             expect("u 升级", offset)
             offset = type_key(b"u")
+            if scenario == "detail-version-upgrade":
+                expect("输入 demo 的目标版本", offset)
+                offset = type_key(b"\r")
+                expect("已取消。", offset)
+                offset = type_key(b"u")
+                expect("输入 demo 的目标版本", offset)
+                offset = type_key(b"2.4.0\r")
+                expect("目标版本 2.4.0", offset)
             expect("Enter 确认升级", offset)
             offset = type_key(b"\r")
             expect("升级结果 已完成", offset)
