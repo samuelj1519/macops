@@ -842,6 +842,25 @@ fn execute(
 }
 
 pub(crate) fn maintain_from_inventory(ctx: &Context, id: &str, kind: Operation) -> Result<Value> {
+    maintain_inventory_using(
+        ctx,
+        id,
+        kind,
+        PUBLIC_PLUGIN_SOURCES.initial,
+        crate::agent::plugin_lifecycle::SwitchOffer::prepare,
+    )
+}
+
+fn maintain_inventory_using(
+    ctx: &Context,
+    id: &str,
+    kind: Operation,
+    initial: impl FnOnce(&Context, &str) -> Result<Vec<plugin_install::Offer>>,
+    prepare: impl FnMut(
+        &crate::agent::claude_install_source::Offer,
+        &Path,
+    ) -> Result<crate::agent::plugin_lifecycle::SwitchOffer>,
+) -> Result<Value> {
     if ctx.chezmoi.source.is_some()
         || ctx.chezmoi.destination.is_some()
         || ctx.chezmoi.config.is_some()
@@ -887,7 +906,7 @@ pub(crate) fn maintain_from_inventory(ctx: &Context, id: &str, kind: Operation) 
         ..Request::for_target(id, kind, &selection)
     };
     let (repository, offers) = if kind == Operation::Upgrade && origin.manager == "claude-plugin" {
-        inventory_plugin_offers(ctx, origin, native_id, PUBLIC_PLUGIN_SOURCES.initial)?
+        inventory_plugin_offers(ctx, origin, native_id, initial)?
     } else {
         (None, vec![])
     };
@@ -925,7 +944,7 @@ pub(crate) fn maintain_from_inventory(ctx: &Context, id: &str, kind: Operation) 
                 repository: repo.key(),
                 allow_change: true,
             },
-            crate::agent::plugin_lifecycle::SwitchOffer::prepare,
+            prepare,
         );
     }
     check_target_scope(&mut sites, &agents, false);

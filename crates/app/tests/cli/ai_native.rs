@@ -1462,5 +1462,20 @@ fn agent_details_prompt_for_explicit_versions_before_installing() -> TestResult 
     assert_eq!(pin(&f, false)?, config("dsh", "1.0.0"));
     assert!(!calls(&f)?.iter().any(|call| call[0][0] == "use"));
     assert!(!f.file("state/active.json").exists());
+    payload(&f, "dsh")?;
+    super::chezmoi_native::run_browser_pty(
+        &f,
+        &["agent"],
+        "detail-agent-version-apply",
+        &f.home,
+        "160",
+        "3",
+    )?;
+    assert_eq!(pin(&f, false)?, config("dsh", "2.0.0"));
+    assert_eq!(pin(&f, true)?, config("dsh", "2.0.0"));
+    assert_eq!(
+        calls(&f)?.iter().filter(|call| call[0][0] == "use").count(),
+        1
+    );
     Ok(())
 }

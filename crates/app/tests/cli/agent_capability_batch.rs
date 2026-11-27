@@ -743,3 +743,34 @@ fn plugin_details_route_configured_codex_plugin_to_its_native_guard() -> TestRes
     assert!(!f.file("state").exists());
     Ok(())
 }
+
+#[test]
+fn plugin_details_check_only_the_selected_codex_fixed_recipe() -> TestResult {
+    let f = Fixture::new()?;
+    let profile = f.home.join(".codex");
+    let config = profile.join("config.toml");
+    let body = "[plugins.'widget@fixture']\nenabled=true\n";
+    fs::create_dir_all(profile.join("plugins/cache/fixture/widget/1.0.0"))?;
+    fs::write(&config, body)?;
+    let settings = f.home.join(".config/macops");
+    fs::create_dir_all(&settings)?;
+    write_json(
+        &settings.join("native-plugin-recipes.json"),
+        &json!({
+            "schema_version":1,
+            "instances":{"codex":{"home":f.home,"config_root":profile,"cwd":f.home,"binary":f.home.join("bin/codex"),"binary_sha256":"739cda86e15d30a6e2b40cf8dcbbfb988aaf48b305b27065573bb8e9fd41d002","version":"0.169.0"}},
+            "recipes":{"widget":{"revision":"1","instances":["codex"],"marketplace":"fixture","plugin":"widget","source":{"type":"local_directory","root":f.home.join("market"),"member":"plugins/widget"}}}
+        }),
+    )?;
+    super::chezmoi_native::run_browser_pty(
+        &f,
+        &["app"],
+        "detail-codex-fixed-refusal",
+        &f.home,
+        "160",
+        "0",
+    )?;
+    assert_eq!(fs::read_to_string(config)?, body);
+    assert!(!f.file("state").exists());
+    Ok(())
+}

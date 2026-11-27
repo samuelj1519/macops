@@ -8578,6 +8578,17 @@ fn agent_details_forget_only_the_selected_registration() -> TestResult {
         "0",
     )?;
     assert_eq!(f.read_json("state/agent-profiles.json")?, before);
+    chezmoi_native::run_browser_pty(
+        &f,
+        &["agent"],
+        "detail-agent-forget-stale",
+        target,
+        "160",
+        "0",
+    )?;
+    assert_eq!(f.read_json("state/agent-profiles.json")?, before);
+    fs::remove_dir(&first)?;
+    fs::rename(f.home.join("config-one-before"), &first)?;
     chezmoi_native::run_browser_pty(&f, &["agent"], "detail-agent-forget", target, "160", "0")?;
     let after = f.read_json("state/agent-profiles.json")?;
     assert!(after.get(first.to_str().ok_or("first")?).is_none());

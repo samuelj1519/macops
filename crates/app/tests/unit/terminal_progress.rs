@@ -59,6 +59,21 @@ fn a_native_output_banner_omits_local_recipe_arguments() -> TestResult {
 }
 
 #[test]
+fn native_command_preview_round_trips_spaces_quotes_and_empty_arguments() {
+    let command = crate::domain::CommandSpec {
+        program: "/fixture/tool dir/claude".into(),
+        args: vec!["plugin".into(), "with'quote".into(), String::new()],
+    };
+    assert_eq!(
+        super::super::plan::native_command(
+            &command,
+            Some(("CLAUDE_CONFIG_DIR", "/fixture/user config"))
+        ),
+        "CLAUDE_CONFIG_DIR='/fixture/user config' '/fixture/tool dir/claude' plugin 'with'\\''quote' ''"
+    );
+}
+
+#[test]
 fn progress_keeps_the_same_circle_and_label_start_with_and_without_color() {
     let label = "核验新市场与插件";
     for (phase, activity, suffix) in [

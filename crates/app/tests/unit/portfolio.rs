@@ -374,3 +374,76 @@ fn inventory_offers_match_only_the_selected_market_plugin_and_repository() -> Te
     assert!(!ctx.state.exists());
     Ok(())
 }
+
+#[test]
+fn inventory_market_upgrade_can_be_skipped_in_the_actual_terminal_picker() -> TestResult {
+    const CHILD: &str = "MACOPS_PORTFOLIO_SKIP_TEST";
+    if std::env::var_os(CHILD).is_none() {
+        let exe = std::env::current_exe()?;
+        let output = std::process::Command::new("/usr/bin/python3")
+            .args(["-I", "-S", "-c", include_str!("../cli/browser_pty.py"), "portfolio-source-skip", "unused", "160", "0"])
+            .arg(exe)
+            .args(["--exact", "skills::portfolio::tests::inventory_market_upgrade_can_be_skipped_in_the_actual_terminal_picker", "--nocapture"])
+            .env(CHILD, "1")
+            .output()?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return Ok(());
+    }
+
+    let (_temp, ctx, offer, basis) =
+        crate::test_support::PluginTargetFixture::planned_switch(false)?;
+    let profile = ctx.home.join(".claude");
+    let market = &offer.marketplace;
+    let registry = profile.join("plugins/known_marketplaces.json");
+    let mut book: Value = serde_json::from_slice(&fs::read(&registry)?)?;
+    let old_checkout = std::path::PathBuf::from(
+        book[market]["installLocation"]
+            .as_str()
+            .ok_or("old location")?,
+    );
+    let slot = profile.join("plugins/marketplaces").join(market);
+    fs::create_dir_all(slot.parent().ok_or("market parent")?)?;
+    fs::rename(old_checkout, &slot)?;
+    fs::create_dir(slot.join(".git"))?;
+    let old = "b".repeat(40);
+    fs::write(slot.join(".git/HEAD"), &old)?;
+    let pinned = json!({"source":"github","repo":offer.repository,"ref":old});
+    book[market]["source"] = pinned.clone();
+    book[market]["installLocation"] = json!(slot);
+    fs::write(registry, serde_json::to_vec(&book)?)?;
+    let settings = profile.join("settings.json");
+    let mut config: Value = serde_json::from_slice(&fs::read(&settings)?)?;
+    config["extraKnownMarketplaces"][market]["source"] = pinned;
+    let before = serde_json::to_vec(&config)?;
+    fs::write(&settings, &before)?;
+
+    let profiles = supported_profiles(&ctx)?;
+    let (installed, _) =
+        crate::capability::resource_capabilities::collect_observed(&ctx, &profiles, None, false)?;
+    let native_id = offer.native_id();
+    let selected = installed.iter().find(|item| matches!(&item.data, Data::Capability { native_id: id, origin, .. } if *id == native_id && origin.manager == "claude-plugin")).ok_or("selected plugin")?;
+    let mut basis = Some(basis);
+    let report = maintain_inventory_using(
+        &ctx,
+        &selected.id,
+        Operation::Upgrade,
+        |_, repository| {
+            assert_eq!(repository, offer.repository);
+            Ok(vec![plugin_install::Offer::Claude(
+                Box::new(offer.clone()),
+                "/fixture/native".into(),
+            )])
+        },
+        |_, _| basis.take().ok_or_else(selector_error),
+    )?;
+    assert!(basis.is_none());
+    assert_eq!(report["results"][0]["status"], "skipped");
+    assert_eq!(report["incomplete"], false);
+    assert_eq!(fs::read(&settings)?, before);
+    assert!(!ctx.state.exists());
+    Ok(())
+}

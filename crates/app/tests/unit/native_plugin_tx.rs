@@ -18,6 +18,27 @@ fn authorized_book(fixture: &Fixture) -> Value {
 }
 
 #[test]
+fn inventory_reinstall_requires_a_unique_recipe_for_the_selected_scope() -> TestResult {
+    let fixture = Fixture::new()?;
+    let ctx = fixture.context()?;
+    let mut book = authorized_book(&fixture);
+    fixture.write_book(&book)?;
+    let recipe = |directory, id| {
+        crate::agent::native_plugins::inventory_reinstall_recipe(&ctx, directory, id)
+    };
+    assert_eq!(
+        recipe(&fixture.config, "example@market").as_deref(),
+        Some("example")
+    );
+    assert!(recipe(&fixture.home, "example@market").is_none());
+    assert!(recipe(&fixture.config, "other@market").is_none());
+    book["recipes"]["second"] = book["recipes"]["example"].clone();
+    fixture.write_book(&book)?;
+    assert!(recipe(&fixture.config, "example@market").is_none());
+    Ok(())
+}
+
+#[test]
 fn installed_argv_binds_only_declared_environment_and_keeps_paths_with_spaces() -> TestResult {
     let fixture = Fixture::new()?;
     let (mut instance, recipe) = fixture.binding()?;

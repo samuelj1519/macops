@@ -107,7 +107,14 @@ def expect_screen_row(number, expected, *, exact=True):
 
 
 try:
-    if scenario in ("skill-agent-picker-cancel", "skill-agent-picker-all-cancel"):
+    if scenario == "portfolio-source-skip":
+        expect("确认更新市场并升级")
+        expect("将执行的原命令")
+        expect("plugin marketplace add")
+        expect("plugin update")
+        expect("● 跳过此配置")
+        type_key(b"\r")
+    elif scenario in ("skill-agent-picker-cancel", "skill-agent-picker-all-cancel"):
         expect("全部 Agent")
         expect("codex")
         expect("cursor-agent")
@@ -491,7 +498,7 @@ try:
         offset = type_key(b"\r")
         expect("已取消", offset)
         type_key(b"q")
-    elif scenario == "detail-agent-version-cancel":
+    elif scenario in ("detail-agent-version-cancel", "detail-agent-version-apply"):
         expect("Agent")
         type_key(b"r")
         offset = type_key("/本机固定版本 dsh\r".encode())
@@ -502,10 +509,10 @@ try:
         expect("输入 dsh 的新版本", offset)
         offset = type_key(b"2.0.0\r")
         expect("将 dsh 升级到 2.0.0", offset)
-        offset = type_key(b"\r")
-        expect("已取消", offset)
+        offset = type_key(b"\x1b[B\r" if scenario == "detail-agent-version-apply" else b"\r")
+        expect("已完成" if scenario == "detail-agent-version-apply" else "已取消", offset)
         type_key(b"q")
-    elif scenario in ("detail-agent-forget", "detail-agent-forget-cancel"):
+    elif scenario in ("detail-agent-forget", "detail-agent-forget-cancel", "detail-agent-forget-stale"):
         expect("Agent")
         type_key(b"/" + target.encode() + b"\r")
         offset = type_key(b"\r")
@@ -514,10 +521,15 @@ try:
         expect("停止接管", offset)
         expect("保留本机程序、配置和插件", offset)
         expect("确认执行", offset)
-        offset = type_key(b"\x1b[B\r" if scenario == "detail-agent-forget" else b"\r")
-        expect("已停止接管" if scenario == "detail-agent-forget" else "已取消", offset)
+        if scenario == "detail-agent-forget-stale":
+            home = Path(command[command.index("--home") + 1])
+            config = home / "config-one"
+            config.rename(home / "config-one-before")
+            config.mkdir()
+        offset = type_key(b"\r" if scenario == "detail-agent-forget-cancel" else b"\x1b[B\r")
+        expect({"detail-agent-forget": "已停止接管", "detail-agent-forget-cancel": "已取消", "detail-agent-forget-stale": "档案目录已变化"}[scenario], offset)
         type_key(b"q")
-    elif scenario == "detail-codex-remove":
+    elif scenario in ("detail-codex-remove", "detail-codex-fixed-refusal"):
         expect("软件")
         offset = type_key(b"\t")
         expect("widget@fixture", offset)
@@ -525,8 +537,13 @@ try:
         expect("widget", offset)
         offset = type_key(b"\r")
         expect("卸载插件", offset)
-        offset = type_key(b"x")
-        expect("暂不能操作", offset)
+        if scenario == "detail-codex-fixed-refusal":
+            expect("按固定配方检查并重装", offset)
+            offset = type_key(b"u")
+            expect("固定原生插件配方的本地证据不足", offset)
+        else:
+            offset = type_key(b"x")
+            expect("暂不能操作", offset)
         type_key(b"q")
     elif scenario == "detail-plugin-scope":
         expect("软件")
@@ -949,7 +966,7 @@ try:
             offset = type_key(b"s")
             expect("synthetic-source-content", offset)
         type_key(b"q")
-    if scenario not in ("market-json", "migration-blocked") and not scenario.startswith(("setup-", "recommend-", "native-progress", "skill-adopt-", "skill-agent-")):
+    if scenario not in ("market-json", "migration-blocked", "portfolio-source-skip") and not scenario.startswith(("setup-", "recommend-", "native-progress", "skill-adopt-", "skill-agent-")):
         expect("\x1b[?1049l")
     deadline = time.monotonic() + 8
     while process.poll() is None and time.monotonic() < deadline:
