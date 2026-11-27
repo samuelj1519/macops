@@ -179,3 +179,64 @@ fn repository_lookup_associates_plugins_using_their_native_market_registration()
     assert!(matched(&item)?);
     Ok(())
 }
+
+#[test]
+fn recommendation_reports_market_declaration_as_evidence_and_keeps_overflow_reachable() {
+    let plugin = |name: &str, state, groups: Vec<String>| Item {
+        id: format!("capability:{name}"),
+        name: name.into(),
+        summary: String::new(),
+        managed: false,
+        management: Management::Native,
+        directory: false,
+        path: None,
+        source: None,
+        agents: vec![],
+        loaded: None,
+        details: vec![],
+        list: crate::browser::ListDetail::Plain,
+        inventory: Some(crate::browser::InventoryInfo {
+            groups,
+            manager: "claude-plugin".into(),
+            status: state,
+            version: None,
+            aliases: vec![],
+            native_record: None,
+            repository: None,
+        }),
+    };
+    let related = Related {
+        views: vec![(
+            Kind::Capabilities,
+            View {
+                scope: "global".into(),
+                items: vec![
+                    plugin("declared", State::Declared, vec!["claude:mi".into()]),
+                    plugin("unknown", State::Unknown, vec![]),
+                    plugin("missing", State::Missing, vec![]),
+                    plugin("extra", State::Present, vec![]),
+                ],
+                coverage: "partial",
+                difference_coverage: "not_applicable",
+                observed_at: None,
+                note: String::new(),
+                incomplete: true,
+            },
+        )],
+        incomplete: true,
+        repository_query: true,
+    };
+    let status = related.status();
+    for label in [
+        "匹配依据",
+        "市场登记",
+        "已声明",
+        "待核验",
+        "载荷缺失",
+        "另有 1 项",
+    ] {
+        assert!(status.contains(label), "{label}\n{status}");
+    }
+    assert!(!status.contains("extra"));
+    assert!(related.maintenance(1).contains("查看技能与插件"));
+}

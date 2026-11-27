@@ -192,3 +192,46 @@ fn public_repository_empty_duplicate_and_oversized_catalogs_are_rejected() -> Te
     assert!(runner(&f.ctx).is_err());
     Ok(())
 }
+
+#[test]
+fn shared_skill_identity_requires_agreement_between_record_and_local_frontmatter() -> TestResult {
+    let request = Request::parse("owner/repo")?;
+    let f = Repo::new(&request)?;
+    let target = disk::payload(&f.ctx, "fixture")?;
+    fs::create_dir_all(&target)?;
+    fs::write(
+        target.join("SKILL.md"),
+        b"---\nname: member\ndisable-model-invocation: true\n---\ntext\n",
+    )?;
+    let row = serde_json::json!({
+        "source":"owner/repo", "sourceType":"github", "sourceUrl":"https://github.com/owner/repo.git",
+        "commit":"a".repeat(40), "ref":"HEAD", "skillPath":"skills/member/SKILL.md",
+        "skillFolderHash":"b".repeat(40), "skillName":"member"
+    });
+    let decode = |row: &Value| from_record(&f.ctx, "fixture", row, f.runner.clone());
+    let valid = decode(&row)?;
+    assert_eq!(valid.install_name, "fixture");
+    assert_eq!(valid.source.member_name, "member");
+    assert_eq!(valid.source.tracking_ref.as_deref(), Some("HEAD"));
+    assert!(valid.manual_only);
+    for (key, value) in [
+        ("sourceType", serde_json::json!("directory")),
+        (
+            "sourceUrl",
+            serde_json::json!("https://github.com/owner/other.git"),
+        ),
+        ("commit", serde_json::json!("not-a-commit")),
+        ("skillPath", serde_json::json!("../../unverified")),
+        ("skillFolderHash", serde_json::json!("g".repeat(40))),
+        ("skillFolderHash", serde_json::json!("b".repeat(39))),
+        ("skillName", serde_json::json!("different")),
+    ] {
+        let mut wrong = row.clone();
+        wrong[key] = value;
+        assert!(decode(&wrong).is_err(), "{key} must be checked");
+    }
+    fs::remove_file(target.join("SKILL.md"))?;
+    assert!(decode(&row).is_err());
+    assert!(!f.ctx.state.exists());
+    Ok(())
+}

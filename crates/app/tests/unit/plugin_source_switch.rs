@@ -176,21 +176,12 @@ impl SwitchFixture {
         };
         let commit = crate::policy::source_git::ObjectId::parse(&"a".repeat(40))?;
         let offer = Offer::identify("owner/repo", &commit, CATALOG, UPDATED)?;
-        let market = GithubMarket {
-            repo: "owner/repo".into(),
-            commit: commit.as_str().into(),
-            files: fingerprint(&capability_local::claude_market_files(&Directory::open(
-                &upstream,
-            )?)?)?,
-        };
         let binary = home.join("synthetic-claude");
         fs::copy("/usr/bin/true", &binary)?;
-        let basis = SwitchOffer {
-            offer,
-            market,
-            binary_digest: super::super::digest_binary(&binary)?,
-            binary,
-        };
+        let checkout = Directory::open(&upstream)?;
+        let mut files = capability_local::claude_market_files(&checkout)?;
+        files.reverse();
+        let basis = SwitchOffer::from_checkout(&offer, &binary, &checkout, files)?;
         let fixture = Self {
             _temp: temp,
             profile,
@@ -314,5 +305,87 @@ fn switch_publishes_verified_market_before_plugin_update_and_retry_is_idempotent
         }
         assert_eq!(f.settings()?["enabledPlugins"][ID], false);
     }
+    Ok(())
+}
+
+#[test]
+fn an_already_verified_market_needs_only_plugin_update_and_is_rechecked_before_write() -> TestResult
+{
+    let f = SwitchFixture::new()?;
+    let market = &f.basis.market;
+    let slot = market_slot(&f.target, MARKET)?;
+    SwitchFixture::populate(&slot, UPDATED)?;
+    f.register_market(&slot, &market.declaration())?;
+    let settings = f.profile.join(SETTINGS);
+    let mut bytes = std::fs::read(&settings)?;
+    change_source(&mut bytes, MARKET, &market.declaration())?;
+    std::fs::write(settings, bytes)?;
+    assert!(SourceSwitch::is_bound(&f.target, &f.basis.offer)?);
+
+    let plan = SourceSwitch::plan(f.target.clone(), &f.basis, false)?.ok_or("update remaining")?;
+    assert!(plan.detail().contains("owner/repo"));
+    let mut calls = 0;
+    let result = plan.run_with(&f.ctx, |_, journal, binding| {
+        calls += 1;
+        assert_eq!(
+            binding.invocation.command.args,
+            ["plugin", "update", ID, "--scope", "user"]
+        );
+        super::super::worker_guard(journal, &binding.invocation)?;
+        SwitchFixture::populate(&f.cache("2.0.0"), UPDATED)?;
+        f.register("2.0.0")?;
+        Ok(NativeOutcome::Exited {
+            code: Some(0),
+            signal: None,
+        })
+    })?;
+    assert_eq!(calls, 1);
+    assert_eq!(result["journal"]["phase"], "succeeded");
+    assert!(SourceSwitch::plan(f.target.clone(), &f.basis, false)?.is_none());
+
+    std::fs::write(slot.join(".claude-plugin/plugin.json"), INITIAL)?;
+    assert!(SourceSwitch::plan(f.target.clone(), &f.basis, false).is_err());
+    assert_eq!(f.settings()?["enabledPlugins"][ID], false);
+    Ok(())
+}
+
+#[test]
+fn switch_refuses_stale_settings_and_new_market_with_additional_plugins() -> TestResult {
+    let f = SwitchFixture::new()?;
+    let plan = SourceSwitch::plan(f.target.clone(), &f.basis, true)?.ok_or("plan")?;
+    let settings = f.profile.join(SETTINGS);
+    let mut modified = f.settings()?;
+    modified["model"] = json!("user-edited");
+    std::fs::write(&settings, serde_json::to_vec(&modified)?)?;
+    let result = plan.run_with(&f.ctx, |_, journal, binding| {
+        super::super::worker_guard(journal, &binding.invocation)?;
+        Ok(NativeOutcome::Exited {
+            code: Some(0),
+            signal: None,
+        })
+    });
+    assert!(result.is_err());
+    assert_eq!(f.settings()?, modified);
+
+    let scratch = f.ctx.home.join("extra-plugin");
+    SwitchFixture::populate(&scratch, UPDATED)?;
+    let checkout = Directory::open(&scratch)?;
+    let market = scratch.join(".claude-plugin/marketplace.json");
+    let mut invalid: Value = serde_json::from_slice(CATALOG)?;
+    invalid["plugins"]
+        .as_array_mut()
+        .ok_or("catalog members")?
+        .push(json!({"name":"second","source":"./second"}));
+    std::fs::write(&market, serde_json::to_vec(&invalid)?)?;
+    let facts = capability_local::claude_market_files(&checkout)?;
+    assert!(SwitchOffer::from_checkout(&f.basis.offer, &f.basis.binary, &checkout, facts).is_err());
+    std::fs::write(&market, CATALOG)?;
+    let metadata = scratch.join(".claude-plugin/plugin.json");
+    std::fs::write(
+        metadata,
+        br#"{"name":"widget","version":"2.0.0","dependencies":["not-included"]}"#,
+    )?;
+    let facts = capability_local::claude_market_files(&checkout)?;
+    assert!(SwitchOffer::from_checkout(&f.basis.offer, &f.basis.binary, &checkout, facts).is_err());
     Ok(())
 }

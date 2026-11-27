@@ -331,9 +331,18 @@ impl SwitchOffer {
     pub(crate) fn prepare(offer: &Offer, binary: &std::path::Path) -> Result<Self> {
         let scratch = tempfile::tempdir()?;
         std::fs::set_permissions(scratch.path(), std::fs::Permissions::from_mode(0o700))?;
-        let (slot, _, mut files) =
+        let (slot, _, files) =
             claude_install_source::checkout(offer, &Directory::open(scratch.path())?)?;
         let checkout = Directory::open(&slot.parent.canonical.join(&slot.name))?;
+        Self::from_checkout(offer, binary, &checkout, files)
+    }
+
+    fn from_checkout(
+        offer: &Offer,
+        binary: &std::path::Path,
+        checkout: &Directory,
+        mut files: Vec<(String, bool, String)>,
+    ) -> Result<Self> {
         let parse = |name: &str| {
             let bytes = crate::platform::fs::regular_bytes(&checkout.path.join(name))?;
             crate::policy::json::parse(&bytes)

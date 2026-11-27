@@ -23,23 +23,13 @@ impl Operation {
 }
 
 pub(crate) fn recommend(ctx: &Context, source: &str, kind: Operation) -> Result<Option<Value>> {
-    if resource_agents::profile_roots_matching(ctx, |client, _| {
-        matches!(client, "claude" | "codex" | "cursor")
-    })?
-    .is_empty()
-    {
+    if supported_profiles(ctx)?.is_empty() {
         return Ok(None);
     }
     let agents = SkillAgents::default();
     let report = execute(
         ctx,
-        Request {
-            name: source,
-            kind,
-            agents: &agents,
-            revision: None,
-            switch_source: false,
-        },
+        Request::for_target(source, kind, &agents),
         true,
         false,
         false,
@@ -60,6 +50,24 @@ struct Request<'a> {
     agents: &'a SkillAgents,
     revision: Option<&'a str>,
     switch_source: bool,
+}
+
+impl<'a> Request<'a> {
+    fn for_target(name: &'a str, kind: Operation, agents: &'a SkillAgents) -> Self {
+        Self {
+            name,
+            kind,
+            agents,
+            revision: None,
+            switch_source: false,
+        }
+    }
+}
+
+fn supported_profiles(ctx: &Context) -> Result<Vec<Resource>> {
+    resource_agents::profile_roots_matching(ctx, |client, _| {
+        matches!(client, "claude" | "codex" | "cursor")
+    })
 }
 
 fn scoped(agents: &SkillAgents) -> bool {
@@ -111,13 +119,7 @@ pub(crate) fn run(cli: &Cli, ctx: &Context) -> Result<Option<Value>> {
             source: Some(name),
             agents,
             ..
-        } => Request {
-            name,
-            kind: Operation::Install,
-            agents,
-            revision: None,
-            switch_source: false,
-        },
+        } => Request::for_target(name, Operation::Install, agents),
         SkillCmd::Upgrade(selection) if selection.name.is_some() => Request {
             name: selection.name.as_deref().unwrap_or_default(),
             kind: Operation::Upgrade,
@@ -125,24 +127,9 @@ pub(crate) fn run(cli: &Cli, ctx: &Context) -> Result<Option<Value>> {
             revision: selection.revision.as_deref(),
             switch_source: selection.switch_source,
         },
-        SkillCmd::Remove { id, agents } => Request {
-            name: id,
-            kind: Operation::Uninstall,
-            agents,
-            revision: None,
-            switch_source: false,
-        },
-        SkillCmd::Enable { id, agents } | SkillCmd::Disable { id, agents } => Request {
-            name: id,
-            kind: if matches!(command, SkillCmd::Enable { .. }) {
-                Operation::Enable
-            } else {
-                Operation::Disable
-            },
-            agents,
-            revision: None,
-            switch_source: false,
-        },
+        SkillCmd::Remove { id, agents } => Request::for_target(id, Operation::Uninstall, agents),
+        SkillCmd::Enable { id, agents } => Request::for_target(id, Operation::Enable, agents),
+        SkillCmd::Disable { id, agents } => Request::for_target(id, Operation::Disable, agents),
         SkillCmd::Install { agents, .. } if scoped(agents) => return Err(selector_error()),
         SkillCmd::Upgrade(selection) | SkillCmd::Refresh(selection) | SkillCmd::Sync(selection)
             if scoped(&selection.agents) || selection.switch_source =>
@@ -167,10 +154,7 @@ pub(crate) fn run(cli: &Cli, ctx: &Context) -> Result<Option<Value>> {
     if interactive
         && !scoped(request.agents)
         && !matches!(request.kind, Operation::Enable | Operation::Disable)
-        && !resource_agents::profile_roots_matching(ctx, |client, _| {
-            matches!(client, "claude" | "codex" | "cursor")
-        })
-        .is_ok_and(|profiles| !profiles.is_empty())
+        && !supported_profiles(ctx).is_ok_and(|profiles| !profiles.is_empty())
     {
         return Ok(None);
     }
@@ -401,11 +385,7 @@ fn evidence<'a>(
                     .aliases
                     .iter()
                     .any(|alias| alias.eq_ignore_ascii_case(request.name))
-                || (belongs
-                    && matches!(origin.manager.as_str(), "claude-plugin" | "codex-config")
-                    && native_id
-                        .rsplit_once('@')
-                        .is_some_and(|(name, _)| name.eq_ignore_ascii_case(request.name)))
+                || (belongs && plugin_short_name(&origin.manager, native_id, request.name))
         };
         if !matches {
             if belongs
@@ -441,6 +421,55 @@ fn evidence<'a>(
         unsupported,
         plugins,
     }
+}
+
+fn plugin_short_name(manager: &str, id: &str, query: &str) -> bool {
+    matches!(manager, "claude-plugin" | "codex-config")
+        && id
+            .rsplit_once('@')
+            .is_some_and(|(name, _)| name.eq_ignore_ascii_case(query))
+}
+
+fn check_short_plugin_name(
+    name: &str,
+    local: &[Resource],
+    agents: &[Agent<'_>],
+    picked: &[usize],
+) -> Result<()> {
+    if picked.len() < 2 || name.contains('@') {
+        return Ok(());
+    }
+    let ids: BTreeSet<_> = local
+        .iter()
+        .filter_map(|resource| match &resource.data {
+            Data::Capability {
+                origin,
+                native_id,
+                deployments,
+                ..
+            } if plugin_short_name(&origin.manager, native_id, name)
+                && deployments.iter().any(|deployment| {
+                    deployment.scope == "user"
+                        && picked
+                            .iter()
+                            .any(|index| deployment.harness == agents[*index].profile.id)
+                }) =>
+            {
+                Some(native_id.as_str())
+            }
+            _ => None,
+        })
+        .collect();
+    if ids.len() > 1 {
+        return Err(Error::attention(
+            "skill_plugin_name_ambiguous",
+            format!(
+                "所选 Agent 使用不同市场的同名插件：{}。请指定完整插件名。",
+                ids.into_iter().collect::<Vec<_>>().join("、")
+            ),
+        ));
+    }
+    Ok(())
 }
 
 fn plan_plugin(
@@ -593,6 +622,7 @@ fn verified_offers(
     agents: &[Agent<'_>],
     picked: &[usize],
     local: &[Resource],
+    sources: &PluginSources,
 ) -> Result<Vec<plugin_install::Offer>> {
     let repository = repo.map(|parsed| parsed.repository.key());
     let query = request.name;
@@ -620,8 +650,7 @@ fn verified_offers(
             .iter()
             .any(|&i| agents[i].client == "claude" || agents[i].client == "codex")
     {
-        let data = crate::recommend::public_repository(ctx, repository)?;
-        let mut offers = plugin_install::offers(ctx, &data);
+        let mut offers = (sources.initial)(ctx, repository)?;
         if query.contains('@') || request.revision.is_some() {
             let commit = if let Some(revision) = request.revision {
                 if query.contains('@') {
@@ -629,7 +658,7 @@ fn verified_offers(
                 }
                 crate::policy::source_git::ObjectId::parse(revision)?
             } else {
-                repo.ok_or_else(selector_error)?.resolve()?
+                (sources.resolve)(repo.ok_or_else(selector_error)?)?
             };
             offers.retain(|offer| {
                 offer
@@ -639,10 +668,9 @@ fn verified_offers(
             if picked.iter().any(|&i| agents[i].client == "claude")
                 && !offers.iter().any(|offer| offer.client() == "claude")
                 && let Some(parsed) = repo
-                && let Ok(binary) = crate::agent::claude_install::binary(ctx)
-                && let Some(offer) = parsed.claude_offer_at(&commit)?
+                && let Some(offer) = (sources.claude_at)(ctx, parsed, &commit)?
             {
-                offers.push(plugin_install::Offer::Claude(Box::new(offer), binary));
+                offers.push(offer);
             }
         }
         Ok(offers)
@@ -651,14 +679,48 @@ fn verified_offers(
     }
 }
 
+type ObjectId = crate::policy::source_git::ObjectId;
+
+struct PluginSources {
+    initial: fn(&Context, &str) -> Result<Vec<plugin_install::Offer>>,
+    resolve: fn(&public_skill::Request) -> Result<ObjectId>,
+    claude_at:
+        fn(&Context, &public_skill::Request, &ObjectId) -> Result<Option<plugin_install::Offer>>,
+}
+
+const PUBLIC_PLUGIN_SOURCES: PluginSources = PluginSources {
+    initial: |ctx, repository| {
+        let evidence = crate::recommend::public_repository(ctx, repository)?;
+        Ok(plugin_install::offers(ctx, &evidence))
+    },
+    resolve: public_skill::Request::resolve,
+    claude_at: |ctx, request, commit| {
+        let Ok(binary) = crate::agent::claude_install::binary(ctx) else {
+            return Ok(None);
+        };
+        Ok(request
+            .claude_offer_at(commit)?
+            .map(|offer| plugin_install::Offer::Claude(Box::new(offer), binary)))
+    },
+};
+
+#[derive(Clone, Copy)]
+struct SwitchRequest<'a> {
+    repository: &'a str,
+    allow_change: bool,
+}
+
 fn plan_source_switches(
     ctx: &Context,
     request: &Request<'_>,
     sites: &mut [Site<'_>],
     offers: &[plugin_install::Offer],
     local: &[Resource],
-    repo: &str,
-    allow_change: bool,
+    selection: SwitchRequest<'_>,
+    mut prepare: impl FnMut(
+        &crate::agent::claude_install_source::Offer,
+        &Path,
+    ) -> Result<crate::agent::plugin_lifecycle::SwitchOffer>,
 ) {
     let Some((offer, binary)) = offers.iter().find_map(|offer| match offer {
         plugin_install::Offer::Claude(offer, binary) => Some((offer.as_ref(), binary)),
@@ -678,7 +740,15 @@ fn plan_source_switches(
                     && deployments.iter().any(|site_at| site_at.scope == "user" && site_at.harness == site.agent.profile.id))
         });
         if !installed
-            || evidence(ctx, request, site.agent, offers, local, Some(repo)).shared
+            || evidence(
+                ctx,
+                request,
+                site.agent,
+                offers,
+                local,
+                Some(selection.repository),
+            )
+            .shared
                 != Shared::Missing
         {
             continue;
@@ -686,7 +756,7 @@ fn plan_source_switches(
         let target = match resource_agents::InstallTarget::capture(ctx, site.agent.profile) {
             Ok(target) => target,
             Err(error) => {
-                if allow_change {
+                if selection.allow_change {
                     site.work = None;
                     site.status = "blocked";
                     site.reason = error.message;
@@ -694,21 +764,21 @@ fn plan_source_switches(
                 continue;
             }
         };
-        if !allow_change
+        if !selection.allow_change
             && !crate::agent::plugin_lifecycle::SourceSwitch::is_bound(&target, offer)
                 .unwrap_or_default()
         {
             continue;
         }
         let prepared = basis.get_or_insert_with(|| {
-            crate::terminal::progress::during("核验新市场与插件", || {
-                crate::agent::plugin_lifecycle::SwitchOffer::prepare(offer, binary)
-            })
+            crate::terminal::progress::during("核验新市场与插件", || prepare(offer, binary))
         });
         let result = match prepared {
-            Ok(prepared) => {
-                crate::agent::plugin_lifecycle::SourceSwitch::plan(target, prepared, allow_change)
-            }
+            Ok(prepared) => crate::agent::plugin_lifecycle::SourceSwitch::plan(
+                target,
+                prepared,
+                selection.allow_change,
+            ),
             Err(error) => {
                 site.work = None;
                 site.status = "blocked";
@@ -743,9 +813,7 @@ fn execute(
     dry: bool,
     yes: bool,
 ) -> Result<Value> {
-    let profiles = resource_agents::profile_roots_matching(ctx, |client, _| {
-        matches!(client, "claude" | "codex" | "cursor")
-    })?;
+    let profiles = supported_profiles(ctx)?;
     let agents = agents(&profiles);
     let picked = selected(&agents, &request, interactive, dry)?;
     if picked.is_empty() {
@@ -772,12 +840,24 @@ fn execute(
     }
     let (local, _) =
         crate::capability::resource_capabilities::collect_observed(ctx, &profiles, None, false)?;
+    if repository.is_none() {
+        check_short_plugin_name(request.name, &local, &agents, &picked)?;
+    }
+    let fetch_offers = || {
+        verified_offers(
+            ctx,
+            &request,
+            repo.as_ref(),
+            &agents,
+            &picked,
+            &local,
+            &PUBLIC_PLUGIN_SOURCES,
+        )
+    };
     let offers = if dry {
-        verified_offers(ctx, &request, repo.as_ref(), &agents, &picked, &local)?
+        fetch_offers()?
     } else {
-        crate::terminal::progress::during("核对来源和安装版本", || {
-            verified_offers(ctx, &request, repo.as_ref(), &agents, &picked, &local)
-        })?
+        crate::terminal::progress::during("核对来源和安装版本", fetch_offers)?
     };
     let mut sites = picked
         .iter()
@@ -792,33 +872,15 @@ fn execute(
             &mut sites,
             &offers,
             &local,
-            repo,
-            interactive || request.switch_source,
+            SwitchRequest {
+                repository: repo,
+                allow_change: interactive || request.switch_source,
+            },
+            crate::agent::plugin_lifecycle::SwitchOffer::prepare,
         );
     }
     check_target_scope(&mut sites, &agents, request.agents.shared || interactive);
-    let shared = if sites
-        .iter()
-        .any(|site| matches!(site.work, Some(Work::Shared)))
-    {
-        match crate::terminal::progress::during("核对共享安装和目标版本", || {
-            native_skills::plan_shared(ctx, request.name, request.kind, request.revision)
-        }) {
-            Ok(plan) => Some(plan),
-            Err(error) => {
-                for site in &mut sites {
-                    if matches!(site.work, Some(Work::Shared)) {
-                        site.work = None;
-                        site.status = "blocked";
-                        site.reason.clone_from(&error.message);
-                    }
-                }
-                None
-            }
-        }
-    } else {
-        None
-    };
+    let shared = plan_shared_work(ctx, &request, &mut sites);
     let planned = preview(ctx, &request, &sites, &offers, &agents);
     if dry {
         return Ok(
@@ -839,6 +901,35 @@ fn execute(
         crate::operations::recover_before_write(ctx, None)?;
     }
     perform(ctx, &request, sites, &offers, planned, shared)
+}
+
+fn plan_shared_work(
+    ctx: &Context,
+    request: &Request<'_>,
+    sites: &mut [Site<'_>],
+) -> Option<native_skills::SharedPlan> {
+    if sites
+        .iter()
+        .any(|site| matches!(site.work, Some(Work::Shared)))
+    {
+        match crate::terminal::progress::during("核对共享安装和目标版本", || {
+            native_skills::plan_shared(ctx, request.name, request.kind, request.revision)
+        }) {
+            Ok(plan) => Some(plan),
+            Err(error) => {
+                for site in sites {
+                    if matches!(site.work, Some(Work::Shared)) {
+                        site.work = None;
+                        site.status = "blocked";
+                        site.reason.clone_from(&error.message);
+                    }
+                }
+                None
+            }
+        }
+    } else {
+        None
+    }
 }
 
 fn check_target_scope(sites: &mut [Site<'_>], agents: &[Agent<'_>], shared_approved: bool) {

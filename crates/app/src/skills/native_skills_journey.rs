@@ -103,6 +103,17 @@ impl InstallPlan {
     }
 
     pub(super) fn run(self, ctx: &Context, dry: bool, yes: bool, batch: bool) -> Result<Value> {
+        self.run_with(ctx, dry, yes, batch, execute_member)
+    }
+
+    fn run_with(
+        self,
+        ctx: &Context,
+        dry: bool,
+        yes: bool,
+        batch: bool,
+        execute: impl FnMut(&Context, Recipe, Action, InputFence) -> Result<Value>,
+    ) -> Result<Value> {
         if batch {
             self.verify_batch()?;
         }
@@ -172,7 +183,13 @@ impl InstallPlan {
         )?;
         crate::operations::recover_before_write(ctx, None)?;
         fence.verify()?;
-        let mut done = run_members(ctx, selected, Action::Install, &InputFence::default())?;
+        let mut done = run_members_with(
+            ctx,
+            selected,
+            Action::Install,
+            &InputFence::default(),
+            execute,
+        )?;
         done["skillAction"] = json!("install");
         done["source"] = json!(source);
         Ok(done)
@@ -215,11 +232,30 @@ fn run_members(
     action: Action,
     fence: &InputFence,
 ) -> Result<Value> {
+    run_members_with(ctx, recipes, action, fence, execute_member)
+}
+
+fn execute_member(
+    ctx: &Context,
+    recipe: Recipe,
+    action: Action,
+    fence: InputFence,
+) -> Result<Value> {
+    execute(ctx, recipe, action, false, true, fence)
+}
+
+fn run_members_with(
+    ctx: &Context,
+    recipes: Vec<Recipe>,
+    action: Action,
+    fence: &InputFence,
+    mut execute: impl FnMut(&Context, Recipe, Action, InputFence) -> Result<Value>,
+) -> Result<Value> {
     let mut results = vec![];
     let mut remaining = recipes.into_iter();
     for recipe in remaining.by_ref() {
         let name = recipe.install_name.clone();
-        match execute(ctx, recipe, action, false, true, fence.clone()) {
+        match execute(ctx, recipe, action, fence.clone()) {
             Ok(value) if value["journal"]["phase"] == "succeeded" => results.push(value),
             Ok(value) => {
                 results.push(value);
@@ -367,6 +403,15 @@ pub(super) fn upgrade_repository_using(
     source: &str,
     confirm: impl FnOnce(&str) -> Result<()>,
 ) -> Result<Value> {
+    upgrade_repository_resolving(ctx, source, public_skill::Request::resolve, confirm)
+}
+
+fn upgrade_repository_resolving(
+    ctx: &Context,
+    source: &str,
+    resolve: impl FnOnce(&public_skill::Request) -> Result<crate::policy::source_git::ObjectId>,
+    confirm: impl FnOnce(&str) -> Result<()>,
+) -> Result<Value> {
     native_config_scope(ctx)?;
     let request = public_skill::Request::parse(source)?;
     let (commit, recipes, fence) =
@@ -379,7 +424,7 @@ pub(super) fn upgrade_repository_using(
                         format!("运行 mo recommend {} 重新选择。", request.repository.key()),
                     )
                 })?;
-            let commit = request.resolve()?;
+            let commit = resolve(&request)?;
             let mut changes = vec![];
             for recipe in selection.managed {
                 verify_managed_skill(ctx, &recipe)?;

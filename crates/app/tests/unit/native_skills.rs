@@ -669,3 +669,42 @@ fn root_tracking_cases(ctx: &Context, recipe: &Recipe, cache: &CheckCache) -> Te
     );
     Ok(())
 }
+
+#[test]
+fn recovered_skill_operation_reuses_only_matching_recipe_identity_and_revision() -> TestResult {
+    let (_temp, ctx, first) = fixture()?;
+    let result = adopt(&ctx, &first)?;
+    let journal: Journal = serde_json::from_value(result["journal"].clone())?;
+    let recorded = frozen(&journal)?.recipe;
+    let mut distinct = recorded.clone();
+    distinct.source.commit = "b".repeat(40);
+    assert!(matches_recommendation(&journal, &recorded)?);
+    assert!(!matches_recommendation(&journal, &distinct)?);
+    assert!(!matches_recommendation(
+        &crate::test_support::journal()?,
+        &recorded
+    )?);
+
+    let input = ctx.home.join("fixture-recipe.json");
+    fs::write(&input, disk::encode(&recorded)?)?;
+    assert!(matches_recipe_file(&journal, &input)?);
+    fs::write(&input, disk::encode(&distinct)?)?;
+    assert!(!matches_recipe_file(&journal, &input)?);
+
+    let mut target = crate::cli::SkillSelection {
+        name: Some(recorded.install_name.clone()),
+        revision: Some(recorded.source.commit.clone()),
+        switch_source: false,
+        only: vec![],
+        all: false,
+        change_id: None,
+        agents: crate::cli::SkillAgents::default(),
+    };
+    assert!(matches_upgrade(&ctx, &journal, &target)?);
+    target.revision = Some(distinct.source.commit);
+    assert!(!matches_upgrade(&ctx, &journal, &target)?);
+    target.name = Some("owner/repo@v1.0.0".into());
+    assert!(!matches_upgrade(&ctx, &journal, &target)?);
+    assert!(!ctx.home.join("check-called").exists());
+    Ok(())
+}

@@ -339,25 +339,44 @@ fn install_profiles_using(
 }
 
 fn show_profile_install_event(event: Event<'_>) {
+    render_profile_install_event(event, |tone, message| {
+        if let Some(tone) = tone {
+            terminal(tone, message);
+        } else {
+            eprintln!("{message}");
+        }
+    });
+}
+
+fn render_profile_install_event(
+    event: Event<'_>,
+    mut line: impl FnMut(Option<TerminalLine>, &str),
+) {
     match event {
         Event::Reconciled(result) => {
             let previous = result.get("journal").unwrap_or(result);
             if previous["phase"] == "failed"
                 && let Some(message) = previous["message"].as_str().filter(|text| !text.is_empty())
             {
-                terminal(TerminalLine::Note, &format!("上次操作已核对。{message}"));
+                line(
+                    Some(TerminalLine::Note),
+                    &format!("上次操作已核对。{message}"),
+                );
             } else {
-                terminal(TerminalLine::Step, "已核对上次操作，继续本次安装。");
+                line(Some(TerminalLine::Step), "已核对上次操作，继续本次安装。");
             }
         }
         Event::Complete(raw) => show_install_result(raw),
         Event::Skipped(target, raw) => {
-            terminal(
-                TerminalLine::Note,
+            line(
+                Some(TerminalLine::Note),
                 &format!("{} · 本次跳过", target_label(target)),
             );
             if let Some(message) = raw["message"].as_str() {
-                eprintln!("    {}", crate::output::sanitize(message, false));
+                line(
+                    None,
+                    &format!("    {}", crate::output::sanitize(message, false)),
+                );
             }
         }
         Event::Stopped {
@@ -368,32 +387,35 @@ fn show_profile_install_event(event: Event<'_>) {
         } => {
             let label = target_label(target);
             if let Some(pending) = pending {
-                terminal(TerminalLine::Note, &format!("{label} · 安装尚未完成"));
+                line(Some(TerminalLine::Note), &format!("{label} · 安装尚未完成"));
                 if pending.continuation {
-                    eprintln!("上一步已核对。请用同样的安装选项重试。");
+                    line(None, "上一步已核对。请用同样的安装选项重试。");
                 } else {
                     let journal = &pending.raw["journal"];
                     if let Some(message) =
                         journal["message"].as_str().filter(|text| !text.is_empty())
                     {
-                        eprintln!("  错误原因　{}", crate::browser::sanitize(message, false));
+                        line(
+                            None,
+                            &format!("  错误原因　{}", crate::browser::sanitize(message, false)),
+                        );
                     }
                     if let Some(hint) = crate::output::recovery_hint(journal) {
-                        eprintln!("  正确用法　{hint}");
+                        line(None, &format!("  正确用法　{hint}"));
                     }
                 }
             } else {
-                terminal(TerminalLine::Note, &format!("{label} 安装停止。"));
+                line(Some(TerminalLine::Note), &format!("{label} 安装停止。"));
             }
             if completed > 0 {
-                eprintln!("已完成 {completed} 个配置的安装。");
+                line(None, &format!("已完成 {completed} 个配置的安装。"));
             }
             if !remaining.is_empty() {
                 let labels: Vec<_> = remaining
                     .iter()
                     .map(|item| target_label(&item.target))
                     .collect();
-                eprintln!("尚未开始本次安装 {}", labels.join("、"));
+                line(None, &format!("尚未开始本次安装 {}", labels.join("、")));
             }
         }
         Event::BatchComplete { installed, skipped } => {
@@ -402,12 +424,12 @@ fn show_profile_install_event(event: Event<'_>) {
             } else {
                 format!("安装完成 {installed} 个，跳过 {skipped} 个。")
             };
-            terminal(
-                if skipped == 0 {
+            line(
+                Some(if skipped == 0 {
                     TerminalLine::Done
                 } else {
                     TerminalLine::Note
-                },
+                }),
                 &summary,
             );
         }

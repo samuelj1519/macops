@@ -239,3 +239,7 @@ impl Drop for LiveProgress {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/unit/terminal_progress.rs"]
+mod tests;

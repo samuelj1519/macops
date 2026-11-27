@@ -384,3 +384,103 @@ fn verified_agent_offers_appear_as_recommendation_choices_in_order() -> TestResu
     assert!(!ctx.state.exists());
     Ok(())
 }
+
+#[test]
+fn public_skill_choice_requires_repository_matched_documented_command() {
+    let proposal = |commands| {
+        json!({
+            "repository":"Owner/Repo",
+            "manualInstall":[
+                {"manager":"Other","commands":["npx skills add owner/repo@wrong-manager"]},
+                {"manager":"Skills CLI","commands":commands}
+            ]
+        })
+    };
+    assert!(documented_skill_source(&json!({"repository":"../unknown"})).is_none());
+    assert!(
+        documented_skill_source(&proposal(vec![
+            "npx skills add another/repo",
+            "npx --yes skills add owner/repo"
+        ]))
+        .is_none()
+    );
+    assert_eq!(
+        documented_skill_source(&proposal(vec![
+            "npx skills add unrelated/tool",
+            "npx skills add owner/repo@v2.0.0"
+        ]))
+        .as_deref(),
+        Some("owner/repo@v2.0.0")
+    );
+}
+
+#[test]
+fn stale_recommendation_routes_fail_before_mutating_installation() -> TestResult {
+    use clap::Parser as _;
+    let home = tempfile::tempdir_in("/private/tmp")?;
+    let args = crate::cli::Cli::try_parse_from([
+        "mo",
+        "--home",
+        home.path().to_str().ok_or("fixture home")?,
+        "recommend",
+        "owner/repo",
+    ])?;
+    let ctx = Context::from_cli(&args, &mut vec![])?;
+    for (action, expected) in [
+        (RepositoryAction::Install, "skills_cli_unavailable"),
+        (RepositoryAction::Adopt, "skill_not_found"),
+        (RepositoryAction::Upgrade, "plan_stale"),
+    ] {
+        let result = public_skill_action(&ctx, "owner/repo", action);
+        assert_eq!(
+            result
+                .err()
+                .ok_or("stale source unexpectedly executed")?
+                .code,
+            expected
+        );
+        assert!(!ctx.state.exists());
+    }
+    Ok(())
+}
+
+#[test]
+fn recommendation_offers_shared_install_only_with_supported_local_runner() -> TestResult {
+    use clap::Parser as _;
+    use std::fs;
+    let home = tempfile::tempdir_in("/private/tmp")?;
+    let args = crate::cli::Cli::try_parse_from([
+        "mo",
+        "--home",
+        home.path().to_str().ok_or("fixture home")?,
+        "recommend",
+        "owner/repo",
+    ])?;
+    let ctx = Context::from_cli(&args, &mut vec![])?;
+    let docs = json!({
+        "query":"owner/repo","repository":"owner/repo",
+        "manualInstall":[{"manager":"Skills CLI","commands":["npx skills add owner/repo@v2.0.0"]}]
+    });
+    let options = install_choices(&ctx, &docs, &[], Vec::new)?;
+    assert_eq!(options.len(), 0);
+    let node = ctx
+        .home
+        .join(".local/share/mise/installs/node/latest/bin/node");
+    fs::create_dir_all(node.parent().ok_or("node folder")?)?;
+    fs::copy("/usr/bin/true", &node)?;
+    let package = ctx.home.join(".npm/_npx/test/node_modules/skills");
+    fs::create_dir_all(package.join("bin"))?;
+    fs::write(package.join("bin/cli.mjs"), "// fixture")?;
+    fs::write(
+        package.join("package.json"),
+        br#"{"name":"skills","version":"1.9.0","bin":{"skills":"./bin/cli.mjs"}}"#,
+    )?;
+    let options = install_choices(&ctx, &docs, &[], Vec::new)?;
+    assert!(
+        matches!(options.as_slice(), [InstallChoice::PublicSkills(source, Ok(RepositoryAction::Install))]
+        if source == "owner/repo@v2.0.0")
+    );
+    assert!(options[0].label().contains("用户共享目录"));
+    assert!(!ctx.state.exists());
+    Ok(())
+}

@@ -1210,3 +1210,104 @@ fn independent_retry_requires_the_frozen_activation_before_settling_an_old_opera
     }
     Ok(())
 }
+
+#[test]
+fn installation_feedback_names_unattempted_profiles_and_hides_internal_id() -> TestResult {
+    let (_tmp, ctx, target, _) =
+        crate::test_support::PluginTargetFixture::pending_for_recommendation(
+            "claude",
+            "fixture".into(),
+        )?;
+    let other = add_batch_target(&ctx, "later")?;
+    let remaining = [other];
+    let unknown = json!({"journal":{"phase":"unknown","id":"OP-should-not-be-displayed","message":"请核对原目录\u{1b}"}});
+    let recovered = json!({"journal":{"phase":"succeeded"}});
+    let failed = json!({"journal":{"phase":"failed","message":"原配置不完整"}});
+    let skipped = json!({"skipped":true,"message":"已有安装"});
+    let outcomes = [
+        (Event::Reconciled(&recovered), "继续本次安装"),
+        (Event::Reconciled(&failed), "原配置不完整"),
+        (Event::Skipped(&target, &skipped), "已有安装"),
+        (
+            Event::Stopped {
+                target: &target,
+                completed: 1,
+                remaining: &remaining,
+                pending: None,
+            },
+            "尚未开始本次安装",
+        ),
+        (
+            Event::Stopped {
+                target: &target,
+                completed: 0,
+                remaining: &[],
+                pending: Some(profile_install::Pending {
+                    raw: &unknown,
+                    continuation: true,
+                }),
+            },
+            "上一步已核对",
+        ),
+        (
+            Event::Stopped {
+                target: &target,
+                completed: 0,
+                remaining: &[],
+                pending: Some(profile_install::Pending {
+                    raw: &unknown,
+                    continuation: false,
+                }),
+            },
+            "正确用法",
+        ),
+        (
+            Event::BatchComplete {
+                installed: 2,
+                skipped: 0,
+            },
+            "已完成 2 个配置",
+        ),
+        (
+            Event::BatchComplete {
+                installed: 1,
+                skipped: 1,
+            },
+            "安装完成 1 个，跳过 1 个",
+        ),
+    ];
+    for (event, expected) in outcomes {
+        let mut output = Vec::new();
+        render_profile_install_event(event, |tone, message| {
+            output.push(match tone {
+                Some(tone) => crate::output::terminal_line(tone, message, false),
+                None => message.to_owned(),
+            });
+        });
+        let text = output.join("\n");
+        assert!(text.contains(expected), "{text}");
+        assert!(!text.contains("OP-should-not-be-displayed"));
+        assert!(!text.contains('\u{1b}'));
+    }
+    Ok(())
+}
+
+#[test]
+fn returning_to_the_same_agent_install_uses_published_receipt_first() -> TestResult {
+    let offer = batch_offer()?;
+    let Offer::Claude(release, _) = &offer else {
+        return Err("fixture offer must be Claude".into());
+    };
+    let (_tmp, ctx, target, original) =
+        crate::test_support::PluginTargetFixture::pending_for_recommendation(
+            "claude",
+            crate::domain::fingerprint(release.as_ref())?,
+        )?;
+    let settled = crate::operations::recover_before_write(&ctx, None)?.ok_or("pending journal")?;
+    assert_eq!(settled.original.id, original);
+    assert!(settled.succeeded);
+    let result = install_at_profile_in_batch(&ctx, &offer, target.clone())?;
+    assert_eq!(result["status"], "current");
+    assert_eq!(result["profile"], json!(target.directory.canonical));
+    Ok(())
+}

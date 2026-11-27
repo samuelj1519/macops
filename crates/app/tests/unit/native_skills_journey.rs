@@ -120,3 +120,79 @@ fn adopt_batch_keeps_completed_member_and_names_every_unattempted_member() -> Te
     assert!(!ctx.home.join("check-called").exists());
     Ok(())
 }
+
+#[test]
+fn shared_install_uses_verified_runner_once_per_member_and_reports_remaining_work() -> TestResult {
+    let (_tmp, ctx, fallback) = super::super::tests::fixture()?;
+    let installed = installed_recipe(&ctx, &fallback)?;
+    let mut incoming = vec![installed];
+    for wanted in ["beta", "gamma", "last"] {
+        let mut candidate = another(&fallback, wanted);
+        candidate.runner.sha256 = None;
+        incoming.push(candidate);
+    }
+    let plan = plan_recipes(&ctx, "owner/repo", incoming)?;
+    let mut called = Vec::new();
+    let report = plan.run_with(&ctx, false, true, true, |actual, recipe, action, fence| {
+        assert_eq!(actual.home, ctx.home);
+        assert_eq!(action, Action::Install);
+        assert_eq!(recipe.runner.sha256, fallback.runner.sha256);
+        fence.verify()?;
+        called.push(recipe.install_name);
+        Ok(if called.len() == 1 {
+            json!({"journal":{"phase":"succeeded"}})
+        } else {
+            json!({"journal":{"phase":"unknown"}})
+        })
+    })?;
+    assert_eq!(called, ["beta", "gamma"]);
+    assert_eq!(report["skillAction"], "install");
+    assert_eq!(report["source"], "owner/repo");
+    assert_eq!(report["unattempted"], json!(["last"]));
+    assert_eq!(report["incomplete"], true);
+    assert!(disk::payload(&ctx, "alpha")?.join("SKILL.md").exists());
+    Ok(())
+}
+
+#[test]
+fn recommended_upgrade_preserves_fixed_version_if_user_cancels_new_target() -> TestResult {
+    use crate::policy::source_git::ObjectId;
+    let (_tmp, ctx, fallback) = super::super::tests::fixture()?;
+    let recipe = installed_recipe(&ctx, &fallback)?;
+    let adopted = execute(
+        &ctx,
+        recipe.clone(),
+        Action::Adopt,
+        false,
+        true,
+        InputFence::default(),
+    )?;
+    assert_eq!(adopted["journal"]["phase"], "succeeded");
+    let state = fs::read(ctx.state.join("active.json"))?;
+    let before = fs::read(disk::lock_path(&ctx))?;
+    let source = "owner/repo";
+    let current = upgrade_repository_resolving(
+        &ctx,
+        source,
+        |request| {
+            assert_eq!(request.repository.key(), source);
+            ObjectId::parse(&recipe.source.commit)
+        },
+        |_| Err(Error::new("fixture", "unexpected confirmation")),
+    )?;
+    assert_eq!(current["status"], "up-to-date");
+    let cancelled = upgrade_repository_resolving(
+        &ctx,
+        source,
+        |_| ObjectId::parse(&"b".repeat(40)),
+        |message| {
+            assert!(message.contains("alpha") && message.contains("更新技能"));
+            Err(Error::attention("cancelled", "fixture declined"))
+        },
+    );
+    assert_eq!(cancelled.err().ok_or("record changed")?.code, "cancelled");
+    assert_eq!(fs::read(ctx.state.join("active.json"))?, state);
+    assert_eq!(fs::read(disk::lock_path(&ctx))?, before);
+    assert!(!ctx.home.join("check-called").exists());
+    Ok(())
+}
